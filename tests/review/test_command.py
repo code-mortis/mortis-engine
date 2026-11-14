@@ -186,3 +186,101 @@ def test_scan_configuration_is_independent_and_inspectable(repo, profile, monkey
     assert result["review"]["settings"]["effort"] == "low"
     assert result["scan"]["settings"]["concurrency"] == 5
     assert result["scan"]["settings"]["model"] == "scan-model"
+
+
+@pytest.mark.parametrize("progress", [False, True])
+@pytest.mark.parametrize("output_format", ["text", "json"])
+def test_review_progress_is_opt_in_and_elapsed_is_always_on_stderr(
+    repo, profile, monkeypatch, capsys, progress, output_format,
+):
+    monkeypatch.chdir(repo)
+    commit(repo, {"app[red].py": "value = 1\n"})
+    (repo / "app[red].py").write_text("value = 2\n")
+
+    async def send(connection, credentials, request, **kwargs):
+        if "narrative" in request.output_schema["properties"]:
+            return Response(output={"narrative": "Changed value", "groups": []}, usage=Usage(total_tokens=2))
+        from .test_execution import final
+        return final(request)
+
+    monkeypatch.setattr(gateway, "send", send)
+    assert cli.main(["review", "--format", output_format, *(["--progress"] if progress else [])]) == 0
+    out = capsys.readouterr()
+    assert bool("Files in active requests:\n  app[red].py" in out.err) == progress
+    assert bool("Files reviewed: 1/1    Failed: 0" in out.err) == progress
+    assert bool("AI requests running: 1" in out.err) == progress
+    assert bool("Checking findings and writing summary" in out.err) == progress
+    assert "units complete" not in out.err
+    assert re.search(r"Elapsed: \d+\.\d+s\n$", out.err)
+    assert "Elapsed:" not in out.out and "\x1b" not in out.out + out.err
+    if output_format == "json":
+        assert json.loads(out.out)["status"] == "completed"
+
+
+@pytest.mark.parametrize("error,code", [(ValueError("Fixture error"), 1), (KeyboardInterrupt(), 130)])
+def test_failed_and_interrupted_reviews_still_print_elapsed(repo, profile, monkeypatch, capsys, error, code):
+    from mortis_engine.cli import review
+
+    monkeypatch.chdir(repo)
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(review, "review_local", fail)
+    assert cli.main(["review", "--progress"]) == code
+    out = capsys.readouterr()
+    assert "Elapsed:" in out.err and not out.out
+
+
+def test_live_progress_preserves_literal_paths_and_stdout(monkeypatch, capsys):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from mortis_engine.cli import review
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=True, width=120, color_system=None)
+    monkeypatch.setattr(review, "Console", lambda **kwargs: console)
+    with pytest.raises(KeyboardInterrupt), review.progress_display(True) as update:
+        update({"phase": "analysis", "active_paths": ["app[red].py", "other\nfile\t.py\x1b[2J"],
+                "selected_files": 2, "completed_files": 0, "failed_files": 0, "active_requests": 1})
+        print('{"fixture": true}')
+        update({"phase": "postprocess"})
+        raise KeyboardInterrupt
+    assert json.loads(capsys.readouterr().out) == {"fixture": True}
+    output = stream.getvalue()
+    assert "app[red].py" in output and "other\\nfile\\t.py" in output
+    assert "\x1b[2J" not in output
+    assert "Checking findings" in output and "\x1b[?25h" in output
+
+
+@pytest.mark.parametrize("width", [48, 80, 120])
+def test_compact_progress_keeps_file_rows_and_counts_readable(monkeypatch, width):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from mortis_engine.cli import review
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    console = Console(file=StringIO(), force_terminal=True, width=width, height=24, color_system=None,
+                      record=True)
+    monkeypatch.setattr(review, "Console", lambda **kwargs: console)
+    paths = ["src/mortis_engine/cli/review.py", "src/mortis_engine/review/execution.py",
+             "src/mortis_engine/review/service.py", *(f"other{i}.py" for i in range(65))]
+    with review.progress_display(True) as update:
+        update({"phase": "analysis", "active_paths": paths, "selected_files": 68,
+                "completed_files": 12, "failed_files": 1, "active_requests": 2})
+        frame = console.export_text()
+        assert "Files reviewed: 12/68    Failed: 1" in frame
+        assert "AI requests running: 2" in frame
+        assert "Files in active requests:\n" in frame
+        assert all(f"  {path}\n" in frame for path in paths[:3])
+        assert "+65 more files" in frame and "other0.py" not in frame
+        assert "Waiting for AI response" in frame and "units" not in frame
+        update({"phase": "postprocess"})
+        frame = console.export_text()
+        assert "Files reviewed: 12/68    Failed: 1" in frame
+        assert "Checking findings" in frame
+        assert "Files in active requests" not in frame

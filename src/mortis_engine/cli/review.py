@@ -3,6 +3,13 @@
 import json
 import re
 import sys
+import time
+from contextlib import contextmanager, nullcontext
+
+from rich.console import Console, Group
+from rich.live import Live
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.text import Text
 
 from mortis_engine import config
 from mortis_engine.history import History
@@ -31,6 +38,46 @@ def selected(args):
 
 def terminal(text):
     return re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", "", text)
+
+
+@contextmanager
+def progress_display(enabled):
+    if not enabled:
+        yield lambda value: None
+        return
+    console = Console(stderr=True)
+    display = Progress(SpinnerColumn(), TextColumn("{task.description}", markup=False), TimeElapsedColumn(),
+                       console=console, auto_refresh=False)
+    task = display.add_task("Preparing review…", total=None)
+    coverage = ""
+    with (Live(display, console=console, transient=True, redirect_stdout=False)
+          if console.is_interactive else nullcontext()) as live:
+
+        def update(value):
+            nonlocal coverage
+            phase = value["phase"]
+            lines = []
+            if phase == "analysis":
+                coverage = f"Files reviewed: {value['completed_files']}/{value['selected_files']}    Failed: {value['failed_files']}"
+                description = "Reviewing code"
+                paths = [terminal(path).replace("\n", "\\n").replace("\t", "\\t") for path in value["active_paths"]]
+                lines.append(f"AI requests running: {value['active_requests']}")
+                if paths:
+                    lines.extend(["", "Files in active requests:", *(f"  {path}" for path in paths[:3])])
+                    if len(paths) > 3:
+                        lines.append(f"  +{len(paths) - 3} more files")
+                    lines.extend(["", "Waiting for AI response…"])
+            else:
+                description = "Building code graph…" if phase == "graph" else "Checking findings and writing summary…"
+            if coverage:
+                lines.insert(0, coverage)
+            display.update(task, description=description)
+            if live is not None:
+                live.update(Group(display, Text("\n".join(lines))), refresh=True)
+            else:
+                print("\n".join([description, *lines]), file=sys.stderr, flush=True)
+
+        yield update
 
 
 def render(result):
@@ -83,10 +130,16 @@ def run(args):
     def announce(count, model):
         print(terminal(f"Reviewing {count} file(s) with {name!r} / {model}…"), file=sys.stderr, flush=True)
 
-    result = review_local(args.repo, mode=mode, base=args.base, head=args.head or "HEAD",
-                          connection=config.connection(name, profile), get_credentials=lambda: config.credentials(profile),
-                          on_plan=announce, profile=name, effort=args.effort, graph=args.graph, resume=args.resume)
-    print(json.dumps(result, indent=2) if args.format == "json" else render(result))
+    started = time.monotonic()
+    try:
+        with progress_display(args.progress) as progress:
+            result = review_local(args.repo, mode=mode, base=args.base, head=args.head or "HEAD",
+                                  connection=config.connection(name, profile), get_credentials=lambda: config.credentials(profile),
+                                  on_plan=announce, profile=name, effort=args.effort, graph=args.graph, resume=args.resume,
+                                  progress=progress)
+        print(json.dumps(result, indent=2) if args.format == "json" else render(result))
+    finally:
+        print(f"Elapsed: {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
     return 1 if result["status"] == "failed" else 2 if result["status"] == "partial" or result["coverage"]["waived"] else 0
 
 
@@ -106,5 +159,6 @@ def add_parser(commands):
     mode.add_argument("--all", action="store_true", help="Review all eligible tracked files at --head")
     parser.add_argument("--head", help="Branch, tag or commit (default: HEAD)")
     parser.add_argument("--graph", action="store_true", help="Include related source from the isolated local code graph parser")
+    parser.add_argument("--progress", action="store_true", help="Show live review progress and active file names on stderr")
     options(parser)
     parser.set_defaults(run=run)

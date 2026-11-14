@@ -12,6 +12,7 @@ dependencies = [
   "jsonschema>=4.23,<5",
   "keyring>=25,<26",
   "pydantic>=2.8,<3",
+  "rich>=14,<15",
   "tomli-w>=1.2,<2",
 ]
 
