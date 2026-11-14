@@ -8,8 +8,14 @@ from .errors import ReviewStopped
 
 
 def sanitize(value, credentials, stopped=lambda: False):
-    if credentials.get("redaction_rules"):
-        raise ValueError("Historical secret redaction rules are unsupported; request withheld")
+    rules = credentials.get("redaction_rules", [])
+    redaction_key = None
+    if rules:
+        from mortis_engine.security_scans.engine import redact_secrets
+        from mortis_engine.security_scans.scanner import identity_key
+
+        redact_secrets("", [], rules, stopped, key=b"")
+        redaction_key = identity_key(create=False)
     values = sorted({value for value in (credentials.get("api_key", ""),
                     *credentials.get("extra_headers", {}).values(), *credentials.get("redaction_values", []))
                     if value}, key=len, reverse=True)
@@ -19,6 +25,10 @@ def sanitize(value, credentials, stopped=lambda: False):
             raise ReviewStopped("Review stopped before sanitization")
         if isinstance(item, str):
             text = item
+            if rules:
+                from mortis_engine.security_scans.engine import redact_secrets
+
+                text = redact_secrets(text, values, rules, stopped, key=redaction_key)
             for secret in values:
                 replacement = "\n".join("[redacted]" for _ in secret.split("\n"))
                 text = text.replace(secret, replacement)
@@ -47,3 +57,15 @@ def quote_matches(source, start_line, end_line, quote):
     original = "".join(source.splitlines(keepends=True)[start_line - 1:end_line])
     rendered = "\n".join(source.splitlines()[start_line - 1:end_line])
     return quote in original or quote in rendered
+
+
+def evidence_feedback(paths, field):
+    return {"kind": "evidence", "field": field, "required_paths": sorted(paths),
+            "reason": "These complete files are already supplied, including empty files. "
+                      "Use their source blocks and request only absent paths."}
+
+
+def unavailable_evidence_feedback(paths, field):
+    return {"field": field, "required_paths": sorted(paths),
+            "reason": "These paths are excluded or unsupported by the configured review scope. "
+                      "Use permitted sources or remain uncertain and leave requested sources empty."}

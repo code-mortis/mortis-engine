@@ -1,5 +1,11 @@
-"""Review two commits in a local Git repository."""
+"""Analysis of local Git revisions and working trees."""
 
-from .service import review_commits
+# Public library functions are loaded on demand so gateway-only callers need no review runtime.
+def __getattr__(name):
+    if name in {"review_commits", "review_local"}:
+        from . import service
+        return getattr(service, name)
+    raise AttributeError(name)
 
-__all__ = ["review_commits"]
+
+__all__ = ["review_commits", "review_local"]

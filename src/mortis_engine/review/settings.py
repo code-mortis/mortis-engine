@@ -71,10 +71,7 @@ class RepoSettings(RunLimits):
         return value.strip() if isinstance(value, str) else value
 
 
-UNSUPPORTED = {"summary_diagram_enabled", "ai_fix_prompts_enabled", "auto_resolve"}
-
-
-def load(repo, env, base_sha):
+def _tables(repo, env, base_sha):
     entry = source.git(repo, env, "ls-tree", "-z", "-l", base_sha, "--", "mortis.toml")
     value = {}
     if entry:
@@ -86,12 +83,28 @@ def load(repo, env, base_sha):
             value = tomllib.loads(source.read_source(repo, env, base_sha, "mortis.toml"))
         except tomllib.TOMLDecodeError:
             raise ValueError("Trusted-base mortis.toml contains invalid TOML.") from None
-        if set(value) == {"review"}:
-            value = value["review"]
         if not isinstance(value, dict):
             raise ValueError("Review configuration must be a TOML table.")
-    options = RepoSettings.model_validate(value).model_dump()
-    active = [key for key in UNSUPPORTED if options[key]]
-    if active:
-        raise ValueError("This CLI reviews initial changes only. Unsupported active settings: " + ", ".join(sorted(active)))
-    return options
+    if "review" in value or "scan" in value:
+        if set(value) - {"review", "scan"} or any(not isinstance(section, dict) for section in value.values()):
+            raise ValueError("Use [review] and [scan] tables for repository settings.")
+        return value.get("review", {}), value.get("scan", {})
+    return value, {}
+
+
+def load(repo, env, base_sha):
+    review, _ = _tables(repo, env, base_sha)
+    return RepoSettings.model_validate(review).model_dump()
+
+
+def load_scan(repo, env, sha):
+    from mortis_engine.security_scans.service import ScanOptions
+
+    review, scan = _tables(repo, env, sha)
+    shared = RepoSettings.model_validate(review)
+    scan = dict(scan)
+    model = scan.pop("model", "") or shared.model
+    if not isinstance(model, str) or len(model) > 150:
+        raise ValueError("Scan model must be a model ID of at most 150 characters.")
+    return {**ScanOptions.model_validate({"language": shared.language, "exclusions": shared.exclusions,
+                                         **scan}).model_dump(), "model": model.strip()}

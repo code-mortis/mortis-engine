@@ -190,6 +190,8 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
                                        for source in sources]
         supplied = context.sanitize(payload, credentials, stopped)
         instructions = INSTRUCTIONS
+        if options.get("review_mode") == "all":
+            instructions = instructions.replace("introduced by this PR", "present at this revision")
         if source_code_policy:
             instructions += (
                 " Select precise finding start_line/end_line bounds; do not return existing_code. "
@@ -547,7 +549,7 @@ def _report(plan, prepared, outcomes, *, tokens, status=None):
 
 
 def run(repo, env, plan, connection, options, credentials, *, stopped=lambda: False, progress=lambda value: None,
-        deadline=None):
+        deadline=None, session=None, graph_by_path=None):
     from .execution import execute
 
     def preparing_stopped():
@@ -556,7 +558,7 @@ def run(repo, env, plan, connection, options, credentials, *, stopped=lambda: Fa
         return stopped()
 
     try:
-        prepared = prepare_batches(plan, connection, options, credentials, stopped=preparing_stopped)
+        prepared = prepare_batches(plan, connection, options, credentials, stopped=preparing_stopped, graph_by_path=graph_by_path)
     except (TimeoutError, ReviewStopped) as exc:
         code = "deadline" if isinstance(exc, TimeoutError) else "cancelled"
         outcomes = {unit.key: {"status": "failed", "error": code} for unit in plan.units}
@@ -564,4 +566,4 @@ def run(repo, env, plan, connection, options, credentials, *, stopped=lambda: Fa
         report["usage"] = []
         report["summary"]["reserved_tokens"] = 0
         return status, report, comments
-    return execute(repo, env, plan, prepared, credentials, stopped=stopped, progress=progress, deadline=deadline)
+    return execute(repo, env, plan, prepared, credentials, stopped=stopped, progress=progress, deadline=deadline, session=session)

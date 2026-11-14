@@ -7,8 +7,9 @@ from keyring.errors import KeyringError
 from pydantic import ValidationError
 
 from mortis_engine import __version__
+from mortis_engine.llm_http import InferenceError
 
-from . import config, connect, review
+from . import analysis, config, connect, review
 
 
 def main(argv=None):
@@ -18,6 +19,7 @@ def main(argv=None):
     connect.add_parser(commands)
     review.add_parser(commands)
     config.add_parser(commands)
+    analysis.add_parser(commands)
     args = parser.parse_args(argv)
     try:
         return args.run(args) or 0
@@ -26,7 +28,7 @@ def main(argv=None):
         print("Invalid configuration. " + "; ".join(errors), file=sys.stderr)
     except KeyringError:
         print("The OS credential vault could not be accessed. Use environment variable references or unlock the vault.", file=sys.stderr)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, InferenceError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
     except (KeyboardInterrupt, EOFError):
         print("Command cancelled.", file=sys.stderr)

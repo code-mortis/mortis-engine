@@ -22,9 +22,13 @@ def show(args):
         with source.local_repository(args.repo or ".") as (repo, env):
             sha = source.resolve_commit(repo, env, base)
             options = settings.load(repo, env, sha)
+            scan = settings.load_scan(repo, env, sha)
         if not options["model"] and len(connections) == 1:
             options["model"] = next(iter(connections.values()))["model"]
         output["review"] = {"base_sha": sha, "settings": options}
+        if not scan["model"] and len(connections) == 1:
+            scan["model"] = next(iter(connections.values()))["model"]
+        output["scan"] = {"sha": sha, "settings": scan}
     print(json.dumps(output, indent=2))
 
 

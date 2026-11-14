@@ -1,0 +1,313 @@
+import pytest
+
+from mortis_engine.review import snapshots, source
+
+from .git_helpers import commit, git
+
+
+def contents(value, path):
+    return source.read_source(value.repo, value.env, value.head_sha, path)
+
+
+def test_worktree_includes_staged_unstaged_and_untracked_with_immutable_sources(repo, tmp_path):
+    original = commit(repo, {"app.py": "original\n", "removed.py": "gone\n"})
+    (repo / "app.py").write_text("staged\n")
+    git(repo, "add", "app.py")
+    (repo / "app.py").write_text("working\n")
+    (repo / "extra.py").write_text("untracked\n")
+    (repo / "removed.py").unlink()
+    index = (repo / ".git/index").read_bytes()
+    objects_before = sorted(p.relative_to(repo / ".git/objects") for p in (repo / ".git/objects").rglob("*") if p.is_file())
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert value.base_sha == value.settings_sha == value.merge_base == original
+        assert contents(value, "app.py") == "working\n"
+        assert contents(value, "extra.py") == "untracked\n"
+        (repo / "app.py").write_text("later mutation\n")
+        assert contents(value, "app.py") == "working\n"
+        with pytest.raises(ValueError, match="missing"):
+            contents(value, "removed.py")
+    assert (repo / ".git/index").read_bytes() == index
+    assert git(repo, "rev-parse", "HEAD") == original
+    assert objects_before == sorted(p.relative_to(repo / ".git/objects") for p in (repo / ".git/objects").rglob("*") if p.is_file())
+
+
+def test_staged_snapshot_uses_index_only_and_retains_renames(repo):
+    commit(repo, {"old.py": "original\n", "keep.py": "keep\n"})
+    git(repo, "mv", "old.py", "new.py")
+    (repo / "new.py").write_text("staged\n")
+    git(repo, "add", "new.py")
+    (repo / "new.py").write_text("working\n")
+    (repo / "untracked.py").write_text("new\n")
+    with snapshots.snapshot(repo, mode="staged") as value:
+        assert contents(value, "new.py") == "staged\n"
+        assert contents(value, "keep.py") == "keep\n"
+        for missing in ("old.py", "untracked.py"):
+            with pytest.raises(ValueError, match="missing"):
+                contents(value, missing)
+
+
+def test_full_tree_uses_target_ref_and_empty_ancestor(repo):
+    base = commit(repo, {"main.py": "main\n"})
+    git(repo, "checkout", "-qb", "feature")
+    target = commit(repo, {"feature.py": "feature\n"})
+    (repo / "feature.py").write_text("uncommitted\n")
+    with snapshots.snapshot(repo, mode="all", head="feature", base="main") as value:
+        assert value.settings_sha == base
+        assert value.base_sha == value.merge_base
+        assert source.merge_base(value.repo, value.env, value.base_sha, value.head_sha) == value.base_sha
+        assert contents(value, "main.py") == "main\n"
+        assert contents(value, "feature.py") == "feature\n"
+        assert source.git(value.repo, value.env, "ls-tree", value.base_sha) == ""
+        assert source.git(value.repo, value.env, "rev-parse", value.head_sha + "^{tree}").strip() == git(repo, "rev-parse", target + "^{tree}")
+
+
+def test_snapshot_cache_retains_synthetic_objects_without_mutating_original(repo, tmp_path):
+    commit(repo, {"app.py": "original\n"})
+    (repo / "app.py").write_text("snapshot\n")
+    cache = tmp_path / "private-cache"
+    with snapshots.snapshot(repo, mode="worktree", object_cache=cache) as value:
+        pinned = value.head_sha
+        with source.local_repository(repo, object_cache=cache) as (other, other_env):
+            assert source.read_source(other, other_env, pinned, "app.py") == "snapshot\n"
+    (repo / "app.py").write_text("later\n")
+    with source.local_repository(repo, object_cache=cache) as (isolated, env):
+        assert source.resolve_commit(isolated, env, pinned) == pinned
+        assert source.read_source(isolated, env, pinned, "app.py") == "snapshot\n"
+    assert cache.stat().st_mode & 0o777 == 0o700
+
+
+def test_untracked_exclusions_happen_before_source_reads_and_git_ignores_are_respected(repo, monkeypatch):
+    commit(repo, {"app.py": "x=1\n", ".gitignore": "ignored.py\n"})
+    for name in (".env", "AGENTS.md", "ssh-private-key.py", "ignored.py", "info-excluded.py"):
+        (repo / name).write_text("must not be ingested\n")
+    (repo / ".git/info/exclude").write_text("info-excluded.py\n")
+    seen = []
+    original_read = snapshots._worktree_bytes
+
+    def observed_read(root, path):
+        seen.append(path)
+        return original_read(root, path)
+
+    monkeypatch.setattr(snapshots, "_worktree_bytes", observed_read)
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "app.py") == "x=1\n"
+        assert set(seen).isdisjoint({".env", "AGENTS.md", "ssh-private-key.py", "ignored.py", "info-excluded.py"})
+        assert {e["path"] for e in value.excluded} >= {".env", "AGENTS.md", "ssh-private-key.py"}
+        for path in (".env", "AGENTS.md", "ssh-private-key.py", "ignored.py", "info-excluded.py"):
+            with pytest.raises(ValueError):
+                contents(value, path)
+
+
+def test_filters_hooks_fsmonitor_and_environment_do_not_execute(repo, tmp_path, monkeypatch):
+    commit(repo, {"app.py": "initial\n", ".gitattributes": "*.py filter=unsafe\n"})
+    marker = tmp_path / "executed"
+    for option in ("filter.unsafe.clean", "filter.unsafe.smudge", "core.fsmonitor", "diff.external"):
+        git(repo, "config", option, f"touch {marker}")
+    hook = repo / ".git/hooks/post-checkout"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "not-the-index"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", f"touch {marker}")
+    (repo / "app.py").write_text("working\n")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "app.py") == "working\n"
+    assert not marker.exists()
+
+
+def test_symlink_targets_are_never_read(repo, tmp_path):
+    commit(repo, {"app.py": "initial\n"})
+    outside = tmp_path / "outside"
+    outside.write_text("outside secret\n")
+    (repo / "app.py").unlink()
+    (repo / "app.py").symlink_to(outside)
+    with snapshots.snapshot(repo, mode="worktree") as value, pytest.raises(ValueError, match="regular"):
+        contents(value, "app.py")
+
+
+def test_symlink_directory_components_reject(repo, tmp_path):
+    commit(repo, {"dir/app.py": "initial\n"})
+    (repo / "dir/app.py").unlink()
+    (repo / "dir").rmdir()
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "app.py").write_text("outside secret\n")
+    (repo / "dir").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError), snapshots.snapshot(repo, mode="worktree"):
+        pass
+
+
+def test_worktree_subdirectory_and_linked_worktree_use_correct_root(repo, tmp_path):
+    commit(repo, {"dir/app.py": "initial\n"})
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-qb", "feature", str(linked))
+    (linked / "dir/app.py").write_text("linked working\n")
+    with snapshots.snapshot(linked / "dir", mode="worktree") as value:
+        assert contents(value, "dir/app.py") == "linked working\n"
+
+
+def test_index_conflicts_fail_explicitly(repo):
+    commit(repo, {"app.py": "original\n"})
+    blob = git(repo, "rev-parse", "HEAD:app.py")
+    import subprocess
+    subprocess.run(["git", "update-index", "--index-info"], cwd=repo,
+                   input=f"0 {'0' * 40}\tapp.py\n100644 {blob} 1\tapp.py\n100644 {blob} 2\tapp.py\n".encode(), check=True)
+    with pytest.raises(ValueError, match="unmerged"), snapshots.snapshot(repo, mode="staged"):
+        pass
+
+
+def test_private_cache_permissions_are_required(repo, tmp_path):
+    commit(repo, {"app.py": "initial\n"})
+    cache = tmp_path / "public-cache"
+    cache.mkdir(mode=0o755)
+    with pytest.raises(ValueError, match="private"), snapshots.snapshot(repo, mode="worktree", object_cache=cache):
+        pass
+
+
+def test_split_index_is_read_from_private_copy(repo):
+    commit(repo, {"app.py": "initial\n"})
+    git(repo, "update-index", "--split-index")
+    index = (repo / ".git/index").read_bytes()
+    (repo / "app.py").write_text("working\n")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "app.py") == "working\n"
+    assert (repo / ".git/index").read_bytes() == index
+
+
+def test_sparse_checkout_omissions_preserve_committed_files(repo):
+    commit(repo, {"keep/app.py": "keep\n", "omitted/app.py": "omitted\n"})
+    git(repo, "sparse-checkout", "init", "--cone")
+    git(repo, "sparse-checkout", "set", "keep")
+    assert not (repo / "omitted/app.py").exists()
+    (repo / "keep/app.py").write_text("modified\n")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "keep/app.py") == "modified\n"
+        assert contents(value, "omitted/app.py") == "omitted\n"
+
+
+def test_commit_comparison_preserves_merge_base_and_ref_inputs(repo):
+    ancestor = commit(repo, {"app.py": "ancestor\n"})
+    git(repo, "checkout", "-qb", "feature")
+    head = commit(repo, {"app.py": "feature\n"})
+    git(repo, "checkout", "main")
+    base = commit(repo, {"main.py": "main-only\n"})
+    with snapshots.snapshot(repo, mode="commits", base="main", head="feature") as value:
+        assert value.base_sha == value.settings_sha == base
+        assert value.head_sha == head
+        assert value.merge_base == ancestor
+
+
+@pytest.mark.parametrize("arguments", [
+    {"mode": "unknown"}, {"mode": "commits"},
+    {"mode": "worktree", "base": "main"}, {"mode": "staged", "head": "other"},
+])
+def test_invalid_mode_combinations_fail_before_snapshot(repo, arguments):
+    commit(repo, {"app.py": "initial\n"})
+    with pytest.raises(ValueError), snapshots.snapshot(repo, **arguments):
+        pass
+
+
+def test_unchanged_tracked_bodies_are_not_reingested(repo, monkeypatch):
+    commit(repo, {"unchanged.py": "same\n", "changed.py": "old\n"})
+    (repo / "changed.py").write_text("new\n")
+    seen = []
+    read = snapshots._worktree_bytes
+
+    def observed(root, path):
+        seen.append(path)
+        return read(root, path)
+
+    monkeypatch.setattr(snapshots, "_worktree_bytes", observed)
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "unchanged.py") == "same\n"
+        assert contents(value, "changed.py") == "new\n"
+    assert seen == ["changed.py"]
+
+
+def test_excluded_file_rename_preserves_origin_for_planner_scope(repo):
+    from mortis_engine.review import planning, settings
+
+    commit(repo, {"private-key.py": "hidden = 'original'\n"})
+    (repo / "private-key.py").rename(repo / "public.py")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        options = settings.load(value.repo, value.env, value.settings_sha)
+        plan = planning.plan_review(value.repo, value.env, value.base_sha, value.head_sha, value.merge_base, options, lambda: False)
+        assert not plan.selected
+        assert any(item.get("old_path") == "private-key.py" for item in plan.exclusions)
+
+
+def test_worktree_includes_changes_hidden_by_assume_unchanged(repo):
+    commit(repo, {"app.py": "original\n"})
+    git(repo, "update-index", "--assume-unchanged", "app.py")
+    index = (repo / ".git/index").read_bytes()
+    (repo / "app.py").write_text("hidden modification\n")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "app.py") == "hidden modification\n"
+    assert (repo / ".git/index").read_bytes() == index
+
+
+def test_object_store_and_cache_paths_support_unicode_spaces_and_colons(tmp_path):
+    repository = tmp_path / "proyecto ñ: con espacios"
+    repository.mkdir()
+    git(repository, "init", "-qb", "main")
+    commit(repository, {"app.py": "original\n"})
+    (repository / "app.py").write_text("working\n")
+    cache = tmp_path / "caché: privado"
+    with snapshots.snapshot(repository, mode="worktree", object_cache=cache) as value:
+        pinned = value.head_sha
+        assert contents(value, "app.py") == "working\n"
+    with source.local_repository(repository, object_cache=cache) as (repo, env):
+        assert source.read_source(repo, env, pinned, "app.py") == "working\n"
+
+
+def test_trusted_custom_exclusions_block_reads_and_snapshot_cache_ingestion(repo, tmp_path, monkeypatch):
+    import zlib
+
+    configuration = '[review]\nexclusions = "skip.py"\n[review.rules]\nexclude = ["blocked/**"]\n'
+    commit(repo, {"mortis.toml": configuration, "skip.py": "old excluded reference\n", "app.py": "old\n"})
+    (repo / "skip.py").write_text("must-never-be-cached-modified-excluded\n")
+    (repo / "blocked").mkdir()
+    (repo / "blocked/new.py").write_text("must-never-be-cached-untracked-excluded\n")
+    (repo / "app.py").write_text("new\n")
+    (repo / "mortis.toml").write_text('[review]\nexclusions = ""\n')
+    original = snapshots._worktree_bytes
+    reads = []
+
+    def observed(root, path):
+        reads.append(path)
+        return original(root, path)
+
+    monkeypatch.setattr(snapshots, "_worktree_bytes", observed)
+    cache = tmp_path / "cache"
+    with snapshots.snapshot(repo, mode="worktree", object_cache=cache) as value:
+        assert contents(value, "app.py") == "new\n"
+        assert contents(value, "skip.py") == "old excluded reference\n"
+        assert {"skip.py", "blocked/new.py"}.isdisjoint(reads)
+        assert {item["path"] for item in value.excluded} >= {"skip.py", "blocked/new.py"}
+        assert all(b"must-never-be-cached" not in zlib.decompress(path.read_bytes())
+                   for path in cache.glob("??/*") if path.is_file())
+
+
+def test_subsecond_worktree_change_is_retained_when_git_stat_diff_omits_it(repo, monkeypatch):
+    commit(repo, {"app.py": "initial\n", "same.py": "unchanged\n"})
+    (repo / "app.py").write_text("working\n")
+    git_command = source.git
+    reads = []
+    read = snapshots._worktree_bytes
+
+    def git_without_stat_changes(directory, env, *args, **kwargs):
+        if "diff-files" in args:
+            return ""
+        return git_command(directory, env, *args, **kwargs)
+
+    def observed(root, path):
+        reads.append(path)
+        return read(root, path)
+
+    monkeypatch.setattr(source, "git", git_without_stat_changes)
+    monkeypatch.setattr(snapshots, "_worktree_bytes", observed)
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "app.py") == "working\n"
+        assert contents(value, "same.py") == "unchanged\n"
+    assert reads == ["app.py"]

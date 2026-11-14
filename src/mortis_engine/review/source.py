@@ -1,5 +1,6 @@
 """Read pinned local Git objects through an isolated, credential-free Git repository."""
 
+import json
 import os
 import re
 import shutil
@@ -13,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from mortis_engine.review.errors import ReviewStopped
 
 
-def git(directory, env, *args, stopped=lambda: False, timeout=180):
+def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=None):
     executable = shutil.which("git", path=os.pathsep.join(
         entry for entry in env.get("PATH", os.defpath).split(os.pathsep) if Path(entry).is_absolute()))
     if executable is None:
@@ -22,8 +23,11 @@ def git(directory, env, *args, stopped=lambda: False, timeout=180):
                "-c", "protocol.allow=never", "-c", "credential.helper=", *args]
     if stopped():
         raise ReviewStopped("The review was cancelled.")
-    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(command, cwd=directory, env=env, stdin=subprocess.DEVNULL,
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as supplied:
+        if input_bytes is not None:
+            supplied.write(input_bytes)
+            supplied.seek(0)
+        process = subprocess.Popen(command, cwd=directory, env=env, stdin=supplied if input_bytes is not None else subprocess.DEVNULL,
                                    stdout=output, stderr=errors, start_new_session=True)
         deadline = time.monotonic() + timeout
         try:
@@ -145,8 +149,8 @@ def _regular_tree(path):
 
 
 @contextmanager
-def local_repository(path):
-    """Ignore local config, hooks, replacements, alternates and worktree content."""
+def local_repository(path, *, object_cache=None):
+    """Ignore local config and hooks, with new objects confined to private storage."""
     git_dir = find_repository(path)
     if git_dir is None:
         raise ValueError("Run mortis review inside a local Git repository or pass --repo.")
@@ -171,7 +175,12 @@ def local_repository(path):
         isolated = Path(tmp)
         git(isolated, env, "init", "--quiet", "--bare", "--template=", "--object-format=sha1")
         # Object access bypasses repository config, including promisor remotes and filters.
-        env["GIT_OBJECT_DIRECTORY"] = str(objects)
+        env["GIT_OBJECT_DIRECTORY"] = str(isolated / "objects")
+        alternate_objects = [objects]
+        cache = _object_cache(object_cache) if object_cache is not None else None
+        if cache is not None:
+            alternate_objects.append(cache)
+        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = os.pathsep.join(json.dumps(str(p), ensure_ascii=False) for p in alternate_objects)
         refs = common / "refs"
         _regular_tree(refs)
         total, count = 0, 0
@@ -194,7 +203,11 @@ def local_repository(path):
                 total += len(value)
                 (isolated / name).write_bytes(value)
         (isolated / "HEAD").write_bytes(_read_local(git_dir / "HEAD", 4096))
-        yield isolated, env
+        try:
+            yield isolated, env
+        finally:
+            if cache is not None:
+                _retain_objects(isolated / "objects", cache)
 
 
 def resolve_commit(repo, env, ref):
@@ -217,3 +230,44 @@ def merge_base(repo, env, base_sha, head_sha):
     if not re.fullmatch(r"[0-9a-f]{40}", result):
         raise ValueError("The commits require a local common ancestor.")
     return result
+
+
+def _object_cache(path):
+    """A private loose-object cache retains local snapshots across invocations."""
+    path = Path(path).expanduser().absolute()
+    if path.is_symlink():
+        raise ValueError("The snapshot object cache cannot be a symbolic link.")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+        raise ValueError("The snapshot object cache requires a private directory (mode 0700).")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise ValueError("The snapshot object cache must belong to the current user.")
+    _regular_tree(path)
+    if (path / "info/alternates").exists():
+        raise ValueError("The snapshot object cache cannot contain alternates.")
+    return path
+
+
+def _retain_objects(objects, cache):
+    for directory in objects.iterdir():
+        if not re.fullmatch(r"[0-9a-f]{2}", directory.name):
+            continue
+        for original in directory.iterdir():
+            if not re.fullmatch(r"[0-9a-f]{38}", original.name):
+                raise ValueError("Invalid object in the private snapshot store.")
+            value = _read_local(original, 21_000_000)
+            target_dir = cache / directory.name
+            target_dir.mkdir(mode=0o700, exist_ok=True)
+            target = target_dir / original.name
+            if target.exists():
+                if _read_local(target, 21_000_000) != value:
+                    raise ValueError("Conflicting object in the private snapshot store.")
+                continue
+            with tempfile.NamedTemporaryFile(dir=target_dir, delete=False) as output:
+                temporary = Path(output.name)
+                output.write(value)
+            try:
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)

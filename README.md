@@ -1,6 +1,6 @@
 # Mortis Engine
 
-Review changes between two local Git commits with your own AI connection. Mortis sends the selected source and diffs to the configured model and reports findings with verified file and line references.
+Review local Git changes, verify findings and scan repository security with your saved AI connection. Mortis sends eligible source and diffs to that connection and checks reported evidence against the pinned Git revisions.
 
 ## Install from this repository
 
@@ -11,7 +11,19 @@ mortis --help
 
 Requires Python 3.12–3.14. `uv` can provide the compatible Python interpreter. To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`. PyPI publication is a later release step.
 
-## Review two commits
+## Choose what to review
+
+| Command | Source |
+| --- | --- |
+| `mortis review` | Current working tree against HEAD, including staged, unstaged and eligible untracked files |
+| `mortis review --staged` | Git index against HEAD |
+| `mortis review --base main --head feat/update-opentui` | Changes from the common ancestor through the named branch tip |
+| `mortis review --all` | Every eligible tracked file in the current commit |
+| `mortis review --all --head feat/update-opentui` | Every eligible tracked file in that branch's latest local commit |
+
+Use `--effort low`, `--effort medium` or `--effort high` to override the repository setting for one run. Local working-tree and staged reviews use an immutable snapshot and leave your Git index, objects and refs untouched. Working-tree reviews require an initial commit. Ignored untracked files, credentials and excluded files are outside review scope.
+
+## Review a branch
 
 From your working branch, run:
 
@@ -45,9 +57,45 @@ rule = "Check that exceptions preserve committed data."
 merge_system_rule = true
 ```
 
-Use `mortis config show --base main` to inspect the effective settings. The base commit controls the rules, file exclusions, background context and optional model override. A profile supplies the endpoint and credentials. The initial review uses the analysis token budget. Separate budgets for later assessment, verification and summaries are accepted as configuration.
+Use `mortis config show --base main` to inspect the effective settings. The base commit controls the rules, file exclusions, background context and optional model override. A profile supplies the endpoint and credentials. Analysis, candidate assessment, fix verification and summaries each use their configured token budget. Use `assessment_token_budget`, `verification_token_budget`, `summary_token_budget` and `summary_timeout_seconds` to configure follow-up stages. `summary_diagram_enabled` enables a structured diagram and `ai_fix_prompts_enabled` includes repair prompts for open findings. For working-tree, staged and full-tree reviews, Mortis reads settings from the selected committed revision.
 
-The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed only when all assigned units pass validation. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Exit status 0 indicates completed analysis or no eligible changes, 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
+Mortis assesses candidates before reporting confirmed findings and generates a summary of the reviewed changes. The JSON report retains rejected and uncertain candidates. With `auto_resolve = true`, later reviews of the same scope check earlier open findings against both revisions. A verified fix can update the current local status. Earlier reports remain available by ID.
+
+The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed only when all assigned units pass validation. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Progress goes to stderr. Exit status 0 indicates completed analysis or no eligible changes, 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
+
+## Saved results and follow-up commands
+
+```sh
+mortis runs
+mortis runs RUN_ID
+mortis verify --run RUN_ID --ref HEAD
+mortis summary --run RUN_ID
+mortis background --ref HEAD
+```
+
+`mortis runs` lists IDs for the current repository. Replace `RUN_ID` with an ID from that list. Verification checks the earlier finding against current source. Background prints a proposed project description. To use it in reviews, save it under `[review].background` in the trusted configuration.
+
+Run history, task reservations and retained snapshot objects live under `$XDG_STATE_HOME/mortis` (default `~/.local/state/mortis`). These private files can contain reviewed source. Use `mortis review --resume RUN_ID` to continue an interrupted review with its pinned revisions and saved connection. Each workflow accepts `--resume`. Validated task results can be reused. A request interrupted after dispatch retains its reservation with unknown usage.
+
+## Scan security
+
+```sh
+mortis scan --ref HEAD
+mortis scan --ref main --format json
+```
+
+The scan requires Trivy 0.76.0 on PATH. Trivy refreshes its advisory database, then checks dependencies, configuration and secrets against an isolated local snapshot. Semantic analysis, candidate assessment and verification use the selected AI profile. Repository source is excluded from the Trivy update request. For a supported npm CVE without an established fixed version, verification can look up the CVE ID in GitHub's public advisory database. A partial scan keeps its coverage and findings and reports an unavailable grade.
+
+An optional `[scan]` table in `mortis.toml` accepts `model`, `effort`, `concurrency`, `language`, `exclusions`, `timeout_seconds`, `token_budget`, `assessment_token_budget` and `verification_token_budget`. Scan defaults use high effort and four concurrent file requests. `mortis config show` displays effective review and scan settings. After rotating or revoking a reported secret, pass `--acknowledge-rotation FINDING_ID` on the next scan of that scope so Mortis can verify removal. Use the ID printed with the original finding.
+
+## Optional code graph
+
+```sh
+mortis graph build
+mortis review --base main --graph
+```
+
+Docker builds a separate parser image with the pinned grammars. During review the parser receives bounded file contents at one revision. It runs without network or host mounts. A review records unavailable graph context and can continue using its normal source evidence.
 
 ## Connect interactively
 
@@ -146,4 +194,4 @@ uv run ruff check .
 uv build
 ```
 
-The `mortis_engine.cli` package contains terminal commands. The reusable `mortis_engine.review.review_commits` function accepts a repository path, base, head, connection and a credential loader, and returns the same versioned dictionary as the JSON report. Security scans are the next milestone in `PLAN.md`.
+The `mortis_engine.cli` package contains terminal commands. Python callers can import `review_local` or `review_commits` from `mortis_engine.review` and use `mortis_engine.operations.run` for verification, summaries, background and scans. These entry points return the same versioned dictionaries as the CLI JSON output.

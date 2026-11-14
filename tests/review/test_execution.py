@@ -182,7 +182,7 @@ def test_sessions_are_fresh_per_run_and_stable_during_repair(monkeypatch):
 
 @pytest.mark.parametrize("unknown,tokens,expected", [(False, 0, 3), (False, None, 3), (True, None, 1), (True, 0, 1), (False, 1, 1)])
 def test_retries_are_bounded_and_require_known_zero_consumption(monkeypatch, unknown, tokens, expected):
-    import mortis_engine.review.execution as execution
+    from mortis_engine import llm_http
 
     calls, delays = [], []
 
@@ -196,7 +196,7 @@ def test_retries_are_bounded_and_require_known_zero_consumption(monkeypatch, unk
         awaitable.close()
 
     monkeypatch.setattr(gateway, "send", send)
-    monkeypatch.setattr(execution.llm_http, "_bounded", bounded)
+    monkeypatch.setattr(llm_http, "_bounded", bounded)
     state, report, _ = engine.run(None, {}, plan(), CONNECTION, OPTIONS, {})
     assert state == "failed" and len(calls) == expected and len(delays) == expected - 1
     assert len(report["usage"]) == expected
@@ -228,7 +228,7 @@ def test_historical_redaction_metadata_is_rejected_before_dispatch(monkeypatch):
         pytest.fail("Unsupported redaction metadata dispatched inference")
 
     monkeypatch.setattr(gateway, "send", send)
-    with pytest.raises(ValueError, match="Historical secret redaction rules"):
+    with pytest.raises(ValueError, match="Historical secret metadata"):
         engine.run(None, {}, plan(), CONNECTION, OPTIONS, {"redaction_rules": [{"identity": "secret"}]})
 
 

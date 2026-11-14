@@ -60,10 +60,14 @@ BUILTIN_CHECKS = (
 )
 
 
-def system_rule(path):
+def system_rule(path, *, full_tree=False):
     suffix = PurePosixPath(path).suffix.lstrip(".").lower()
     specific = next((text for extensions, text in BUILTIN_CHECKS if suffix in extensions.split()), "")
-    return "\n\n".join(filter(None, (BUILTIN_RULE, specific)))
+    general = BUILTIN_RULE
+    if full_tree:
+        general = general.replace("changed behavior", "behavior").replace("introduced defects", "defects")
+        specific = specific.replace("changed implementation", "implementation")
+    return "\n\n".join(filter(None, (general, specific)))
 
 
 def fingerprint(value):
@@ -205,7 +209,7 @@ def allowed_path(path, options, rules):
 
 
 def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, rules=None):
-    rules = rules or load_rules(repo, env, base_sha, options, stopped)
+    rules = rules or load_rules(repo, env, options.get("_settings_sha", base_sha), options, stopped)
     allowed = {path for path in paths if allowed_path(path, options, rules)}
     if not allowed:
         return allowed
@@ -219,12 +223,12 @@ def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, r
     return allowed
 
 
-def rule_for(path, rules):
+def rule_for(path, rules, *, full_tree=False):
     for layer in rules["layers"]:
         for entry in layer["rules"]:
             if ((entry["rule"] or entry["merge_system_rule"]) and rule_matches(path, entry["path"])):
-                return "\n\n".join(filter(None, (system_rule(path) if entry["merge_system_rule"] else "", entry["rule"])))
-    return system_rule(path)
+                return "\n\n".join(filter(None, (system_rule(path, full_tree=full_tree) if entry["merge_system_rule"] else "", entry["rule"])))
+    return system_rule(path, full_tree=full_tree)
 
 
 @dataclass
@@ -395,7 +399,7 @@ def split_units(path, old_path, status, sha, text, patch, rule, maximum):
 
 
 def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
-                max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000):
+                max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None):
     for sha in (base_sha, head_sha, merge_base):
         if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{40}", sha):
             raise ValueError("PR planning requires exact Git revisions.")
@@ -405,7 +409,7 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
         raise ValueError("A batch must admit a complete bounded unit.")
     if source.git(repo, env, "merge-base", base_sha, head_sha, stopped=stopped).strip() != merge_base:
         raise ValueError("PR planning cannot substitute a different merge base.")
-    rules = load_rules(repo, env, base_sha, options, stopped)
+    rules = load_rules(repo, env, trusted_rules_sha or base_sha, options, stopped)
     plan = ReviewPlan(base_sha, head_sha, merge_base, fingerprint({"file_policy": file_policy.policy(options), "rules": rules["digest"]}),
                       rules["digest"], rules, [], [])
     binary = _binary_paths(repo, env, merge_base, head_sha, stopped)
@@ -444,7 +448,7 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
             if used + size > max_source_bytes:
                 raise ValueError("Required source and diff exceed the aggregate PR source admission limit.")
             units = split_units(selected.path, selected.old_path, selected.status, head_sha,
-                                text, patch, rule_for(selected.path, rules), max_unit_bytes)
+                                text, patch, rule_for(selected.path, rules, full_tree=options.get('review_mode') == 'all'), max_unit_bytes)
             size = sum(len((unit.source + unit.patch).encode()) for unit in units)
             if used + size > max_source_bytes:
                 raise ValueError("Required split context exceeds the aggregate PR source admission limit.")

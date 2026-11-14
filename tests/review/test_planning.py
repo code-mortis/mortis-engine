@@ -75,9 +75,8 @@ def test_file_limit_selects_every_file_before_skipping(repo):
 
 
 @pytest.mark.parametrize("config", ['max_files = true', 'concurrency = 9', 'exclusions = "!app.py"',
-                                   'summary_diagram_enabled = true', 'ai_fix_prompts_enabled = true',
                                    'unknown_option = true'])
-def test_invalid_or_unimplemented_options_fail_preflight(repo, config):
+def test_invalid_options_fail_preflight(repo, config):
     base = commit(repo, {"mortis.toml": config})
     with source.local_repository(repo) as (isolated, env), pytest.raises(ValueError):
         settings.load(isolated, env, base)

@@ -3,10 +3,10 @@
 import asyncio
 import json
 import time
-from uuid import uuid4
 
-from mortis_engine import gateway, llm_http
+from mortis_engine import gateway
 from mortis_engine.llm_http import InferenceError
+from mortis_engine.workflow import Session
 
 from . import engine
 from .errors import ReviewStopped
@@ -14,17 +14,16 @@ from .planning import fingerprint
 
 
 def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, progress=lambda value: None,
-            deadline=None):
+            deadline=None, session=None):
     async def run():
-        outcomes, usage = {}, []
-        admission = asyncio.Lock()
+        outcomes = {}
         options = prepared[0].options if prepared else {}
         budget = options.get("token_budget")
         seconds = options.get("timeout_seconds")
         run_deadline = min(deadline if deadline is not None else float("inf"),
                            time.monotonic() + seconds if seconds else float("inf"))
-        run_id = str(uuid4())
-        held = 0
+        active = session or Session(prepared[0].connection if prepared else {}, credentials)
+        run_id = active.run_id
 
         def cancelled():
             return stopped() or time.monotonic() >= run_deadline
@@ -33,55 +32,6 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
             for unit in batch.units:
                 if outcomes.get(unit.key, {}).get("status") != "completed":
                     outcomes[unit.key] = {"status": "failed", "error": code}
-
-        async def attempt(batch, request, client, until):
-            nonlocal held
-            if cancelled():
-                raise ReviewStopped("Review cancelled or its deadline expired")
-            amount = gateway.reservation(batch.connection, request) + request.max_output_tokens
-            async with admission:
-                if budget is not None and held + amount > budget:
-                    raise InferenceError("budget", "Analysis token budget cannot admit this request",
-                                         consumption_unknown=False)
-                held += amount
-            record = {"task_key": batch.key, "reserved_tokens": amount, "usage": {},
-                      "consumption_unknown": True, "status": "running"}
-            usage.append(record)
-            try:
-                response = await gateway.send(batch.connection, credentials, request, client=client,
-                    stopped=cancelled, timeout=until - time.monotonic())
-            except InferenceError as exc:
-                tokens = exc.usage.total_tokens
-                record.update(status="failed", code=exc.code, usage=exc.usage.model_dump(),
-                              consumption_unknown=exc.consumption_unknown)
-                async with admission:
-                    if tokens is not None and not exc.consumption_unknown:
-                        held += tokens - amount
-                    elif not exc.consumption_unknown:
-                        held -= amount
-                raise
-            except BaseException:
-                record.update(status="failed", code="interrupted")
-                raise
-            tokens = response.usage.total_tokens
-            record.update(status="completed", usage=response.usage.model_dump(), consumption_unknown=tokens is None)
-            async with admission:
-                if tokens is not None:
-                    held += tokens - amount
-            return response
-
-        async def send(batch, request, client):
-            until = min(run_deadline, time.monotonic() + batch.connection.get("options", {}).get("timeout_sec", 120))
-            for index in range(3):
-                try:
-                    return await attempt(batch, request, client, until)
-                except InferenceError as exc:
-                    known_zero = not exc.consumption_unknown and exc.usage.total_tokens in {None, 0}
-                    delay = max(exc.retry_after or 0, 2 ** index)
-                    if not (exc.retryable and known_zero and index < 2 and time.monotonic() + delay < until):
-                        raise
-                    await llm_http._bounded(asyncio.sleep(delay), cancelled, until - time.monotonic())
-            raise AssertionError("Bounded retry loop exhausted")
 
         async def batch_run(batch, client, *, recovered=False, session_id=None):
             if plan.limit_reason or batch.error:
@@ -95,7 +45,9 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
             candidate_diagnostics = None
             while True:
                 try:
-                    response = await send(batch, request, client)
+                    until = min(run_deadline, time.monotonic() + batch.connection.get("options", {}).get("timeout_sec", 120))
+                    response = await active.analysis(f"{batch.key}:round:{rounds}", request, client=client,
+                        timeout_at=until, token_budget=budget, stopped=cancelled)
                 except InferenceError as exc:
                     if (exc.code == "output_limit" and exc.usage.total_tokens is not None
                             and not exc.consumption_unknown and not recovered):
@@ -192,11 +144,10 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                 for task in workers:
                     task.cancel()
                 await asyncio.gather(*workers, return_exceptions=True)
-        tokens = None if any(item["consumption_unknown"] for item in usage) else sum(
-            item["usage"].get("total_tokens") or 0 for item in usage)
-        status, report, comments = engine._report(plan, prepared, outcomes, tokens=tokens)
-        report["usage"] = usage
-        report["summary"]["reserved_tokens"] = held
+        usage = active.usage("analysis")
+        status, report, comments = engine._report(plan, prepared, outcomes, tokens=usage["total_tokens"])
+        report["usage"] = usage["requests"]
+        report["summary"]["reserved_tokens"] = usage["reserved_tokens"]
         return status, report, comments
 
     return asyncio.run(run())
