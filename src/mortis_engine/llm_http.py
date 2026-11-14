@@ -170,13 +170,14 @@ def encode_request(protocol: str, connection: dict, request: Request) -> dict:
             raise ValueError("Configure only one protected Chat output budget alias")
         if aliases:
             budget_key = next(iter(aliases))
-            if type(extra[budget_key]) is not int or extra[budget_key] != request.max_output_tokens:
+            if not request.max_output_tokens or type(extra[budget_key]) is not int or extra[budget_key] != request.max_output_tokens:
                 raise ValueError("extra_body cannot replace the protected inference output budget")
         else:
             # Compatible providers commonly ignore the newer OpenAI-only budget field.
             budget_key = "max_completion_tokens" if urlsplit(connection.get("base_url", "")).hostname == "api.openai.com" else "max_tokens"
         body.update(messages=messages)
-        body[budget_key] = request.max_output_tokens
+        if request.max_output_tokens:
+            body[budget_key] = request.max_output_tokens
         if request.tools:
             body["tools"] = [{"type": "function", "function": {
                 "name": tool.name, "description": tool.description, "parameters": tool.parameters,
@@ -220,7 +221,11 @@ def encode_request(protocol: str, connection: dict, request: Request) -> dict:
                                        "strict": _strict_schema(request.output_schema)}}
         if request.effort:
             body["reasoning"] = {"effort": request.effort}
+        if not request.max_output_tokens:
+            body.pop("max_output_tokens")
     elif protocol == "anthropic":
+        if not request.max_output_tokens:
+            raise ValueError("Anthropic and Bedrock require a positive max_output_tokens value; their APIs cannot omit the output limit.")
         messages = []
         for message in request.messages:
             if message.role == "tool":

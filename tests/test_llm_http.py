@@ -216,6 +216,21 @@ def test_chat_budget_alias_is_deterministic(base_url, key):
     assert body[other] == 256 and key not in body
 
 
+@pytest.mark.parametrize("protocol", ["openai", "openai-responses"])
+def test_unlimited_output_omits_wire_cap_and_cannot_be_overridden(protocol):
+    task = request(max_output_tokens=0)
+    body = llm_http.encode_request(protocol, connection(protocol), task)
+    assert not {"max_tokens", "max_completion_tokens", "max_output_tokens"} & body.keys()
+    key = "max_tokens" if protocol == "openai" else "max_output_tokens"
+    with pytest.raises(ValueError, match="protected"):
+        llm_http.encode_request(protocol, connection(protocol, extra_body={key: 16384}), task)
+
+
+def test_anthropic_unlimited_output_explains_required_api_limit():
+    with pytest.raises(ValueError, match="require a positive max_output_tokens"):
+        llm_http.encode_request("anthropic", connection("anthropic"), request(max_output_tokens=0))
+
+
 @pytest.mark.parametrize("protocol,key", [("openai", "tools.0.function.strict"),
                                            ("openai-responses", "tools.0.strict")])
 def test_existing_tool_strict_options_and_reasoning_defaults(protocol, key):

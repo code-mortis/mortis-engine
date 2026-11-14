@@ -13,7 +13,14 @@ from rich.text import Text
 
 from mortis_engine import config
 from mortis_engine.history import History
-from mortis_engine.review import review_local
+from mortis_engine.review import review_local, settings
+
+LIMIT_FLAGS = ("max_output_tokens", "token_budget", "timeout_seconds", "max_files", "assessment_token_budget",
+               "verification_token_budget", "summary_token_budget", "summary_timeout_seconds")
+
+
+def limit_overrides(args):
+    return {key: getattr(args, key) for key in LIMIT_FLAGS if getattr(args, key, None) is not None}
 
 
 def select_profile(name, profiles):
@@ -123,7 +130,10 @@ def render(result):
 
 
 def run(args):
-    if args.resume and (args.base or args.head or args.staged or args.all or args.effort or args.graph or args.concurrency is not None):
+    overrides = limit_overrides(args)
+    settings.apply_overrides({}, overrides)
+    if args.resume and (args.base or args.head or args.staged or args.all or args.effort or args.graph
+                        or args.concurrency is not None or overrides):
         raise ValueError("--resume uses the inputs and options of the saved run.")
     if args.head and not (args.base or args.all):
         raise ValueError("Use --head with --base for a comparison or with --all for a full-branch review.")
@@ -139,19 +149,36 @@ def run(args):
             result = review_local(args.repo, mode=mode, base=args.base, head=args.head or "HEAD",
                                   connection=config.connection(name, profile), get_credentials=lambda: config.credentials(profile),
                                   on_plan=announce, profile=name, effort=args.effort, graph=args.graph, resume=args.resume,
-                                  progress=progress, concurrency=args.concurrency)
+                                  progress=progress, concurrency=args.concurrency, overrides=overrides)
         print(json.dumps(result, indent=2) if args.format == "json" else render(result))
     finally:
         print(f"Elapsed: {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
     return 1 if result["status"] == "failed" else 2 if result["status"] == "partial" or result["coverage"]["waived"] else 0
 
 
-def options(parser):
+def options(parser, *, kind="review"):
     parser.add_argument("--repo", default=".", help="Local repository (default: current directory)")
     parser.add_argument("--connection", help="Saved connection name (optional with one profile)")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="Report output format")
     parser.add_argument("--effort", choices=("low", "medium", "high"), help="Override repository reasoning effort")
     parser.add_argument("--resume", metavar="RUN_ID", help="Continue an interrupted run with its original inputs")
+    fields = {"max_output_tokens"}
+    if kind != "summary":
+        fields.add("timeout_seconds")
+    if kind in {"review", "scan", "background"}:
+        fields.add("token_budget")
+    if kind in {"review", "scan"}:
+        fields.update(("assessment_token_budget", "verification_token_budget"))
+    if kind == "verify":
+        fields.add("verification_token_budget")
+    if kind in {"review", "summary"}:
+        fields.update(("summary_token_budget", "summary_timeout_seconds"))
+    if kind == "review":
+        fields.add("max_files")
+    for field in LIMIT_FLAGS:
+        if field in fields:
+            parser.add_argument("--" + field.replace("_", "-"), type=int,
+                                help=f"Override {field} for this run (0: no Mortis limit)")
 
 
 def execution_options(parser):

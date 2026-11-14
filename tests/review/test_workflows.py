@@ -58,7 +58,7 @@ def test_assessment_selection_summary_and_fix_prompt(repo):
         return {"narrative": "Changes inversion", "groups": [{"title": "Math", "description": "Inverts value", "paths": ["app.py"]}]}
 
     session = Session(respond)
-    options = {**RepoSettings().model_dump(), "ai_fix_prompts_enabled": True}
+    options = {**RepoSettings().model_dump(), "ai_fix_prompts_enabled": True, "max_output_tokens": 4096}
     with source.local_repository(repo) as (isolated, env):
         result = asyncio.run(workflows.postprocess(isolated, env, report(base, head), options, session))
     assert result["workflow_status"] == "completed"
@@ -68,6 +68,7 @@ def test_assessment_selection_summary_and_fix_prompt(repo):
     assert "unsafe suggestion" not in result["fix_prompts"]
     assert result["summary"]["status"] == "completed"
     assert [stage for stage, _ in session.calls] == ["assessment", "summary"]
+    assert all(kwargs["max_output_tokens"] == 4096 for _, kwargs in session.calls)
 
 
 def test_assessment_requests_unchanged_dependency(repo):

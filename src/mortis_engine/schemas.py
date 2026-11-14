@@ -105,7 +105,7 @@ class Request(StrictModel):
     tools: list[Tool] = Field(default_factory=list)
     tool_choice: str = "auto"
     output_schema: dict[str, Any] | None = None
-    max_output_tokens: int = Field(strict=True, ge=1, le=1_000_000)
+    max_output_tokens: int = Field(strict=True, ge=0, le=1_000_000)
     effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     session_id: str = Field(default_factory=lambda: str(uuid4()), min_length=1, max_length=200,
                             pattern=r"^[A-Za-z0-9_.:-]+$")

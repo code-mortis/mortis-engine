@@ -18,6 +18,8 @@ def scope_ref(repo, env, ref):
 
 
 def effective_connection(connection, options):
+    if options.get("max_output_tokens") == 0 and connection["protocol"] in {"anthropic", "anthropic-bedrock"}:
+        raise ValueError("Anthropic and Bedrock require a positive max_output_tokens value; their APIs cannot omit the output limit.")
     return {**connection, "model": options.get("model") or connection["model"],
             "options": {"timeout_sec": 300, **connection.get("options", {})}}
 
@@ -49,18 +51,19 @@ def _inputs(history, repository, mode, base, head, resume):
 
 
 def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,
-                   progress=lambda value: None, concurrency=None):
+                   progress=lambda value: None, concurrency=None, overrides=None):
     """Review the changes from the common ancestor to the pinned head."""
     return review_local(repository, mode="commits", base=base, head=head, connection=connection,
-                        get_credentials=get_credentials, on_plan=on_plan, progress=progress, concurrency=concurrency)
+                        get_credentials=get_credentials, on_plan=on_plan, progress=progress, concurrency=concurrency,
+                        overrides=overrides)
 
 
 def review_local(repository, *, connection, get_credentials, mode="worktree", base=None, head="HEAD",
                  effort=None, graph=False, resume=None, profile=None, on_plan=None, progress=lambda value: None,
-                 concurrency=None):
+                 concurrency=None, overrides=None):
     """Review local inputs with the saved connection and independent workflow budgets."""
     started = time.time()
-    if resume and concurrency is not None:
+    if resume and (concurrency is not None or overrides):
         raise ValueError("--resume uses the inputs and options of the saved run.")
     with History(repository) as history:
         if resume and history.row(resume, "review")["report"] is not None:
@@ -70,8 +73,10 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             if saved:
                 effort, graph = saved["effort"], saved["graph"]
                 concurrency = saved.get("concurrency")
+                overrides = saved.get("overrides")
                 started = history.row(resume)["started"]
             options.update(effort=effort or options["effort"], review_mode=snap.mode, _settings_sha=snap.settings_sha)
+            settings.apply_overrides(options, overrides)
             if concurrency is not None:
                 options["concurrency"] = settings.RepoSettings.model_validate({"concurrency": concurrency}, strict=True).concurrency
             connection = effective_connection(connection, options)
@@ -86,7 +91,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 previous = history.previous_ids("review", scope)
                 manifest = {f.name: getattr(snap, f.name) for f in fields(snap) if f.name not in {"env", "repo"}}
                 run_id = history.begin("review", scope, {"connection": planning.fingerprint(connection), "profile": profile,
-                    "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency})
+                    "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
+                    "overrides": overrides})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)

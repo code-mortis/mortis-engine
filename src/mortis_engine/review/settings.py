@@ -10,16 +10,23 @@ from mortis_engine.schemas import StrictModel
 
 
 class RunLimits(StrictModel):
-    timeout_seconds: int | None = Field(default=None, ge=60, le=3600)
-    token_budget: int | None = Field(default=None, ge=1000, le=5000000)
+    timeout_seconds: int | None = Field(default=None, ge=60, le=3600, strict=True)
+    token_budget: int | None = Field(default=None, ge=1000, le=5000000, strict=True)
+    max_output_tokens: int | None = Field(default=None, ge=0, le=1000000, strict=True)
+    assessment_token_budget: int | None = Field(default=None, ge=1000, le=5000000, strict=True)
+    verification_token_budget: int | None = Field(default=None, ge=1000, le=5000000, strict=True)
+
+    @field_validator("timeout_seconds", "token_budget", "assessment_token_budget", "verification_token_budget",
+                     "summary_token_budget", "summary_timeout_seconds", "max_files", mode="before", check_fields=False)
+    @classmethod
+    def unlimited(cls, value):
+        return None if type(value) is int and value == 0 else value
 
 
 class RepoSettings(RunLimits):
     analysis_engine: Literal["mortis"] = "mortis"
-    assessment_token_budget: int | None = Field(default=None, ge=1000, le=5000000)
-    verification_token_budget: int | None = Field(default=None, ge=1000, le=5000000)
-    summary_token_budget: int | None = Field(default=None, ge=1000, le=5000000)
-    summary_timeout_seconds: int | None = Field(default=None, ge=60, le=3600)
+    summary_token_budget: int | None = Field(default=None, ge=1000, le=5000000, strict=True)
+    summary_timeout_seconds: int | None = Field(default=None, ge=60, le=3600, strict=True)
     summary_diagram_enabled: bool = False
     ai_fix_prompts_enabled: bool = False
     automatic: bool = True
@@ -97,6 +104,19 @@ def load(repo, env, base_sha):
     return RepoSettings.model_validate(review).model_dump()
 
 
+def apply_overrides(options, overrides, *, scan=False):
+    from mortis_engine.security_scans.service import ScanOptions
+
+    model = ScanOptions if scan else RepoSettings
+    options.update(model.model_validate(overrides or {}, strict=True).model_dump(include=set(overrides or {})))
+    return options
+
+
+def output_token_limit(options):
+    value = options.get("max_output_tokens")
+    return 16384 if value is None else value
+
+
 def load_scan(repo, env, sha):
     from mortis_engine.security_scans.service import ScanOptions
 
@@ -107,4 +127,5 @@ def load_scan(repo, env, sha):
     if not isinstance(model, str) or len(model) > 150:
         raise ValueError("Scan model must be a model ID of at most 150 characters.")
     return {**ScanOptions.model_validate({"language": shared.language, "exclusions": shared.exclusions,
+                                         "max_output_tokens": shared.max_output_tokens,
                                          **scan}).model_dump(), "model": model.strip()}

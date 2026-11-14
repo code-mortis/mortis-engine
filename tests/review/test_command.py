@@ -209,6 +209,85 @@ def test_scan_configuration_is_independent_and_inspectable(repo, profile, monkey
     assert result["scan"]["settings"]["model"] == "scan-model"
 
 
+@pytest.mark.parametrize("command", ["review", "scan"])
+@pytest.mark.parametrize("override", [None, 0, 4096])
+def test_toml_output_limits_and_cli_overrides_reach_provider_and_followup_stages(
+    repo, profile, workflow_provider, monkeypatch, capsys, command, override,
+):
+    from mortis_engine.history import History
+
+    monkeypatch.chdir(repo)
+    text = '[review]\nmax_output_tokens=8192\nmax_files=0\ntoken_budget=0\n[scan]\nmax_output_tokens=2048\ntoken_budget=0\n'
+    commit(repo, {"app.py": "value = 1\n", "mortis.toml": text})
+    seen = []
+    original = gateway.send
+
+    async def observe(connection, credentials, request, **kwargs):
+        seen.append(request.max_output_tokens)
+        return await original(connection, credentials, request, **kwargs)
+
+    monkeypatch.setattr(gateway, "send", observe)
+    flags = ["--max-output-tokens", str(override), "--token-budget", "0", "--timeout-seconds", "0"] if override is not None else []
+    assert cli.main([command, *(["--all"] if command == "review" else []), *flags, "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert len(seen) >= (2 if command == "review" else 1)
+    assert set(seen) == {override if override is not None else 8192 if command == "review" else 2048}
+    with History(repo) as history:
+        saved = json.loads(history.row(report["run_id"])["plan"])["overrides"]
+        assert saved == ({"max_output_tokens": override, "token_budget": 0, "timeout_seconds": 0} if flags else {})
+    assert (repo / "mortis.toml").read_text() == text
+    assert git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("command", ["review", "scan"])
+def test_resume_keeps_saved_output_and_budget_overrides(repo, profile, workflow_provider, monkeypatch, capsys, command):
+    from mortis_engine.history import History
+    from mortis_engine.review import engine
+    from mortis_engine.security_scans import service as scans
+
+    monkeypatch.chdir(repo)
+    commit(repo, {"app.py": "value=1\n", "mortis.toml": '[review]\nmax_output_tokens=8192\n'})
+    seen = []
+    if command == "review":
+        original = engine.run
+
+        def interrupted(*args, **kwargs):
+            seen.append((args[4]["max_output_tokens"], args[4]["token_budget"]))
+            if len(seen) == 1:
+                raise KeyboardInterrupt
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "run", interrupted)
+    else:
+        original = scans.scan
+
+        async def interrupted(*args, **kwargs):
+            seen.append((kwargs["options"]["max_output_tokens"], kwargs["options"]["token_budget"]))
+            if len(seen) == 1:
+                raise KeyboardInterrupt
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(scans, "scan", interrupted)
+    assert cli.main([command, *(["--all"] if command == "review" else []),
+                     "--max-output-tokens", "0", "--token-budget", "0"]) == 130
+    capsys.readouterr()
+    with History(repo) as history:
+        run_id = history.list()[0]["id"]
+    assert cli.main([command, "--resume", run_id, "--max-output-tokens", "0"]) == 1
+    assert "--resume uses" in capsys.readouterr().err
+    assert cli.main([command, "--resume", run_id, "--format", "json"]) == 0
+    capsys.readouterr()
+    assert seen == [(0, None), (0, None)]
+
+
+@pytest.mark.parametrize("flag,value", [("--max-output-tokens", "-1"), ("--token-budget", "1"),
+                                        ("--timeout-seconds", "1"), ("--max-files", "-1")])
+def test_invalid_cli_limits_do_not_read_credentials_or_start_review(monkeypatch, capsys, flag, value):
+    monkeypatch.setattr(config, "load", lambda: pytest.fail("Invalid limits reached connection loading"))
+    assert cli.main(["review", flag, value]) == 1
+    assert "Invalid configuration" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("progress", [False, True])
 @pytest.mark.parametrize("output_format", ["text", "json"])
 def test_review_progress_is_opt_in_and_elapsed_is_always_on_stderr(

@@ -187,6 +187,23 @@ def test_recovery_interruption_preserves_completed_units(monkeypatch):
     assert len({request.session_id for request in calls}) == 1
 
 
+@pytest.mark.parametrize("limit,expected", [(None, [16384, 32768, 32768]), (4096, [4096] * 3), (0, [0] * 3)])
+def test_output_recovery_keeps_explicit_limit_and_legacy_default(monkeypatch, limit, expected):
+    sent = []
+    value = plan(2, same_file=True)
+    value.batches = [value.units]
+
+    async def send(connection, credentials, request, **kwargs):
+        sent.append(request.max_output_tokens)
+        if len(sent) == 1:
+            raise InferenceError("output_limit", "Provider output limit", usage=Usage(total_tokens=50))
+        return final(request)
+
+    monkeypatch.setattr(gateway, "send", send)
+    state, _, _ = engine.run(None, {}, value, CONNECTION, {**OPTIONS, "max_output_tokens": limit}, {})
+    assert state == "completed" and sent == expected
+
+
 def test_absolute_deadline_prevents_dispatch(monkeypatch):
     import time
 

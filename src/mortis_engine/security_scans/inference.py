@@ -100,7 +100,7 @@ async def ask(item, session, task, context, key, options):
             context=payload.compact_evidence(supplied), schema=schema, validate=validate, effort=options["effort"],
             token_budget=options.get({"analysis": "token_budget", "assessment": "assessment_token_budget",
                                       "verification": "verification_token_budget"}[task]),
-            timeout=timeout)
+            timeout=timeout, max_output_tokens=options.get("max_output_tokens"))
         requested = result["required_paths"]
         if not requested:
             if task == "assessment" and result["finding_id"] is not None:

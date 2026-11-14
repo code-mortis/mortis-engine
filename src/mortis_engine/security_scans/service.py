@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import Field
 
 from mortis_engine.review import file_policy, source
-from mortis_engine.schemas import StrictModel
+from mortis_engine.review.settings import RunLimits
 from mortis_engine.security import digest
 
 from . import advisories, engine
@@ -21,14 +21,11 @@ from .inference import ask
 from .scanner import identity_key, trivy
 
 
-class ScanOptions(StrictModel):
+class ScanOptions(RunLimits):
     concurrency: int = Field(default=4, ge=1, le=8, strict=True)
     effort: Literal["low", "medium", "high"] = "high"
     language: str = Field(default="English", min_length=1, max_length=100)
-    timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
-    token_budget: int | None = Field(default=None, ge=1000, le=5000000)
-    assessment_token_budget: int | None = Field(default=None, ge=1000, le=5000000)
-    verification_token_budget: int | None = Field(default=None, ge=1000, le=5000000)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600, strict=True)
     exclusions: str = Field(default="", max_length=4000)
 
 

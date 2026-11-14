@@ -13,12 +13,13 @@ from .workflow import Session
 
 
 def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=None,
-        finding_run=None, resume=None, effort=None, rotations=(), concurrency=None, progress=lambda value: None):
+        finding_run=None, resume=None, effort=None, rotations=(), concurrency=None, progress=lambda value: None,
+        overrides=None):
     if kind not in {"scan", "verify", "background", "summary"}:
         raise ValueError("Choose a supported local workflow.")
     if concurrency is not None and kind != "scan":
         raise ValueError("Concurrency overrides are supported for scans and reviews.")
-    if resume and concurrency is not None:
+    if resume and (concurrency is not None or overrides):
         raise ValueError("--resume uses the inputs and options of the saved run.")
     with History(repository) as history:
         saved = None
@@ -29,6 +30,7 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
             saved = json.loads(row["plan"])
             ref, finding_run, effort = saved["ref"], saved["finding_run"], saved["effort"]
             concurrency = saved.get("concurrency")
+            overrides = saved.get("overrides")
             rotations = saved.get("rotations", [])
         # Normalize subdirectory invocations to the same local repository as its saved history.
         path = Path(repository).resolve()
@@ -43,6 +45,7 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
             options = (settings.load_scan(repo, env, sha) if kind == "scan" else
                        settings.load(repo, env, original["settings_sha"] if kind == "summary" else sha))
             options["_settings_sha"] = original["settings_sha"] if kind == "summary" else sha
+            settings.apply_overrides(options, overrides, scan=kind == "scan")
             if effort:
                 options["effort"] = effort
             if concurrency is not None:
@@ -58,7 +61,7 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                 previous = history.previous_ids("scan", scope)[-1:] if kind == "scan" else []
                 run_id = history.begin(kind, scope, {"ref": ref, "sha": sha, "connection": identity, "previous": previous,
                     "profile": profile, "finding_run": finding_run, "effort": effort, "rotations": list(rotations),
-                    "concurrency": concurrency})
+                    "concurrency": concurrency, "overrides": overrides})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)

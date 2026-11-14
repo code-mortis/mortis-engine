@@ -54,6 +54,7 @@ max_files = 40
 concurrency = 2
 timeout_seconds = 300
 token_budget = 100000
+max_output_tokens = 32768
 
 [[review.rules.rules]]
 path = "**/*.py"
@@ -62,6 +63,20 @@ merge_system_rule = true
 ```
 
 Use `mortis config show --base main` to inspect the effective settings. The base commit controls the rules, file exclusions, background context and optional model override. A profile supplies the endpoint and credentials. Analysis, candidate assessment, fix verification and summaries each use their configured token budget. Use `assessment_token_budget`, `verification_token_budget`, `summary_token_budget` and `summary_timeout_seconds` to configure follow-up stages. `summary_diagram_enabled` enables a structured diagram and `ai_fix_prompts_enabled` includes repair prompts for open findings. For working-tree, staged and full-tree reviews, Mortis reads settings from the selected committed revision.
+
+CLI flags override the committed TOML settings for one run without changing the file:
+
+```sh
+mortis review --all --max-output-tokens 0 --token-budget 0 --timeout-seconds 0 --max-files 0
+mortis scan --max-output-tokens 32768 --assessment-token-budget 200000
+mortis summary --run RUN_ID --max-output-tokens 32768 --summary-token-budget 0
+```
+
+Use `0` for unlimited total token budgets, overall timeouts and maximum files. It is normalized to no limit internally. Concurrency still requires 1–8. Provider request timeouts, transport size limits and provider account/model limits still apply.
+
+`max_output_tokens` controls each AI response, including reasoning, across analysis and follow-up stages. An explicit value is preserved during recovery. With `0`, Mortis omits the output cap for OpenAI Chat Completions and Responses protocols and lets the provider choose its default; this does not guarantee the model's maximum. If a total token budget is finite, Mortis instead bounds output by the remaining budget and serializes these requests so concurrent work cannot reserve the same tokens. A provider may reject a remaining budget above its model's output maximum; set a positive `max_output_tokens` in that case. [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create) and [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages-request-response.html) require an explicit maximum, so those connections need a positive value. Omitting the setting preserves the existing 16,384-token requests and recovery up to 32,768 tokens.
+
+Review flags also include `--assessment-token-budget`, `--verification-token-budget`, `--summary-token-budget` and `--summary-timeout-seconds`. Scans support the assessment and verification budget flags. Standalone verification uses `--verification-token-budget`; background generation uses `--token-budget`. These commands support `--max-output-tokens` and their corresponding overall timeout flag. `--resume` restores the saved overrides and rejects new limit flags.
 
 Mortis assesses candidates before reporting confirmed findings and generates a summary of the reviewed changes. The JSON report retains rejected and uncertain candidates. With `auto_resolve = true`, later reviews of the same scope check earlier open findings against both revisions. A verified fix can update the current local status. Earlier reports remain available by ID.
 
@@ -95,7 +110,7 @@ mortis scan --concurrency 8 --effort high --progress
 
 The scan requires Trivy 0.76.0 on PATH. Trivy refreshes its advisory database, then checks dependencies, configuration and secrets against an isolated local snapshot. Semantic analysis, candidate assessment and verification use the selected AI profile. Repository source is excluded from the Trivy update request. For a supported npm CVE without an established fixed version, verification can look up the CVE ID in GitHub's public advisory database. A partial scan keeps its coverage and findings and reports an unavailable grade.
 
-An optional `[scan]` table in `mortis.toml` accepts `model`, `effort`, `concurrency`, `language`, `exclusions`, `timeout_seconds`, `token_budget`, `assessment_token_budget` and `verification_token_budget`. Scan defaults use high effort and four concurrent file requests. `mortis config show` displays effective review and scan settings. After rotating or revoking a reported secret, pass `--acknowledge-rotation FINDING_ID` on the next scan of that scope so Mortis can verify removal. Use the ID printed with the original finding.
+An optional `[scan]` table in `mortis.toml` accepts `model`, `effort`, `concurrency`, `language`, `exclusions`, `timeout_seconds`, `token_budget`, `max_output_tokens`, `assessment_token_budget` and `verification_token_budget`. The scan output limit inherits `[review].max_output_tokens` unless overridden in `[scan]`. Scan defaults use high effort and four concurrent file requests. `mortis config show` displays effective review and scan settings. After rotating or revoking a reported secret, pass `--acknowledge-rotation FINDING_ID` on the next scan of that scope so Mortis can verify removal. Use the ID printed with the original finding.
 
 ## Optional code graph
 
