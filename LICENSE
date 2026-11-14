@@ -203,8 +203,3 @@
 
 Mortis Engine
 Copyright 2026 Carlos Montecinos
-
-Provider catalog attribution
-The catalog in src/mortis_engine/providers.json incorporates provider metadata
-from Open Code Review 1.13.1, adapted by Code Mortis and Mortis Engine.
-Copyright 2026 alibaba/open-code-review Contributors.

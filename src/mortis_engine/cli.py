@@ -6,7 +6,6 @@ import getpass
 import json
 import sys
 import warnings
-from importlib.resources import files
 from uuid import uuid4
 
 from keyring.errors import KeyringError
@@ -14,6 +13,7 @@ from pydantic import ValidationError
 
 from mortis_engine import __version__, config, gateway
 from mortis_engine.llm_http import InferenceError
+from mortis_engine.providers import PRESETS
 from mortis_engine.schemas import ConnectionInput
 from mortis_engine.security import clean_text
 
@@ -45,16 +45,12 @@ def masked(label):
             raise ValueError("This terminal cannot hide input. Use environment variable references.") from exc
 
 
-def providers():
-    return json.loads(files("mortis_engine").joinpath("providers.json").read_text(encoding="utf-8"))
-
-
 def connect(args):
     if args.api_key_env is not None and args.ambient_auth:
         raise ValueError("Choose --api-key-env or --ambient-auth for this connection")
     if args.list_providers:
-        for item in providers():
-            print(f"{item['name']}  {item['displayName']}  ({item['protocol']})")
+        for name, preset in PRESETS.items():
+            print(f"{name}  {preset.label}  ({preset.protocol})")
         return
     interactive = sys.stdin.isatty() and not args.non_interactive
     if args.advanced and (not interactive or args.test or args.list_models):
@@ -76,24 +72,23 @@ def connect(args):
             check(name, saved, secrets)
         return
     old = copy.deepcopy(previous or {})
-    preset_names = {item["name"]: item for item in providers()}
     provider = args.provider
-    if provider is None and (previous or name in preset_names):
+    if provider is None and (previous or name in PRESETS):
         provider = old.get("provider") or name
     if provider is None:
         if interactive:
-            print("Providers: " + ", ".join(preset_names))
+            print("Providers: " + ", ".join(PRESETS))
             provider = ask("Provider", old.get("provider", "openai"))
         else:
             provider = old.get("provider", "openai")
-    if provider not in preset_names:
+    if provider not in PRESETS:
         raise ValueError("Choose a listed provider or use custom. See mortis connect --list-providers.")
-    preset = preset_names[provider]
+    preset = PRESETS[provider]
     same_provider = provider == old.get("provider")
-    protocol = args.protocol or (old.get("protocol") if same_provider else None) or preset["protocol"]
+    protocol = args.protocol or (old.get("protocol") if same_provider else None) or preset.protocol
     base_url = args.base_url
     if base_url is None:
-        base_url = (old.get("base_url") if same_provider else None) or preset["baseUrl"]
+        base_url = (old.get("base_url") if same_provider else None) or preset.base_url
     model = args.model if args.model is not None else old.get("model", "") if same_provider else ""
     if interactive:
         if args.protocol is None and (args.advanced or provider == "custom"):
