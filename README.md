@@ -198,8 +198,9 @@ mortis connect aws \
 
 Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
 
-GitHub Actions runs the test suite on Python 3.12, 3.13 and 3.14 for pushes, pull requests
-and manual dispatches. Python 3.13 also checks Ruff, builds the wheel/source distribution
+GitHub Actions runs the test suite on Python 3.12, 3.13 and 3.14 for pushes to `main`
+(including merges), pull requests targeting `main` and manual dispatches.
+Python 3.13 also checks Ruff, builds the wheel/source distribution
 and tests native graph extraction with the parser's pinned dependencies. Provider, Trivy
 and Docker boundaries use mocks in this suite; CI does not make live analysis requests.
 
