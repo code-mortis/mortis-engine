@@ -23,6 +23,8 @@ Requires Python 3.12–3.14. `uv` can provide the compatible Python interpreter.
 
 Use `--effort low`, `--effort medium` or `--effort high` to override the repository setting for one run. Local working-tree and staged reviews use an immutable snapshot and leave your Git index, objects and refs untouched. Working-tree reviews require an initial commit. Ignored untracked files, credentials and excluded files are outside review scope.
 
+Use `--concurrency 1` through `--concurrency 8` to override the repository setting for a review or security scan. Reviews default to two concurrent AI batches; a batch may contain multiple files. Scans default to four concurrent file analyses. The override applies only to that run and leaves `mortis.toml` unchanged.
+
 Add `--progress` for a compact live view showing reviewed and failed file counts, active AI requests and elapsed time. Files in active requests appear on separate rows, with up to three names and a count of any others. Mortis sends files in batches; file counts update when a request finishes and its results pass validation. Redirected progress uses plain lines. Every review prints its elapsed time to stderr, including failed or interrupted attempts; resuming measures the current invocation. Progress and timing keep JSON on stdout valid.
 
 ## Review a branch
@@ -79,12 +81,17 @@ mortis background --ref HEAD
 
 Run history, task reservations and retained snapshot objects live under `$XDG_STATE_HOME/mortis` (default `~/.local/state/mortis`). These private files can contain reviewed source. Use `mortis review --resume RUN_ID` to continue an interrupted review with its pinned revisions and saved connection. Each workflow accepts `--resume`. Validated task results can be reused. A request interrupted after dispatch retains its reservation with unknown usage.
 
+Resumed reviews and scans keep their saved concurrency override. Omit `--concurrency` when using `--resume`; `--progress` can be enabled when resuming.
+
 ## Scan security
 
 ```sh
 mortis scan --ref HEAD
 mortis scan --ref main --format json
+mortis scan --concurrency 8 --effort high --progress
 ```
+
+`--progress` shows the same compact live view as reviews, including snapshot preparation, Trivy checks, active AI file analyses, assessment and verification. File counts include only validated analysis results. Every scan prints elapsed time to stderr, with or without progress, including failed or interrupted attempts. JSON reports remain on stdout.
 
 The scan requires Trivy 0.76.0 on PATH. Trivy refreshes its advisory database, then checks dependencies, configuration and secrets against an isolated local snapshot. Semantic analysis, candidate assessment and verification use the selected AI profile. Repository source is excluded from the Trivy update request. For a supported npm CVE without an established fixed version, verification can look up the CVE ID in GitHub's public advisory database. A partial scan keeps its coverage and findings and reports an unavailable grade.
 
@@ -188,6 +195,13 @@ mortis connect aws \
 ```
 
 ## Development
+
+Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
+
+GitHub Actions runs the test suite on Python 3.12, 3.13 and 3.14 for pushes, pull requests
+and manual dispatches. Python 3.13 also checks Ruff, builds the wheel/source distribution
+and tests native graph extraction with the parser's pinned dependencies. Provider, Trivy
+and Docker boundaries use mocks in this suite; CI does not make live analysis requests.
 
 ```sh
 uv sync --group dev

@@ -41,14 +41,14 @@ def terminal(text):
 
 
 @contextmanager
-def progress_display(enabled):
+def progress_display(enabled, *, scan=False):
     if not enabled:
         yield lambda value: None
         return
     console = Console(stderr=True)
     display = Progress(SpinnerColumn(), TextColumn("{task.description}", markup=False), TimeElapsedColumn(),
                        console=console, auto_refresh=False)
-    task = display.add_task("Preparing review…", total=None)
+    task = display.add_task("Preparing security scan…" if scan else "Preparing review…", total=None)
     coverage = ""
     with (Live(display, console=console, transient=True, redirect_stdout=False)
           if console.is_interactive else nullcontext()) as live:
@@ -58,8 +58,8 @@ def progress_display(enabled):
             phase = value["phase"]
             lines = []
             if phase == "analysis":
-                coverage = f"Files reviewed: {value['completed_files']}/{value['selected_files']}    Failed: {value['failed_files']}"
-                description = "Reviewing code"
+                coverage = f"Files {'scanned' if scan else 'reviewed'}: {value['completed_files']}/{value['selected_files']}    Failed: {value['failed_files']}"
+                description = "Scanning code" if scan else "Reviewing code"
                 paths = [terminal(path).replace("\n", "\\n").replace("\t", "\\t") for path in value["active_paths"]]
                 lines.append(f"AI requests running: {value['active_requests']}")
                 if paths:
@@ -68,7 +68,10 @@ def progress_display(enabled):
                         lines.append(f"  +{len(paths) - 3} more files")
                     lines.extend(["", "Waiting for AI response…"])
             else:
-                description = "Building code graph…" if phase == "graph" else "Checking findings and writing summary…"
+                description = {"graph": "Building code graph…", "postprocess": "Checking findings and writing summary…",
+                    "snapshot": "Preparing security snapshot…", "trivy": "Running Trivy security checks…",
+                    "assessment": "Checking security findings…", "verification": "Verifying previous findings…",
+                    "report": "Preparing security report…"}[phase]
             if coverage:
                 lines.insert(0, coverage)
             display.update(task, description=description)
@@ -120,7 +123,7 @@ def render(result):
 
 
 def run(args):
-    if args.resume and (args.base or args.head or args.staged or args.all or args.effort or args.graph):
+    if args.resume and (args.base or args.head or args.staged or args.all or args.effort or args.graph or args.concurrency is not None):
         raise ValueError("--resume uses the inputs and options of the saved run.")
     if args.head and not (args.base or args.all):
         raise ValueError("Use --head with --base for a comparison or with --all for a full-branch review.")
@@ -136,7 +139,7 @@ def run(args):
             result = review_local(args.repo, mode=mode, base=args.base, head=args.head or "HEAD",
                                   connection=config.connection(name, profile), get_credentials=lambda: config.credentials(profile),
                                   on_plan=announce, profile=name, effort=args.effort, graph=args.graph, resume=args.resume,
-                                  progress=progress)
+                                  progress=progress, concurrency=args.concurrency)
         print(json.dumps(result, indent=2) if args.format == "json" else render(result))
     finally:
         print(f"Elapsed: {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
@@ -151,6 +154,12 @@ def options(parser):
     parser.add_argument("--resume", metavar="RUN_ID", help="Continue an interrupted run with its original inputs")
 
 
+def execution_options(parser):
+    parser.add_argument("--concurrency", type=int, choices=range(1, 9), metavar="1-8",
+                        help="Override repository AI concurrency for this run")
+    parser.add_argument("--progress", action="store_true", help="Show live progress and active file names on stderr")
+
+
 def add_parser(commands):
     parser = commands.add_parser("review", help="Review local changes (default), staged changes, a branch or a comparison")
     mode = parser.add_mutually_exclusive_group()
@@ -159,6 +168,6 @@ def add_parser(commands):
     mode.add_argument("--all", action="store_true", help="Review all eligible tracked files at --head")
     parser.add_argument("--head", help="Branch, tag or commit (default: HEAD)")
     parser.add_argument("--graph", action="store_true", help="Include related source from the isolated local code graph parser")
-    parser.add_argument("--progress", action="store_true", help="Show live review progress and active file names on stderr")
+    execution_options(parser)
     options(parser)
     parser.set_defaults(run=run)

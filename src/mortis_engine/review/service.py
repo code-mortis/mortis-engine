@@ -49,16 +49,19 @@ def _inputs(history, repository, mode, base, head, resume):
 
 
 def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,
-                   progress=lambda value: None):
+                   progress=lambda value: None, concurrency=None):
     """Review the changes from the common ancestor to the pinned head."""
     return review_local(repository, mode="commits", base=base, head=head, connection=connection,
-                        get_credentials=get_credentials, on_plan=on_plan, progress=progress)
+                        get_credentials=get_credentials, on_plan=on_plan, progress=progress, concurrency=concurrency)
 
 
 def review_local(repository, *, connection, get_credentials, mode="worktree", base=None, head="HEAD",
-                 effort=None, graph=False, resume=None, profile=None, on_plan=None, progress=lambda value: None):
+                 effort=None, graph=False, resume=None, profile=None, on_plan=None, progress=lambda value: None,
+                 concurrency=None):
     """Review local inputs with the saved connection and independent workflow budgets."""
     started = time.time()
+    if resume and concurrency is not None:
+        raise ValueError("--resume uses the inputs and options of the saved run.")
     with History(repository) as history:
         if resume and history.row(resume, "review")["report"] is not None:
             return history.report(resume)
@@ -66,8 +69,11 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
             if saved:
                 effort, graph = saved["effort"], saved["graph"]
+                concurrency = saved.get("concurrency")
                 started = history.row(resume)["started"]
             options.update(effort=effort or options["effort"], review_mode=snap.mode, _settings_sha=snap.settings_sha)
+            if concurrency is not None:
+                options["concurrency"] = settings.RepoSettings.model_validate({"concurrency": concurrency}, strict=True).concurrency
             connection = effective_connection(connection, options)
             if saved:
                 if planning.fingerprint(connection) != saved["connection"]:
@@ -80,7 +86,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 previous = history.previous_ids("review", scope)
                 manifest = {f.name: getattr(snap, f.name) for f in fields(snap) if f.name not in {"env", "repo"}}
                 run_id = history.begin("review", scope, {"connection": planning.fingerprint(connection), "profile": profile,
-                    "snapshot": manifest, "history": previous, "effort": effort, "graph": graph})
+                    "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)

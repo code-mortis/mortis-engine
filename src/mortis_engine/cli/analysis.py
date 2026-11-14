@@ -1,22 +1,37 @@
 """Terminal commands for saved runs and local repository workflows."""
 
 import json
+import sys
+import time
 
 from mortis_engine import config, operations
 from mortis_engine.history import History
 
-from .review import options, selected, terminal
+from .review import execution_options, options, progress_display, selected, terminal
 
 
 def run(args):
-    if args.resume and (getattr(args, "ref", None) or args.effort or getattr(args, "run_id", None) or getattr(args, "rotations", None)):
+    if args.command != "scan":
+        return _run(args)
+    started = time.monotonic()
+    try:
+        return _run(args)
+    finally:
+        print(f"Elapsed: {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
+
+
+def _run(args):
+    if args.resume and (getattr(args, "ref", None) or args.effort or getattr(args, "run_id", None)
+                        or getattr(args, "rotations", None) or getattr(args, "concurrency", None) is not None):
         raise ValueError("--resume uses the inputs and options of the saved run.")
     if args.command in {"verify", "summary"} and not (args.run_id or args.resume):
         raise ValueError(f"mortis {args.command} requires --run RUN_ID. Use mortis runs to see the available IDs.")
     name, profile = selected(args)
-    result = operations.run(args.repo, kind=args.command, connection=config.connection(name, profile),
-        get_credentials=lambda: config.credentials(profile), profile=name, ref=getattr(args, "ref", None) or "HEAD",
-        finding_run=getattr(args, "run_id", None), resume=args.resume, effort=args.effort, rotations=getattr(args, "rotations", ()))
+    with progress_display(getattr(args, "progress", False), scan=True) as progress:
+        result = operations.run(args.repo, kind=args.command, connection=config.connection(name, profile),
+            get_credentials=lambda: config.credentials(profile), profile=name, ref=getattr(args, "ref", None) or "HEAD",
+            finding_run=getattr(args, "run_id", None), resume=args.resume, effort=args.effort,
+            rotations=getattr(args, "rotations", ()), concurrency=getattr(args, "concurrency", None), progress=progress)
     if args.format == "json":
         print(json.dumps(result, indent=2))
     else:
@@ -76,6 +91,7 @@ def add_parser(commands):
         parser = commands.add_parser(command, help=description)
         options(parser)
         if command == "scan":
+            execution_options(parser)
             parser.add_argument("--acknowledge-rotation", metavar="FINDING_ID", dest="rotations", action="append",
                                 default=[], help="Record that this retained secret has been rotated or revoked")
         if command != "summary":
