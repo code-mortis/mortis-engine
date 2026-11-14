@@ -38,6 +38,8 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
             progress({"phase": "analysis", "completed_units": sum(
                 value["status"] == "completed" for value in outcomes.values()),
                 "selected_units": len(plan.units),
+                "possible_findings": sum(len(value.get("comments", [])) for value in outcomes.values()
+                                         if value["status"] == "completed"),
                 "selected_files": len(plan.selected),
                 "completed_files": sum(not item.error and bool(item.units) and all(
                     outcomes.get(unit.key, {}).get("status") == "completed" for unit in item.units)
@@ -93,6 +95,8 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                     else:
                         result = engine.validate_result(response.output, batch, sources, credentials, cancelled)
                         outcomes.update(engine._completed_outcomes(result, batch))
+                        if recovered:
+                            report_progress()
                         return
                 except ReviewStopped:
                     raise

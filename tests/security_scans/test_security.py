@@ -123,10 +123,87 @@ def test_scan_progress_tracks_bounded_concurrent_files_and_validated_coverage(re
     assert max(event["active_requests"] for event in analysis) == min(concurrency, 2)
     assert all(event["active_requests"] == len(event["active_paths"]) for event in analysis)
     assert analysis[-1] == {"phase": "analysis", "active_paths": [], "active_requests": 0,
+                            "possible_findings": 0, "scanner_findings": 0,
                             "selected_files": 2, "completed_files": 1 if failed else 2, "failed_files": int(failed)}
     assert report["coverage"]["completed_files"] == analysis[-1]["completed_files"]
     assert [event["phase"] for event in events if event["phase"] != "analysis"] == [
         "snapshot", "trivy", "assessment", "verification", "report"]
+    assessment = next(event for event in events if event["phase"] == "assessment")
+    assert assessment["selected_candidates"] == assessment["assessed_candidates"] == 0
+    assert assessment["confirmed_findings"] == 0
+
+
+def test_scan_progress_counts_live_proposals_and_unique_assessments_in_original_order(repository):
+    head = commit(repository, {"z.py": "invalid = True\n"})
+    events, assessed_titles = [], []
+    guard_finished = asyncio.Event()
+
+    def progress(event):
+        events.append(event)
+        if event["phase"] == "analysis" and event["possible_findings"] == 1:
+            guard_finished.set()
+
+    class MixedSession(EmptySession):
+        async def ask(self, stage, key, **kwargs):
+            context = kwargs["context"]
+            if stage == "security_analysis":
+                path = context["assigned_path"]
+                if path == "z.py":
+                    raise ValueError("Unvalidated response")
+                if path == "a.py":
+                    await guard_finished.wait()
+                    assert events[-1]["active_requests"] >= 1
+                titles = ["confirmed", "duplicate", "rejected", "uncertain", "failed"] if path == "a.py" else ["later guard"]
+                reference = next(ref for ref, row in context["citation_sources"].items() if row["path"] == path)
+                proposals = [{"title": title, "category": "authorization", "severity": "high", "path": path,
+                    "explanation": "Guard allows unauthorized access", "trigger": "Unprivileged caller",
+                    "impact": "Protected action executes", "remediation": "Enforce authority", "verification": "Check access",
+                    "evidence": [{"source_id": reference, "start_line": 1, "end_line": 2}]} for title in titles]
+                return kwargs["validate"]({"findings": proposals, "required_paths": []})
+            assert stage == "security_assessment"
+            proposal = context["proposal"]
+            title = proposal["title"]
+            assessed_titles.append(title)
+            if title == "failed":
+                raise ValueError("Invalid assessment")
+            identity = next((row["id"] for row in context["history"] if row["title"] == "confirmed"), None)
+            verdict = "confirmed" if title in {"confirmed", "duplicate"} else "uncertain" if title == "uncertain" else "rejected"
+            reference = next(ref for ref, row in context["citation_sources"].items() if row["path"] == proposal["path"])
+            return kwargs["validate"]({"verdict": verdict, "finding_id": identity if title == "duplicate" else None,
+                "explanation": "Assessment decision", "required_paths": [],
+                "evidence": [{"source_id": reference, "start_line": 1, "end_line": 2}]})
+
+    def scanner_with_finding(item, timeout, stopped):
+        result = scan_result(item, timeout, stopped)
+        result["findings"] = [{"kind": "infrastructure", "path": "a.py", "fingerprint": "scanner",
+            "title": "Scanner finding", "severity": "low", "source_sha": item.sha, "sources": ["trivy"]}]
+        return result
+
+    previous = {"schema_version": "mortis.security/v1", "findings": [{"id": "unseen", "kind": "code",
+        "path": "missing.py", "title": "Retained unseen finding", "severity": "low", "state": "false_positive",
+        "source_sha": head, "fingerprint": "retained", "evidence": []}]}
+    result = asyncio.run(service.scan(repository, session=MixedSession(), scanner=scanner_with_finding,
+        previous=previous, options={"concurrency": 2}, progress=progress))
+    analysis = [event for event in events if event["phase"] == "analysis"]
+    assert any(event["possible_findings"] == 1 and event["active_requests"] for event in analysis)
+    assert analysis[-1]["possible_findings"] == 6
+    assert analysis[-1]["completed_files"] == 2
+    assert analysis[-1]["failed_files"] == 1
+    assert assessed_titles.index("confirmed") < assessed_titles.index("duplicate") < assessed_titles.index("failed")
+    assert result["assessments"][0]["proposal"]["title"] == "confirmed"
+    assessment = [event for event in events if event["phase"] == "assessment"]
+    assert [event["assessed_candidates"] for event in assessment] == list(range(7))
+    assert events[-1] == {"phase": "report", "possible_findings": 6, "selected_candidates": 6,
+                         "assessed_candidates": 6, "confirmed_findings": 1, "confirmed_candidates": 2,
+                         "rejected_candidates": 2, "uncertain_candidates": 1, "failed_candidates": 1,
+                         "scanner_findings": 1}
+    assert events[-2] == {**events[-1], "phase": "verification"}
+    assert sum(row["result"]["verdict"] == "confirmed" for row in result["assessments"]) == 2
+    assert len(result["findings"]) == 3
+    assert result["status"] == "partial"
+    assert all(isinstance(value, int) for event in events if event["phase"] in {"assessment", "verification", "report"}
+               for key, value in event.items() if key != "phase")
+    assert "Guard allows unauthorized access" not in json.dumps(events)
 
 
 def test_trivy_secret_normalization_redacts_literal_and_json_forms(repository):

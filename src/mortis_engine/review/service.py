@@ -138,7 +138,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 async def finish():
                     async with session:
                         return await workflows.postprocess(snap.repo, snap.env, result, options, session,
-                            history=[history.report(row) for row in previous])
+                            history=[history.report(row) for row in previous], progress=progress)
 
                 progress({"phase": "postprocess"})
                 result = asyncio.run(finish())

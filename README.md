@@ -27,6 +27,8 @@ Use `--concurrency 1` through `--concurrency 8` to override the repository setti
 
 Add `--progress` for a compact live view showing reviewed and failed file counts, active AI requests and elapsed time. Files in active requests appear on separate rows, with up to three names and a count of any others. Mortis sends files in batches; file counts update when a request finishes and its results pass validation. Redirected progress uses plain lines. Every review prints its elapsed time to stderr, including failed or interrupted attempts; resuming measures the current invocation. Progress and timing keep JSON on stdout valid.
 
+The view also shows possible findings as validated analysis results arrive. During assessment it shows assessed/total candidates, unique confirmed findings, rejected and uncertain candidates, failed assessments and duplicate confirmations. Failed assessments count as processed candidates and remain separate from rejected findings. These counts stay visible through summary generation. Scan progress shows Trivy findings separately from AI proposals and confirmations; unobserved findings retained from earlier scans are not counted as current confirmations. Finding text remains in the final report.
+
 ## Review a branch
 
 From your working branch, run:

@@ -250,15 +250,18 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             observation = observe(finding, old)
             observed.add(observation["id"])
             findings.append(observation)
+        scanner_findings = len({finding["id"] for finding in findings})
         code_paths = [path for path, row in item.inventory.items() if row["code"]]
         semaphore = asyncio.Semaphore(options["concurrency"])
-        candidates = []
+        proposals_by_path = {}
         active_paths = set()
 
         def report_progress():
             progress({"phase": "analysis", "selected_files": len(code_paths),
                 "completed_files": sum(unit["status"] == "completed" for unit in units),
                 "failed_files": sum(unit["status"] == "failed" for unit in units),
+                "possible_findings": sum(len(proposals) for proposals in proposals_by_path.values()),
+                "scanner_findings": scanner_findings,
                 "active_requests": len(active_paths), "active_paths": sorted(item.redact(path) for path in active_paths)})
 
         async def analyze(path):
@@ -269,19 +272,18 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     context = {"assigned_path": path, "head_sha": sha, "diff": "",
                                "sources": {"current": {path: item.source(path)}}}
                     value, context_paths = await ask(item, session, "analysis", context, "analysis:" + path, options)
+                    proposals_by_path[path] = [(proposal, context_paths) for proposal in value["findings"]]
                     units.append({"task": "analysis:" + path, "status": "completed"})
-                    return [(proposal, context_paths) for proposal in value["findings"]]
                 except Exception as exc:
                     units.append({"task": "analysis:" + path, "status": "failed"})
                     problems.append(f"Security analysis incomplete for {path}: {item.redact(str(exc))[:1000]}")
-                    return []
                 finally:
                     active_paths.remove(path)
                     report_progress()
 
         report_progress()
-        for proposed in await asyncio.gather(*(analyze(path) for path in code_paths)):
-            candidates.extend(proposed)
+        await asyncio.gather(*(analyze(path) for path in code_paths))
+        candidates = [proposal for path in code_paths for proposal in proposals_by_path.get(path, [])]
         completed = sum(unit["status"] == "completed" for unit in units)
         stages["analysis"] = {"status": "completed" if completed == len(code_paths) else "partial",
                               "total": len(code_paths), "completed": completed}
@@ -299,19 +301,31 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 return None
 
         remaining = [(index, proposal, paths) for index, (proposal, paths) in enumerate(candidates)]
-        progress({"phase": "assessment"})
+        confirmed_ids = set()
+        counts = {"possible_findings": len(candidates), "selected_candidates": len(candidates), "assessed_candidates": 0,
+                  "confirmed_candidates": 0, "rejected_candidates": 0, "uncertain_candidates": 0, "failed_candidates": 0,
+                  "scanner_findings": scanner_findings}
+
+        def assessment_progress(phase):
+            progress({"phase": phase, **counts, "confirmed_findings": len(confirmed_ids)})
+
+        assessment_progress("assessment")
         while remaining:
             history = {old["id"]: old for old in [*previous_findings, *findings]}
             batch = assessment_batch(remaining, list(history.values()), item, options["concurrency"])
             results = await asyncio.gather(*(assess(candidate, list(history.values())) for candidate in batch))
             for (index, proposal, _paths), assessed in zip(batch, results, strict=True):
+                counts["assessed_candidates"] += 1
+                counts[(assessed["verdict"] if assessed else "failed") + "_candidates"] += 1
                 if assessed is None:
+                    assessment_progress("assessment")
                     continue
                 assessments.append({"proposal": proposal, "result": assessed})
                 units.append({"task": f"assessment:{index}", "status": "completed"})
                 if assessed["verdict"] == "uncertain":
                     problems.append(f"Proposed security finding requires further verification: {proposal['title']}")
                 if assessed["verdict"] != "confirmed":
+                    assessment_progress("assessment")
                     continue
                 fingerprint = digest(json.dumps(["code", proposal["path"], proposal["category"],
                                                  proposal["evidence"][0]["quote"], proposal["title"]]))
@@ -324,6 +338,8 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 findings = [row for row in findings if row["id"] != finding["id"]]
                 findings.append(finding)
                 observed.add(finding["id"])
+                confirmed_ids.add(finding["id"])
+                assessment_progress("assessment")
             selected_indices = {candidate[0] for candidate in batch}
             remaining = [candidate for candidate in remaining if candidate[0] not in selected_indices]
         assessment_units = [unit for unit in units if unit["task"].startswith("assessment:")]
@@ -331,7 +347,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                                and not any(a["result"]["verdict"] == "uncertain" for a in assessments) else "partial",
                                "total": len(candidates), "completed": len(assessments)}
         advisory_cache = {}
-        progress({"phase": "verification"})
+        assessment_progress("verification")
         for old in previous_findings:
             if old["id"] in observed:
                 continue
@@ -375,7 +391,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         stages["verification"] = {"status": "partial" if any(v["verdict"] == "uncertain" for v in verifications) else "completed",
                                   "total": len(verifications), "completed": len(verifications)}
         stages["report"] = {"status": "completed"}
-        progress({"phase": "report"})
+        assessment_progress("report")
         complete = not problems
         rating = grade_for(row["severity"] for row in findings if row.get("state", "open") in {"open", "accepted_risk"})
         report = {"schema_version": "mortis.security/v1", "repository": repository_name, "commit": sha, "ref": ref,

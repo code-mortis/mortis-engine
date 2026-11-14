@@ -74,6 +74,7 @@ def test_progress_tracks_concurrent_files_before_dispatch_and_clears_them(monkey
     assert events[1]["selected_files"] == (1 if same_file else 2)
     assert len(events[2]["active_paths"]) == 1
     assert events[-1] == {"phase": "analysis", "active_paths": [], "selected_units": 2,
+                          "possible_findings": 0,
                           "completed_units": 1 if failed else 2, "active_requests": 0,
                           "selected_files": 1 if same_file else 2, "failed_files": int(failed),
                           "completed_files": (0 if failed else 1) if same_file else (1 if failed else 2)}
@@ -357,8 +358,59 @@ def draft_finding(request, *, invalid_citation=False, content="Incorrect value")
                           "start_line": unit["start_line"], "end_line": unit["start_line"]}]}
 
 
+def test_possible_findings_update_while_other_analysis_is_active(monkeypatch):
+    events = []
+    first_finished = asyncio.Event()
+
+    def progress(event):
+        events.append(event)
+        if event["possible_findings"] == 1:
+            first_finished.set()
+
+    async def send(connection, credentials, request, **kwargs):
+        assigned = json.loads(request.messages[0].content)["assigned_units"][0]
+        if assigned["path"] == "app1.py":
+            await first_finished.wait()
+            assert events[-1]["completed_files"] == 1
+            assert events[-1]["active_requests"] == 1
+            raise InferenceError("auth", "Rejected", consumption_unknown=False)
+        response = final(request)
+        response.output["findings"] = [draft_finding(request)]
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    state, _, findings = engine.run(None, {}, plan(2), CONNECTION, {**OPTIONS, "concurrency": 2}, {}, progress=progress)
+    assert state == "partial"
+    assert events[-1]["possible_findings"] == len(findings) == 1
+    assert all("Incorrect value" not in json.dumps(event) for event in events)
+
+
+def test_recovery_possible_findings_include_validated_partial_units(monkeypatch):
+    calls, events = [], []
+    value = plan(2, same_file=True)
+    value.batches = [value.units]
+
+    async def send(connection, credentials, request, **kwargs):
+        calls.append(request)
+        if len(calls) == 1:
+            raise InferenceError("output_limit", "Truncated", usage=Usage(total_tokens=10))
+        if len(calls) == 3:
+            assert events[-1]["possible_findings"] == 1
+            assert events[-1]["completed_files"] == 0
+            assert events[-1]["active_requests"] == 1
+            raise TimeoutError
+        response = final(request)
+        response.output["findings"] = [draft_finding(request)]
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    state, _, findings = engine.run(None, {}, value, CONNECTION, OPTIONS, {}, progress=events.append)
+    assert state == "partial"
+    assert events[-1]["possible_findings"] == len(findings) == 1
+
+
 def test_repair_reconsiders_valid_and_invalid_candidates_from_prior_draft(monkeypatch):
-    calls = []
+    calls, events = [], []
 
     async def send(connection, credentials, request, **kwargs):
         calls.append(request)
@@ -367,6 +419,7 @@ def test_repair_reconsiders_valid_and_invalid_candidates_from_prior_draft(monkey
             response.output["findings"] = [draft_finding(request), draft_finding(request, invalid_citation=True,
                                                                                   content="Second concrete defect")]
         else:
+            assert events[-1]["possible_findings"] == 0
             followup = json.loads(request.messages[-1].content)
             draft = followup.get("previous_result_draft")
             if draft:
@@ -376,13 +429,14 @@ def test_repair_reconsiders_valid_and_invalid_candidates_from_prior_draft(monkey
         return response
 
     monkeypatch.setattr(gateway, "send", send)
-    state, report, findings = engine.run(None, {}, plan(), CONNECTION, OPTIONS, {})
+    state, report, findings = engine.run(None, {}, plan(), CONNECTION, OPTIONS, {}, progress=events.append)
     assert state == "completed" and len(calls) == 2
     assert len(findings) == report["summary"]["findings"] == 2
     assert calls[0].messages[0] == calls[1].messages[0]
     assert calls[0].output_schema == calls[1].output_schema
     assert {finding["content"] for finding in findings} == {"Incorrect value", "Second concrete defect"}
     assert all(finding["evidence"][0]["quote"] == "value = 0" for finding in findings)
+    assert events[-1]["possible_findings"] == len(findings)
 
 
 def test_invalid_candidate_credentials_are_redacted_before_repair(monkeypatch):

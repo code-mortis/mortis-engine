@@ -81,7 +81,7 @@ def test_review_and_config_use_the_pinned_base_and_saved_profile(repo,
 
     monkeypatch.setattr(gateway, "send", send)
     command = ["review", "--base", "main", "--head", "HEAD"]
-    assert cli.main([*command, "--format", "json"]) == 0
+    assert cli.main([*command, "--format", "json", "--progress"]) == 0
     out = capsys.readouterr()
     result = json.loads(out.out)
     assert "opencode-go" in out.err and "test-value" not in out.out + out.err
@@ -90,6 +90,9 @@ def test_review_and_config_use_the_pinned_base_and_saved_profile(repo,
     assert result["findings"][0]["evidence"][0]["quote"] == "price = 0"
     assert result["usage"]["total_tokens"] == 51
     assert result["candidates"][0]["result"]["verdict"] == "confirmed"
+    assert "Possible findings found so far: 1" in out.err
+    assert "Findings assessed: 1/1" in out.err and "Confirmed: 1" in out.err
+    assert "Writing review summary" in out.err
     assert [i["path"] for i in result["coverage"]["completed"]] == ["price.py"]
     assert cli.main(command) == 0
     text = capsys.readouterr().out
@@ -309,7 +312,9 @@ def test_review_progress_is_opt_in_and_elapsed_is_always_on_stderr(
     assert bool("Files in active requests:\n  app[red].py" in out.err) == progress
     assert bool("Files reviewed: 1/1    Failed: 0" in out.err) == progress
     assert bool("AI requests running: 1" in out.err) == progress
-    assert bool("Checking findings and writing summary" in out.err) == progress
+    assert bool("Writing review summary" in out.err) == progress
+    assert bool("Possible findings found so far: 0" in out.err) == progress
+    assert bool("Findings assessed: 0/0" in out.err) == progress
     assert "units complete" not in out.err
     assert re.search(r"Elapsed: \d+\.\d+s\n$", out.err)
     assert "Elapsed:" not in out.out and "\x1b" not in out.out + out.err
@@ -386,6 +391,43 @@ def test_compact_progress_keeps_file_rows_and_counts_readable(monkeypatch, width
         assert coverage in frame
         assert ("Checking security findings" if scan else "Checking findings") in frame
         assert "Files in active requests" not in frame
+
+
+@pytest.mark.parametrize("width", [48, 80, 120])
+@pytest.mark.parametrize("scan", [False, True])
+def test_live_finding_counts_are_readable_and_survive_later_stages(monkeypatch, capsys, width, scan):
+    from io import StringIO
+
+    from rich.console import Console
+
+    from mortis_engine.cli import review
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    console = Console(file=StringIO(), force_terminal=True, width=width, height=24, color_system=None, record=True)
+    monkeypatch.setattr(review, "Console", lambda **kwargs: console)
+    with review.progress_display(True, scan=scan) as update:
+        update({"phase": "analysis", "active_paths": ["app.py"], "selected_files": 2,
+                "completed_files": 1, "failed_files": 0, "active_requests": 1, "possible_findings": 7,
+                **({"scanner_findings": 2} if scan else {})})
+        frame = console.export_text()
+        assert "Possible findings found so far: 7" in frame
+        assert "Confirmed" not in frame
+        assert ("Trivy findings: 2" in frame) == scan
+        update({"phase": "assessment", "possible_findings": 7, "assessed_candidates": 6,
+                "selected_candidates": 7, "confirmed_findings": 2, "confirmed_candidates": 3,
+                "rejected_candidates": 1, "uncertain_candidates": 1, "failed_candidates": 1})
+        frame = console.export_text()
+        assert "Findings assessed: 6/7" in frame
+        assert ("Confirmed AI: 2" if scan else "Confirmed: 2") in frame
+        assert "Rejected: 1" in frame and "Uncertain: 1" in frame and "Failed: 1" in frame
+        assert "Duplicate confirmations: 1" in frame
+        assert "app.py" not in frame
+        update({"phase": "report" if scan else "summary"})
+        frame = console.export_text()
+        assert "Findings assessed: 6/7" in frame
+        assert ("Trivy findings: 2" in frame) == scan
+        assert ("Preparing security report" if scan else "Writing review summary") in frame
+    assert not capsys.readouterr().out
 
 
 @pytest.mark.parametrize("command,configured", [("review", 3), ("scan", 5)])
@@ -489,7 +531,8 @@ def test_scan_progress_and_elapsed_keep_report_output_clean(
     assert cli.main(["scan", "--format", output_format, *(["--progress"] if progress else [])]) == 0
     out = capsys.readouterr()
     for text in ("Running Trivy", "Files in active requests:\n  app[red].py", "Files scanned: 1/1",
-                 "Checking security findings", "Verifying previous findings", "Preparing security report"):
+                 "Checking security findings", "Verifying previous findings", "Preparing security report",
+                 "Possible findings found so far: 0", "Findings assessed: 0/0", "Confirmed AI: 0"):
         assert (text in out.err) == progress
     assert re.search(r"Elapsed: \d+\.\d+s\n$", out.err)
     assert "Elapsed:" not in out.out and "\x1b" not in out.out + out.err

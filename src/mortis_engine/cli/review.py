@@ -57,13 +57,26 @@ def progress_display(enabled, *, scan=False):
                        console=console, auto_refresh=False)
     task = display.add_task("Preparing security scan…" if scan else "Preparing review…", total=None)
     coverage = ""
+    possible, scanner = "", ""
+    assessment = []
     with (Live(display, console=console, transient=True, redirect_stdout=False)
           if console.is_interactive else nullcontext()) as live:
 
         def update(value):
-            nonlocal coverage
+            nonlocal coverage, possible, scanner, assessment
             phase = value["phase"]
             lines = []
+            if "possible_findings" in value:
+                possible = f"Possible findings found so far: {value['possible_findings']}"
+            if "scanner_findings" in value:
+                scanner = f"Trivy findings: {value['scanner_findings']}"
+            if "selected_candidates" in value:
+                assessment = [f"Findings assessed: {value['assessed_candidates']}/{value['selected_candidates']}",
+                    f"Confirmed{' AI' if scan else ''}: {value['confirmed_findings']}    Rejected: {value['rejected_candidates']}",
+                    f"Uncertain: {value['uncertain_candidates']}    Failed: {value['failed_candidates']}"]
+                duplicates = value["confirmed_candidates"] - value["confirmed_findings"]
+                if duplicates:
+                    assessment.append(f"Duplicate confirmations: {duplicates}")
             if phase == "analysis":
                 coverage = f"Files {'scanned' if scan else 'reviewed'}: {value['completed_files']}/{value['selected_files']}    Failed: {value['failed_files']}"
                 description = "Scanning code" if scan else "Reviewing code"
@@ -77,10 +90,10 @@ def progress_display(enabled, *, scan=False):
             else:
                 description = {"graph": "Building code graph…", "postprocess": "Checking findings and writing summary…",
                     "snapshot": "Preparing security snapshot…", "trivy": "Running Trivy security checks…",
-                    "assessment": "Checking security findings…", "verification": "Verifying previous findings…",
+                    "assessment": "Checking security findings…" if scan else "Checking findings…",
+                    "summary": "Writing review summary…", "verification": "Verifying previous findings…",
                     "report": "Preparing security report…"}[phase]
-            if coverage:
-                lines.insert(0, coverage)
+            lines = [line for line in (coverage, possible, scanner, *assessment) if line] + lines
             display.update(task, description=description)
             if live is not None:
                 live.update(Group(display, Text("\n".join(lines))), refresh=True)

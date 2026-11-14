@@ -204,7 +204,7 @@ def _independent_batch(repo, env, run, pending, previous, concurrency):
     return sorted((min(group, key=lambda row: row[0]) for group, _ in groups), key=lambda row: row[0])[:concurrency]
 
 
-async def postprocess(repo, env, report, options, session, *, history=()):
+async def postprocess(repo, env, report, options, session, *, history=(), progress=lambda value: None):
     """Assess candidates, retain history, optionally verify fixes and summarize pinned changes."""
     result = copy.deepcopy(report)
     result["settings"] = {key: value for key, value in options.items() if not key.startswith("_")}
@@ -237,6 +237,13 @@ async def postprocess(repo, env, report, options, session, *, history=()):
         snapshot = {**snapshot, "source_sha": snapshot.get("source_sha") or report["head_sha"]}
         identity = planning.fingerprint({"run": report.get("run_id", report["head_sha"]), "index": index, "snapshot": snapshot})
         pending.append((index, snapshot, identity))
+    counts = {"possible_findings": len(pending), "selected_candidates": len(pending), "assessed_candidates": 0,
+              "confirmed_candidates": 0, "rejected_candidates": 0, "uncertain_candidates": 0, "failed_candidates": 0}
+
+    def report_progress(phase):
+        progress({"phase": phase, **counts, "confirmed_findings": len(result["findings"])})
+
+    report_progress("assessment")
     concurrency = options.get("concurrency", 1) if options.get("assessment_token_budget") is None else 1
     while pending:
         batch = _independent_batch(repo, env, run, pending, previous, concurrency)
@@ -262,6 +269,9 @@ async def postprocess(repo, env, report, options, session, *, history=()):
                 result["stage_errors"].append({"stage": "assessment", "candidate_id": row["id"], "error": row["error"]})
             result["candidates"].append(row)
             previous["prior_candidates"].append({"id": row["id"], "snapshot": snapshot, "result": row.get("result")})
+            counts["assessed_candidates"] += 1
+            counts[(assessment_result["verdict"] if assessment_result else "failed") + "_candidates"] += 1
+            report_progress("assessment")
         finished = {item[0] for item in batch}
         pending = [item for item in pending if item[0] not in finished]
     result["candidates"].sort(key=lambda item: item["position"])
@@ -270,6 +280,7 @@ async def postprocess(repo, env, report, options, session, *, history=()):
     result["history"] = [{**item, "observation": "observed" if item["id"] in observed else "not_observed"}
                          for item in previous["findings"] if item["id"] in prior_ids]
     if result.get("coverage", {}).get("selected"):
+        report_progress("summary")
         try:
             result["summary"] = await generate_summary(repo, env, report, options, session)
         except (ValueError, TimeoutError, InferenceError) as exc:

@@ -293,3 +293,54 @@ def test_duplicate_preserves_dismissed_identity_and_omits_fix_prompt(repo):
     assert result["findings"][0]["status"] == "dismissed"
     assert result["candidates"][0]["finding_id"] == "retained"
     assert result["fix_prompts"] == ""
+
+
+def test_assessment_progress_counts_verdicts_failures_and_unique_findings(repo, monkeypatch):
+    head = commit(repo, {"app.py": "def inverse(value):\n    return 1 / value\n"})
+    input_report = report(head, head)
+    input_report["findings"] = [{**candidate(head), "content": str(index)} for index in range(5)]
+    events = []
+
+    async def assess(repo, env, run, snapshot, previous, session):
+        index = int(snapshot["content"])
+        if index == 1:
+            return decision(relationship="duplicate", finding_id=previous["findings"][-1]["id"])
+        if index == 4:
+            raise ValueError("Invalid assessment")
+        return decision(verdict={0: "confirmed", 2: "rejected", 3: "uncertain"}[index])
+
+    def respond(stage, context):
+        assert stage == "summary"
+        assert events[-1]["phase"] == "summary"
+        assert events[-1]["assessed_candidates"] == 5
+        return {"narrative": "Checks math", "groups": []}
+
+    monkeypatch.setattr(workflows, "_assess", assess)
+    previous = {"head_sha": head, "findings": [{**candidate(head), "id": "unseen", "status": "open"}]}
+    with source.local_repository(repo) as (isolated, env):
+        result = asyncio.run(workflows.postprocess(isolated, env, input_report, RepoSettings().model_dump(),
+                            Session(respond), history=[previous], progress=events.append))
+    assessment = [event for event in events if event["phase"] == "assessment"]
+    assert [event["assessed_candidates"] for event in assessment] == list(range(6))
+    assert assessment[0]["confirmed_findings"] == 0
+    assert events[-1] == {"phase": "summary", "possible_findings": 5, "selected_candidates": 5,
+                         "assessed_candidates": 5, "confirmed_findings": 1, "confirmed_candidates": 2,
+                         "rejected_candidates": 1, "uncertain_candidates": 1, "failed_candidates": 1}
+    assert events[-1]["confirmed_findings"] == len(result["findings"])
+    assert result["history"][0]["observation"] == "not_observed"
+    assert result["status"] == "partial"
+    assert all(isinstance(value, int) for event in events for key, value in event.items() if key != "phase")
+
+
+def test_empty_assessment_emits_zero_progress_without_inference(repo):
+    head = commit(repo, {"app.py": "value = 1\n"})
+    events = []
+    session = Session(lambda *args: pytest.fail("Empty report must not request inference"))
+    with source.local_repository(repo) as (isolated, env):
+        result = asyncio.run(workflows.postprocess(isolated, env,
+            {"status": "completed", "base_sha": head, "head_sha": head, "findings": [], "coverage": {}},
+            RepoSettings().model_dump(), session, progress=events.append))
+    assert len(events) == 1
+    assert events[0]["phase"] == "assessment"
+    assert all(value == 0 for key, value in events[0].items() if key != "phase")
+    assert result["findings"] == []
