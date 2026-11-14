@@ -24,13 +24,15 @@ jobs:
       matrix:
         python: ["3.12", "3.13", "3.14"]
     env:
-      XDG_CONFIG_HOME: ${{ runner.temp }}/mortis-config
-      XDG_STATE_HOME: ${{ runner.temp }}/mortis-state
       AWS_EC2_METADATA_DISABLED: "true"
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Isolate local configuration and state
+        run: |
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/mortis-config" >> "$GITHUB_ENV"
+          echo "XDG_STATE_HOME=$RUNNER_TEMP/mortis-state" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v10
         with:
           version: "0.9.14"
