@@ -1,0 +1,49 @@
+"""Redacted model context and stable, exact-revision citation identities."""
+
+import json
+
+from mortis_engine.security import clean_text, digest
+
+from .errors import ReviewStopped
+
+
+def sanitize(value, credentials, stopped=lambda: False):
+    if credentials.get("redaction_rules"):
+        raise ValueError("Historical secret redaction rules are unsupported; request withheld")
+    values = sorted({value for value in (credentials.get("api_key", ""),
+                    *credentials.get("extra_headers", {}).values(), *credentials.get("redaction_values", []))
+                    if value}, key=len, reverse=True)
+
+    def redact(item, structural=False):
+        if stopped():
+            raise ReviewStopped("Review stopped before sanitization")
+        if isinstance(item, str):
+            text = item
+            for secret in values:
+                replacement = "\n".join("[redacted]" for _ in secret.split("\n"))
+                text = text.replace(secret, replacement)
+                text = text.replace(json.dumps(secret)[1:-1], json.dumps(replacement)[1:-1])
+            text = clean_text(text)
+            if structural and text != item:
+                raise ValueError("Credential material in a structural identifier; request withheld")
+            return text
+        if isinstance(item, dict):
+            identifiers = {"path", "assigned_path", "head_sha", "original_sha", "id", "source_id", "revision",
+                           "finding_id", "available_paths", "required_paths", "paths", "changed_paths", "current_path",
+                           "base_sha", "source_sha"}
+            return {redact(key, True): redact(child, key in identifiers) for key, child in item.items()}
+        if isinstance(item, list):
+            return [redact(child, structural) for child in item]
+        return item
+
+    return redact(value)
+
+
+def source_id(revision, path):
+    return "source_" + digest(revision + "\0" + path)[:32]
+
+
+def quote_matches(source, start_line, end_line, quote):
+    original = "".join(source.splitlines(keepends=True)[start_line - 1:end_line])
+    rendered = "\n".join(source.splitlines()[start_line - 1:end_line])
+    return quote in original or quote in rendered

@@ -1,6 +1,5 @@
 """Command-line connection setup for the standalone Mortis package."""
 
-import argparse
 import copy
 import getpass
 import json
@@ -9,9 +8,8 @@ import warnings
 from uuid import uuid4
 
 from keyring.errors import KeyringError
-from pydantic import ValidationError
 
-from mortis_engine import __version__, config, gateway
+from mortis_engine import config, gateway
 from mortis_engine.llm_http import InferenceError
 from mortis_engine.providers import PRESETS
 from mortis_engine.schemas import ConnectionInput
@@ -237,21 +235,7 @@ def saved_connection(saved):
     return {key: saved[key] for key in ("provider", "protocol", "base_url", "model", "options") if key in saved}
 
 
-def show(args):
-    connections = {args.name: config.profile(args.name)} if args.name else config.load()["connections"]
-    safe = {}
-    for name, saved in connections.items():
-        safe[name] = saved_connection(saved)
-        safe[name]["authentication"] = "OS credential vault" if saved.get("credential_id") else "AWS" if saved.get("protocol") == "anthropic-bedrock" and not saved.get("api_key_env") else "environment"
-        safe[name]["api_key_env"] = saved.get("api_key_env")
-        safe[name]["headers_env"] = saved.get("headers_env", {})
-    print(json.dumps({"path": str(config.config_path()), "connections": safe}, indent=2))
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="mortis", description="Configure Mortis Engine's AI connections.")
-    parser.add_argument("--version", action="version", version=f"mortis {__version__}")
-    commands = parser.add_subparsers(dest="command", required=True)
+def add_parser(commands):
     setup = commands.add_parser("connect", help="Create or update and test an AI connection")
     setup.add_argument("name", nargs="?", help="Profile name; a new profile named after a provider uses its preset")
     setup.add_argument("--provider", help="Provider preset, including custom")
@@ -269,22 +253,3 @@ def main(argv=None):
     inspection.add_argument("--list-models", action="store_true", help="List models for an existing saved connection")
     setup.add_argument("--list-providers", action="store_true", help="Show the provider presets")
     setup.set_defaults(run=connect)
-    configuration = commands.add_parser("config", help="Inspect saved connection configuration")
-    inspect = configuration.add_subparsers(dest="config_command", required=True).add_parser("show", help="Show configuration with credentials omitted")
-    inspect.add_argument("name", nargs="?")
-    inspect.set_defaults(run=show)
-    args = parser.parse_args(argv)
-    try:
-        args.run(args)
-        return 0
-    except ValidationError as exc:
-        errors = [".".join(map(str, error["loc"])) + ": " + error["msg"] for error in exc.errors(include_input=False)]
-        print("Invalid connection configuration. " + "; ".join(errors), file=sys.stderr)
-    except KeyringError:
-        print("The OS credential vault could not be accessed. Use environment variable references or unlock the vault.", file=sys.stderr)
-    except (ValueError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-    except (KeyboardInterrupt, EOFError):
-        print("Connection setup cancelled.", file=sys.stderr)
-        return 130
-    return 1

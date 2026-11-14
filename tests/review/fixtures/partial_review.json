@@ -1,0 +1,90 @@
+{
+  "state": "partial",
+  "findings": [
+    {
+      "path": "pricing.py",
+      "content": "The price becomes zero.",
+      "start_line": 1,
+      "end_line": 1,
+      "category": "correctness",
+      "severity": "high",
+      "existing_code": "price = 0",
+      "suggestion_code": "",
+      "trigger": "Reading the price after initialization",
+      "consequence": "The item is offered for free.",
+      "evidence": [
+        {
+          "revision": "3abe828e471f9438ff9dc6be144d1cf36e3fc557",
+          "path": "pricing.py",
+          "start_line": 1,
+          "end_line": 1,
+          "quote": "price = 0"
+        }
+      ],
+      "source_sha": "3abe828e471f9438ff9dc6be144d1cf36e3fc557",
+      "inline_line": 1
+    }
+  ],
+  "coverage": {
+    "selected": [
+      {
+        "item_id": "ca2895da0c8346f8a5b61bf80898a68d677b3a8a72959b62137e09de878ff725",
+        "path": "pricing.py"
+      }
+    ],
+    "completed": [],
+    "failed": [
+      {
+        "item_id": "ca2895da0c8346f8a5b61bf80898a68d677b3a8a72959b62137e09de878ff725",
+        "path": "pricing.py"
+      }
+    ],
+    "reused": [],
+    "waived": []
+  },
+  "tokens": 27,
+  "unit_statuses": [
+    "completed",
+    "failed",
+    "failed"
+  ],
+  "replies": {
+    "pr:112abd255721167fe76edad1dd51053f": {
+      "output": {
+        "task_key": "pr:112abd255721167fe76edad1dd51053f",
+        "completed_units": [
+          "pr-3ccf3363d9830df283b53530b4336b3a69fd22e171e6fafeba8dac5b6d8ffe41"
+        ],
+        "findings": [
+          {
+            "unit_key": "pr-3ccf3363d9830df283b53530b4336b3a69fd22e171e6fafeba8dac5b6d8ffe41",
+            "path": "pricing.py",
+            "content": "The price becomes zero.",
+            "start_line": 1,
+            "end_line": 1,
+            "trigger": "Reading the price after initialization",
+            "consequence": "The item is offered for free.",
+            "severity": "high",
+            "category": "correctness",
+            "evidence": [
+              {
+                "source_id": "source_a0566dcc1d6fa079a65f773863758b89",
+                "start_line": 1,
+                "end_line": 1
+              }
+            ]
+          }
+        ]
+      },
+      "usage": {
+        "total_tokens": 27
+      }
+    },
+    "pr:f0cc1329efbcb61a962088fccd720667": {
+      "error": "unavailable"
+    },
+    "pr:a48946c9029136ebde0ef9fcd139d358": {
+      "error": "unavailable"
+    }
+  }
+}

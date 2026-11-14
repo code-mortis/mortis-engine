@@ -1,6 +1,6 @@
 # Mortis Engine
 
-Set up and test AI connections for local Mortis analysis. This first milestone supplies the installable `mortis` command and the same API connection options as Code Mortis.
+Review changes between two local Git commits with your own AI connection. Mortis sends the selected source and diffs to the configured model and reports findings with verified file and line references.
 
 ## Install from this repository
 
@@ -10,6 +10,44 @@ mortis --help
 ```
 
 Requires Python 3.12–3.14. `uv` can provide the compatible Python interpreter. To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`. PyPI publication is a later release step.
+
+## Review two commits
+
+From your working branch, run:
+
+```sh
+mortis review --base main --head HEAD
+```
+
+Mortis uses your only saved profile automatically. With several profiles, select one by name:
+
+```sh
+mortis review --base main --head HEAD --connection opencode-go --format json
+```
+
+Mortis compares the common ancestor of the two commits with the head commit. Local edits and untracked files are outside this comparison. Branches, tags and commit IDs must be available in the local clone. Use `--repo` to select another repository. GitHub access and a running Code Mortis instance are unnecessary.
+
+Create an optional `mortis.toml` on the base branch to configure the review:
+
+```toml
+[review]
+language = "Spanish"
+effort = "medium"
+review_sensitivity = "balanced"
+max_files = 40
+concurrency = 2
+timeout_seconds = 300
+token_budget = 100000
+
+[[review.rules.rules]]
+path = "**/*.py"
+rule = "Check that exceptions preserve committed data."
+merge_system_rule = true
+```
+
+Use `mortis config show --base main` to inspect the effective settings. The base commit controls the rules, file exclusions, background context and optional model override. A profile supplies the endpoint and credentials. The initial review uses the analysis token budget. Separate budgets for later assessment, verification and summaries are accepted as configuration.
+
+The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed only when all assigned units pass validation. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Exit status 0 indicates completed analysis or no eligible changes, 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
 
 ## Connect interactively
 
@@ -108,4 +146,4 @@ uv run ruff check .
 uv build
 ```
 
-The shared Python package exposes provider schemas and transport functions independently of the CLI. PR reviews and security scans are the next milestones in `PLAN.md`.
+The `mortis_engine.cli` package contains terminal commands. The reusable `mortis_engine.review.review_commits` function accepts a repository path, base, head, connection and a credential loader, and returns the same versioned dictionary as the JSON report. Security scans are the next milestone in `PLAN.md`.

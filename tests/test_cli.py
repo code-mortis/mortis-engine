@@ -1,10 +1,12 @@
+import getpass
 import json
 import os
 import stat
+import sys
 
 import pytest
 
-from mortis_engine import cli, config
+from mortis_engine import cli, config, gateway
 from mortis_engine.llm_http import InferenceError
 
 
@@ -26,7 +28,7 @@ class Vault:
 def setup(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setenv("TEST_MORTIS_KEY", "synthetic-key-not-a-credential")
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     vault = Vault()
     monkeypatch.setattr(config, "vault", lambda: vault)
     calls = []
@@ -35,7 +37,7 @@ def setup(monkeypatch, tmp_path):
         calls.append((connection, credentials))
         return "Connected. Model completed a tool-call round trip."
 
-    monkeypatch.setattr(cli.gateway, "test_connection", test)
+    monkeypatch.setattr(gateway, "test_connection", test)
     return calls, vault
 
 
@@ -71,12 +73,12 @@ def test_all_protocols_and_options(setup, provider, protocol):
 
 def test_interactive_key_and_headers_are_saved_in_vault(setup, monkeypatch, capsys):
     calls, vault = setup
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     answers = iter(["local", "openai", "", "", "model", "y",
                     '{"timeout_sec":60,"prompt_token_ceiling":58888}', "y", "keyring"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     secrets = iter(["synthetic-vault-key", '{"X-Secret":"synthetic-header"}'])
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(secrets))
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: next(secrets))
     assert cli.main(["connect", "--advanced"]) == 0
     saved = config.profile("local")
     assert config.credentials(saved) == {"api_key": "synthetic-vault-key", "extra_headers": {"X-Secret": "synthetic-header"}}
@@ -95,14 +97,14 @@ def test_interactive_key_and_headers_are_saved_in_vault(setup, monkeypatch, caps
 ])
 def test_opencode_connect_only_prompts_for_hidden_key(setup, monkeypatch, capsys, options):
     calls, _ = setup
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     prompts = []
 
     def hidden(prompt):
         prompts.append(prompt)
         return "synthetic-probe-key"
 
-    monkeypatch.setattr(cli.getpass, "getpass", hidden)
+    monkeypatch.setattr(getpass, "getpass", hidden)
     monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail(f"Unexpected prompt: {prompt}"))
     assert cli.main(["connect", "opencode-go", "--model", "muse-spark-1.3-contributor", *options]) == 0
     assert calls[0][0]["base_url"] == "https://opencode.ai/zen/go/v1"
@@ -119,10 +121,10 @@ def test_advanced_header_entry_keeps_or_clears_headers(setup, monkeypatch, metho
     calls, _ = setup
     monkeypatch.setenv("TEST_HEADER", "synthetic-header")
     assert cli.main(arguments("work", "--headers-env", '{"X-Project":"TEST_HEADER"}')) == 0
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     answers = iter(["", "", "", "n", "y", method, entry])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: entry)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: entry)
     assert cli.main(["connect", "work", "--advanced", "--api-key-env", "TEST_MORTIS_KEY"]) == 0
     assert calls[-1][1]["extra_headers"] == ({} if entry else {"X-Project": "synthetic-header"})
 
@@ -130,8 +132,8 @@ def test_advanced_header_entry_keeps_or_clears_headers(setup, monkeypatch, metho
 def test_blank_hidden_input_preserves_existing_env_auth(setup, monkeypatch):
     calls, vault = setup
     assert cli.main(arguments()) == 0
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: "")
     assert cli.main(["connect", "work", "--provider", "openai", "--protocol", config.profile("work")["protocol"],
                      "--base-url", "https://api.openai.com/v1", "--model", "other", "--options", "{}",
                      "--headers-env", "{}"]) == 0
@@ -145,8 +147,8 @@ def test_blank_hidden_input_preserves_existing_env_auth(setup, monkeypatch):
 ])
 def test_empty_hidden_input_on_new_profile(setup, monkeypatch, provider, protocol, exit_code):
     calls, _ = setup
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: "")
     assert cli.main(["connect", "new", "--provider", provider, "--protocol", protocol,
                      "--base-url", "", "--model", "model", "--options", "{}", "--headers-env", "{}"]) == exit_code
     assert len(calls) == (1 if exit_code == 0 else 0)
@@ -161,7 +163,7 @@ def test_failed_test_preserves_existing_profile_and_credentials(setup, monkeypat
     def fail(connection, credentials):
         raise InferenceError("authentication", credentials["api_key"])
 
-    monkeypatch.setattr(cli.gateway, "test_connection", fail)
+    monkeypatch.setattr(gateway, "test_connection", fail)
     assert cli.main(arguments("work", "--model", "new-model")) == 1
     assert config.config_path().read_bytes() == previous
     assert not vault.values
@@ -226,10 +228,10 @@ def test_failed_file_replace_preserves_config_and_cleans_vault(setup, monkeypatc
     _, vault = setup
     assert cli.main(arguments()) == 0
     before = config.config_path().read_bytes()
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     answers = iter([""])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "synthetic-new-vault-key")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: "synthetic-new-vault-key")
 
     def fail_replace(*args):
         raise OSError("disk full")
@@ -294,7 +296,7 @@ def test_interactive_model_discovery_after_draft_credentials(setup, monkeypatch,
     from mortis_engine import discovery
 
     calls, _ = setup
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     answers = iter(["work", "openai", "?", "2"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     discoveries = []
