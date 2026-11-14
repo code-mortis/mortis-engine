@@ -9,7 +9,7 @@ uv tool install --editable .
 mortis --help
 ```
 
-Requires Python 3.12–3.14. `uv` can provide the compatible Python interpreter. To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`. PyPI publication is a later release step.
+Requires Python 3.13–3.14. `uv` can provide the compatible Python interpreter. To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`. PyPI publication is a later release step.
 
 ## Choose what to review
 
@@ -22,6 +22,10 @@ Requires Python 3.12–3.14. `uv` can provide the compatible Python interpreter.
 | `mortis review --all --head feat/update-opentui` | Every eligible tracked file in that branch's latest local commit |
 
 Use `--effort low`, `--effort medium` or `--effort high` to override the repository setting for one run. Local working-tree and staged reviews use an immutable snapshot and leave your Git index, objects and refs untouched. Working-tree reviews require an initial commit. Ignored untracked files, credentials and excluded files are outside review scope.
+
+Use `--concurrency 1` through `--concurrency 8` to override the repository setting for a review or security scan. Reviews default to two concurrent AI batches; a batch may contain multiple files. Scans default to four concurrent file analyses. The override applies only to that run and leaves `mortis.toml` unchanged.
+
+Add `--progress` for a compact live view showing reviewed and failed file counts, active AI requests and elapsed time. Files in active requests appear on separate rows, with up to three names and a count of any others. Mortis sends files in batches; file counts update when a request finishes and its results pass validation. Redirected progress uses plain lines. Every review prints its elapsed time to stderr, including failed or interrupted attempts; resuming measures the current invocation. Progress and timing keep JSON on stdout valid.
 
 ## Review a branch
 
@@ -50,6 +54,7 @@ max_files = 40
 concurrency = 2
 timeout_seconds = 300
 token_budget = 100000
+max_output_tokens = 32768
 
 [[review.rules.rules]]
 path = "**/*.py"
@@ -58,6 +63,20 @@ merge_system_rule = true
 ```
 
 Use `mortis config show --base main` to inspect the effective settings. The base commit controls the rules, file exclusions, background context and optional model override. A profile supplies the endpoint and credentials. Analysis, candidate assessment, fix verification and summaries each use their configured token budget. Use `assessment_token_budget`, `verification_token_budget`, `summary_token_budget` and `summary_timeout_seconds` to configure follow-up stages. `summary_diagram_enabled` enables a structured diagram and `ai_fix_prompts_enabled` includes repair prompts for open findings. For working-tree, staged and full-tree reviews, Mortis reads settings from the selected committed revision.
+
+CLI flags override the committed TOML settings for one run without changing the file:
+
+```sh
+mortis review --all --max-output-tokens 0 --token-budget 0 --timeout-seconds 0 --max-files 0
+mortis scan --max-output-tokens 32768 --assessment-token-budget 200000
+mortis summary --run RUN_ID --max-output-tokens 32768 --summary-token-budget 0
+```
+
+Use `0` for unlimited total token budgets, overall timeouts and maximum files. It is normalized to no limit internally. Concurrency still requires 1–8. Provider request timeouts, transport size limits and provider account/model limits still apply.
+
+`max_output_tokens` controls each AI response, including reasoning, across analysis and follow-up stages. An explicit value is preserved during recovery. With `0`, Mortis omits the output cap for OpenAI Chat Completions and Responses protocols and lets the provider choose its default; this does not guarantee the model's maximum. If a total token budget is finite, Mortis instead bounds output by the remaining budget and serializes these requests so concurrent work cannot reserve the same tokens. A provider may reject a remaining budget above its model's output maximum; set a positive `max_output_tokens` in that case. [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create) and [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages-request-response.html) require an explicit maximum, so those connections need a positive value. Omitting the setting preserves the existing 16,384-token requests and recovery up to 32,768 tokens.
+
+Review flags also include `--assessment-token-budget`, `--verification-token-budget`, `--summary-token-budget` and `--summary-timeout-seconds`. Scans support the assessment and verification budget flags. Standalone verification uses `--verification-token-budget`; background generation uses `--token-budget`. These commands support `--max-output-tokens` and their corresponding overall timeout flag. `--resume` restores the saved overrides and rejects new limit flags.
 
 Mortis assesses candidates before reporting confirmed findings and generates a summary of the reviewed changes. The JSON report retains rejected and uncertain candidates. With `auto_resolve = true`, later reviews of the same scope check earlier open findings against both revisions. A verified fix can update the current local status. Earlier reports remain available by ID.
 
@@ -77,16 +96,21 @@ mortis background --ref HEAD
 
 Run history, task reservations and retained snapshot objects live under `$XDG_STATE_HOME/mortis` (default `~/.local/state/mortis`). These private files can contain reviewed source. Use `mortis review --resume RUN_ID` to continue an interrupted review with its pinned revisions and saved connection. Each workflow accepts `--resume`. Validated task results can be reused. A request interrupted after dispatch retains its reservation with unknown usage.
 
+Resumed reviews and scans keep their saved concurrency override. Omit `--concurrency` when using `--resume`; `--progress` can be enabled when resuming.
+
 ## Scan security
 
 ```sh
 mortis scan --ref HEAD
 mortis scan --ref main --format json
+mortis scan --concurrency 8 --effort high --progress
 ```
+
+`--progress` shows the same compact live view as reviews, including snapshot preparation, Trivy checks, active AI file analyses, assessment and verification. File counts include only validated analysis results. Every scan prints elapsed time to stderr, with or without progress, including failed or interrupted attempts. JSON reports remain on stdout.
 
 The scan requires Trivy 0.76.0 on PATH. Trivy refreshes its advisory database, then checks dependencies, configuration and secrets against an isolated local snapshot. Semantic analysis, candidate assessment and verification use the selected AI profile. Repository source is excluded from the Trivy update request. For a supported npm CVE without an established fixed version, verification can look up the CVE ID in GitHub's public advisory database. A partial scan keeps its coverage and findings and reports an unavailable grade.
 
-An optional `[scan]` table in `mortis.toml` accepts `model`, `effort`, `concurrency`, `language`, `exclusions`, `timeout_seconds`, `token_budget`, `assessment_token_budget` and `verification_token_budget`. Scan defaults use high effort and four concurrent file requests. `mortis config show` displays effective review and scan settings. After rotating or revoking a reported secret, pass `--acknowledge-rotation FINDING_ID` on the next scan of that scope so Mortis can verify removal. Use the ID printed with the original finding.
+An optional `[scan]` table in `mortis.toml` accepts `model`, `effort`, `concurrency`, `language`, `exclusions`, `timeout_seconds`, `token_budget`, `max_output_tokens`, `assessment_token_budget` and `verification_token_budget`. The scan output limit inherits `[review].max_output_tokens` unless overridden in `[scan]`. Scan defaults use high effort and four concurrent file requests. `mortis config show` displays effective review and scan settings. After rotating or revoking a reported secret, pass `--acknowledge-rotation FINDING_ID` on the next scan of that scope so Mortis can verify removal. Use the ID printed with the original finding.
 
 ## Optional code graph
 
@@ -186,6 +210,14 @@ mortis connect aws \
 ```
 
 ## Development
+
+Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
+
+GitHub Actions runs the test suite on Python 3.13 and 3.14 for pushes to `main`
+(including merges), pull requests targeting `main` and manual dispatches.
+Python 3.13 also checks Ruff, builds the wheel/source distribution
+and tests native graph extraction with the parser's pinned dependencies. Provider, Trivy
+and Docker boundaries use mocks in this suite; CI does not make live analysis requests.
 
 ```sh
 uv sync --group dev

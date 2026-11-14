@@ -16,6 +16,7 @@ from . import source as git_source
 from .contracts import ReviewComment
 from .errors import ReviewStopped
 from .planning import fingerprint
+from .settings import output_token_limit
 
 VERSION = "mortis-pr/v1"
 PROMPT_VERSION = "mortis-pr-prompt/v2"
@@ -211,7 +212,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
                           messages=[Message(role="user", content=json.dumps(supplied, ensure_ascii=False))],
                           tools=[read_tool(source_code_policy=source_code_policy, source_tool_policy=source_tool_policy)],
                           output_schema=output_schema(key, units, source_code_policy=source_code_policy),
-                          max_output_tokens=16384, effort=options["effort"], session_id=key)
+                          max_output_tokens=output_token_limit(options), effort=options["effort"], session_id=key)
         omitted = []
         try:
             llm.reservation(connection, request)
@@ -476,6 +477,7 @@ def _recovery_batches(batch, request, sources, parent_key, *, recovery_policy="s
             messages.append(Message(role="user", content=json.dumps(context_payload, ensure_ascii=False)))
         narrowed = request.model_copy(update={"messages": messages, "tools": [],
             "max_output_tokens": (request.max_output_tokens if recovery_policy == "split-units/v1"
+                                  or batch.options.get("max_output_tokens") is not None
                                   else min(32768, request.max_output_tokens * 2)),
             "output_schema": output_schema(key, [unit], source_code_policy=batch.source_code_policy),
             "instructions": request.instructions + (

@@ -45,6 +45,41 @@ def test_only_validated_results_count_and_partial_file_stays_incomplete(monkeypa
     assert report["summary"]["total_tokens"] == 10
 
 
+@pytest.mark.parametrize("same_file", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+def test_progress_tracks_concurrent_files_before_dispatch_and_clears_them(monkeypatch, same_file, failed):
+    events, calls = [], []
+    both_started = asyncio.Event()
+
+    async def send(connection, credentials, request, **kwargs):
+        units = json.loads(request.messages[0].content)["assigned_units"]
+        assert units[0]["path"] in events[-1]["active_paths"]
+        calls.append(request)
+        if len(calls) == 1:
+            await both_started.wait()
+        else:
+            both_started.set()
+            if failed:
+                raise InferenceError("auth", "Rejected", consumption_unknown=False)
+        return final(request)
+
+    monkeypatch.setattr(gateway, "send", send)
+    state, report, _ = engine.run(None, {}, plan(2, same_file), CONNECTION, {**OPTIONS, "concurrency": 2}, {},
+                                  progress=events.append)
+    assert state == ("partial" if failed else "completed")
+    assert events[0]["completed_units"] == 0
+    assert events[1]["active_paths"] == (["app.py"] if same_file else ["app0.py", "app1.py"])
+    assert events[1]["active_requests"] == 2
+    assert events[1]["completed_files"] == 0
+    assert events[1]["selected_files"] == (1 if same_file else 2)
+    assert len(events[2]["active_paths"]) == 1
+    assert events[-1] == {"phase": "analysis", "active_paths": [], "selected_units": 2,
+                          "completed_units": 1 if failed else 2, "active_requests": 0,
+                          "selected_files": 1 if same_file else 2, "failed_files": int(failed),
+                          "completed_files": (0 if failed else 1) if same_file else (1 if failed else 2)}
+    assert sum(unit["status"] == "completed" for unit in report["units"]) == events[-1]["completed_units"]
+
+
 def test_invalid_coverage_has_one_repair_and_never_completes(monkeypatch):
     calls = []
 
@@ -150,6 +185,23 @@ def test_recovery_interruption_preserves_completed_units(monkeypatch):
     assert [unit["status"] for unit in report["units"]] == ["completed", "failed"]
     assert report["units"][1]["error"] == "deadline"
     assert len({request.session_id for request in calls}) == 1
+
+
+@pytest.mark.parametrize("limit,expected", [(None, [16384, 32768, 32768]), (4096, [4096] * 3), (0, [0] * 3)])
+def test_output_recovery_keeps_explicit_limit_and_legacy_default(monkeypatch, limit, expected):
+    sent = []
+    value = plan(2, same_file=True)
+    value.batches = [value.units]
+
+    async def send(connection, credentials, request, **kwargs):
+        sent.append(request.max_output_tokens)
+        if len(sent) == 1:
+            raise InferenceError("output_limit", "Provider output limit", usage=Usage(total_tokens=50))
+        return final(request)
+
+    monkeypatch.setattr(gateway, "send", send)
+    state, _, _ = engine.run(None, {}, value, CONNECTION, {**OPTIONS, "max_output_tokens": limit}, {})
+    assert state == "completed" and sent == expected
 
 
 def test_absolute_deadline_prevents_dispatch(monkeypatch):

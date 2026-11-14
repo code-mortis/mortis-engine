@@ -66,16 +66,18 @@ def test_scan_pins_local_commit_and_excludes_instructions_from_ai(repository):
 
 def test_scanner_failure_prevents_any_ai_dispatch(repository):
     session = EmptySession()
+    events = []
 
     def fail(*args):
         raise ValueError("Secret scanner unavailable")
 
-    report = asyncio.run(service.scan(repository, session=session, scanner=fail))
+    report = asyncio.run(service.scan(repository, session=session, scanner=fail, progress=events.append))
     assert report["status"] == "failed"
     assert report["stages"]["trivy"]["status"] == "failed"
     assert report["stages"]["analysis"]["status"] == "skipped"
     assert report["grade"] is None
     assert session.calls == []
+    assert [event["phase"] for event in events] == ["snapshot", "trivy", "report"]
 
 
 def test_stale_advisories_prevent_clean_grade(repository):
@@ -100,6 +102,31 @@ def test_failed_analysis_does_not_count_as_validated_coverage(repository):
     assert report["coverage"]["completed_files"] == 0
     assert report["coverage"]["selected_files"] == 2
     assert report["grade"] is None
+
+
+@pytest.mark.parametrize("concurrency", [1, 2, 8])
+@pytest.mark.parametrize("failed", [False, True])
+def test_scan_progress_tracks_bounded_concurrent_files_and_validated_coverage(repository, concurrency, failed):
+    events = []
+
+    class DelayedSession(EmptySession):
+        async def ask(self, stage, key, **kwargs):
+            assert kwargs["context"]["assigned_path"] in events[-1]["active_paths"]
+            await asyncio.sleep(0.01)
+            if failed and kwargs["context"]["assigned_path"] == "a.py":
+                raise ValueError("Invalid response")
+            return await super().ask(stage, key, **kwargs)
+
+    report = asyncio.run(service.scan(repository, session=DelayedSession(), scanner=scan_result,
+                        options={"concurrency": concurrency}, progress=events.append))
+    analysis = [event for event in events if event["phase"] == "analysis"]
+    assert max(event["active_requests"] for event in analysis) == min(concurrency, 2)
+    assert all(event["active_requests"] == len(event["active_paths"]) for event in analysis)
+    assert analysis[-1] == {"phase": "analysis", "active_paths": [], "active_requests": 0,
+                            "selected_files": 2, "completed_files": 1 if failed else 2, "failed_files": int(failed)}
+    assert report["coverage"]["completed_files"] == analysis[-1]["completed_files"]
+    assert [event["phase"] for event in events if event["phase"] != "analysis"] == [
+        "snapshot", "trivy", "assessment", "verification", "report"]
 
 
 def test_trivy_secret_normalization_redacts_literal_and_json_forms(repository):

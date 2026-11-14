@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import Field
 
 from mortis_engine.review import file_policy, source
-from mortis_engine.schemas import StrictModel
+from mortis_engine.review.settings import RunLimits
 from mortis_engine.security import digest
 
 from . import advisories, engine
@@ -21,14 +21,11 @@ from .inference import ask
 from .scanner import identity_key, trivy
 
 
-class ScanOptions(StrictModel):
+class ScanOptions(RunLimits):
     concurrency: int = Field(default=4, ge=1, le=8, strict=True)
     effort: Literal["low", "medium", "high"] = "high"
     language: str = Field(default="English", min_length=1, max_length=100)
-    timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
-    token_budget: int | None = Field(default=None, ge=1000, le=5000000)
-    assessment_token_budget: int | None = Field(default=None, ge=1000, le=5000000)
-    verification_token_budget: int | None = Field(default=None, ge=1000, le=5000000)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600, strict=True)
     exclusions: str = Field(default="", max_length=4000)
 
 
@@ -186,7 +183,8 @@ def secret_rules(report):
     return rules
 
 
-async def scan(repository, *, ref="HEAD", session, options=None, previous=None, scanner=None):
+async def scan(repository, *, ref="HEAD", session, options=None, previous=None, scanner=None,
+               progress=lambda value: None):
     options = ScanOptions.model_validate(options or {}).model_dump()
     deadline = time.monotonic() + options["timeout_seconds"] if options["timeout_seconds"] else None
 
@@ -203,6 +201,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
     stages = {name: {"status": "pending"} for name in ("snapshot", "trivy", "analysis", "assessment", "verification", "report")}
     findings, assessments, verifications, problems = [], [], [], []
     units, observed = [], set()
+    progress({"phase": "snapshot"})
     with source.local_repository(repository) as (repo, env), tempfile.TemporaryDirectory(prefix="mortis-security-") as temporary:
         sha = source.resolve_commit(repo, env, ref)
         item = engine.Snapshot(Path(temporary), sha, env, stopped, git=repo, key=identity_key(create=not (previous and secret_rules(previous))))
@@ -220,6 +219,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         stages["snapshot"] = {"status": "completed", "files": len(item.inventory)}
         problems.extend(item.problems)
         selected_scanner = scanner or trivy
+        progress({"phase": "trivy"})
         try:
             if inspect.iscoroutinefunction(selected_scanner):
                 result = await selected_scanner(item, options.get("timeout_seconds") or 300, item.stopped)
@@ -230,6 +230,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             for stage in ("analysis", "assessment", "verification"):
                 stages[stage] = {"status": "skipped"}
             stages["report"] = {"status": "completed"}
+            progress({"phase": "report"})
             return {"schema_version": "mortis.security/v1", "repository": repository_name, "commit": sha, "ref": ref,
                 "status": "failed", "grade": None, "rating_policy": "highest-unresolved-severity/v1",
                 "findings": [{**old, "outcome": "not_observed"} for old in previous_findings],
@@ -252,9 +253,18 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         code_paths = [path for path, row in item.inventory.items() if row["code"]]
         semaphore = asyncio.Semaphore(options["concurrency"])
         candidates = []
+        active_paths = set()
+
+        def report_progress():
+            progress({"phase": "analysis", "selected_files": len(code_paths),
+                "completed_files": sum(unit["status"] == "completed" for unit in units),
+                "failed_files": sum(unit["status"] == "failed" for unit in units),
+                "active_requests": len(active_paths), "active_paths": sorted(item.redact(path) for path in active_paths)})
 
         async def analyze(path):
             async with semaphore:
+                active_paths.add(path)
+                report_progress()
                 try:
                     context = {"assigned_path": path, "head_sha": sha, "diff": "",
                                "sources": {"current": {path: item.source(path)}}}
@@ -265,7 +275,11 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     units.append({"task": "analysis:" + path, "status": "failed"})
                     problems.append(f"Security analysis incomplete for {path}: {item.redact(str(exc))[:1000]}")
                     return []
+                finally:
+                    active_paths.remove(path)
+                    report_progress()
 
+        report_progress()
         for proposed in await asyncio.gather(*(analyze(path) for path in code_paths)):
             candidates.extend(proposed)
         completed = sum(unit["status"] == "completed" for unit in units)
@@ -285,6 +299,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 return None
 
         remaining = [(index, proposal, paths) for index, (proposal, paths) in enumerate(candidates)]
+        progress({"phase": "assessment"})
         while remaining:
             history = {old["id"]: old for old in [*previous_findings, *findings]}
             batch = assessment_batch(remaining, list(history.values()), item, options["concurrency"])
@@ -316,6 +331,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                                and not any(a["result"]["verdict"] == "uncertain" for a in assessments) else "partial",
                                "total": len(candidates), "completed": len(assessments)}
         advisory_cache = {}
+        progress({"phase": "verification"})
         for old in previous_findings:
             if old["id"] in observed:
                 continue
@@ -359,6 +375,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         stages["verification"] = {"status": "partial" if any(v["verdict"] == "uncertain" for v in verifications) else "completed",
                                   "total": len(verifications), "completed": len(verifications)}
         stages["report"] = {"status": "completed"}
+        progress({"phase": "report"})
         complete = not problems
         rating = grade_for(row["severity"] for row in findings if row.get("state", "open") in {"open", "accepted_risk"})
         report = {"schema_version": "mortis.security/v1", "repository": repository_name, "commit": sha, "ref": ref,

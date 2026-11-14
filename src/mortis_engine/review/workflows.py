@@ -47,6 +47,7 @@ async def _ask(session, stage, key, context, instructions, schema, validator, op
         context=supplied, schema=selected_schema,
         validate=lambda raw: validator(evidence.resolve(raw, supplied, history), context),
         effort=options.get("effort", "medium"), token_budget=options.get(f"{stage}_token_budget"),
+        max_output_tokens=options.get("max_output_tokens"),
         timeout=options.get("summary_timeout_seconds") if stage == "summary" else options.get("timeout_seconds"),
     )
 
@@ -150,6 +151,7 @@ async def generate_summary(repo, env, report, options, session):
         "summary", report["head_sha"], instructions=instructions, context=context, schema=schema,
         validate=lambda value: summary.validate_response(value, context), effort=options.get("effort", "medium"),
         token_budget=options.get("summary_token_budget"), timeout=options.get("summary_timeout_seconds"),
+        max_output_tokens=options.get("max_output_tokens"),
     )
     return {"status": "completed", "result": result, "limited_context": context["limited_context"],
             **({"warning": context["diagram_warning"]} if context.get("diagram_warning") else {})}
@@ -171,6 +173,7 @@ async def generate_background(repo, env, sha, options, session, *, repository="l
         validate=lambda value: {"background": background.validate_result(value)},
         effort=options.get("effort", "medium"), token_budget=options.get("token_budget"),
         timeout=options.get("timeout_seconds"),
+        max_output_tokens=options.get("max_output_tokens"),
     )
 
 

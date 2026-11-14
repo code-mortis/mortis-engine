@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Isolate local configuration and state
+        run: |
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/mortis-config" >> "$GITHUB_ENV"
+          echo "XDG_STATE_HOME=$RUNNER_TEMP/mortis-state" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.9.14"
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked --group dev
+      - name: Run tests
+        run: uv run --locked pytest -q
+      - name: Test native parser with its pinned dependencies
+        if: matrix.python == '3.13'
+        run: >-
+          uv run --locked --with-requirements src/mortis_engine/code_graph/requirements.txt
+          pytest -q tests/code_graph/test_graph.py::test_native_extractor_retains_real_source_contract
+      - name: Lint
+        if: matrix.python == '3.13'
+        run: uv run --locked ruff check .
+      - name: Build wheel and source distribution
+        if: matrix.python == '3.13'
+        run: uv build

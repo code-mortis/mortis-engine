@@ -58,6 +58,8 @@ class Session:
         self.deadline = deadline
         self.scan_budget = scan_budget
         self.stage_deadlines = {}
+        self.uncapped_lock = None
+        self.uncapped_loop = None
         self.client = None
         self.records = history.attempts(self.run_id) if history else {}
         for _, row, _ in self.records.values():
@@ -85,6 +87,20 @@ class Session:
         return row["reserved_tokens"] if row["consumption_unknown"] else row["usage"].get("total_tokens") or 0
 
     async def send(self, stage, key, request, *, client, timeout_at, token_budget, stopped, accept):
+        if request.max_output_tokens == 0 and (token_budget or self.scan_budget):
+            # A finite total budget supplies the output ceiling, one uncapped request at a time.
+            loop = asyncio.get_running_loop()
+            if self.uncapped_loop is not loop:
+                self.uncapped_lock, self.uncapped_loop = asyncio.Lock(), loop
+
+            async def limited():
+                async with self.uncapped_lock:
+                    return await self._send(stage, key, request, client, timeout_at, token_budget, stopped, accept)
+
+            return await llm_http._bounded(limited(), stopped, timeout_at - time.monotonic())
+        return await self._send(stage, key, request, client, timeout_at, token_budget, stopped, accept)
+
+    async def _send(self, stage, key, request, client, timeout_at, token_budget, stopped, accept):
         for retry in range(3):
             task = key + (f":retry:{retry}" if retry else "")
             try:
@@ -111,17 +127,31 @@ class Session:
                                  retryable=row.get("retryable", False), retry_after=row.get("retry_after"))
         if stopped() or time.monotonic() >= until:
             raise InferenceError("deadline", "The stage deadline has expired.", consumption_unknown=False)
-        amount = gateway.reservation(self.connection, request) + request.max_output_tokens
         rows = [row for _, row, _ in self.records.values() if row["stage"] == stage or
                 stage.startswith("security_") and row["stage"].startswith("security_")]
         if any(row["consumption_unknown"] and row["status"] != "running" for row in rows):
             raise InferenceError("usage_unknown", "An earlier request has unknown token usage.", consumption_unknown=False)
+        if request.max_output_tokens == 0:
+            remaining = []
+            if budget is not None:
+                remaining.append(budget - sum(self.charge(row) for row in rows if row["stage"] == stage))
+            if self.scan_budget is not None:
+                remaining.append(self.scan_budget - sum(self.charge(row) for row in rows))
+            if remaining:
+                # Include the output field and its integer digits in the conservative input reservation.
+                output = min(remaining) - gateway.reservation(self.connection, request.model_copy(update={"max_output_tokens": 1})) - 16
+                if output < 1:
+                    raise InferenceError("budget", "The token budget cannot admit this request.", consumption_unknown=False)
+                request = request.model_copy(update={"max_output_tokens": output})
+        amount = gateway.reservation(self.connection, request) + request.max_output_tokens
         if (budget is not None and sum(self.charge(row) for row in rows if row["stage"] == stage) + amount > budget
                 or self.scan_budget is not None and sum(self.charge(row) for row in rows) + amount > self.scan_budget):
             raise InferenceError("budget", "The token budget cannot admit this request.", consumption_unknown=False)
         # No awaits between admission, reservation and the durable dispatch marker.
         row = {"task_key": key, "stage": stage, "reserved_tokens": amount, "usage": {},
                "consumption_unknown": True, "status": "running"}
+        if request.max_output_tokens == 0:
+            row["output_unbounded"] = True
         if self.history:
             self.history.start_attempt(self.run_id, row, digest)
         self.records[stage, key] = (digest, row, None)
@@ -153,14 +183,15 @@ class Session:
         return Response.model_validate(result)
 
     async def ask(self, stage, key, *, instructions, context, schema, validate, effort="medium", token_budget=None,
-                  timeout=None):
+                  timeout=None, max_output_tokens=None):
         supplied = sanitize(context, self.credentials)
         content = (evidence_bundle(supplied) if "sources" in supplied and "diff" in supplied
                    else json.dumps(supplied, ensure_ascii=False))
         session_id = hashlib.sha256(encode([self.run_id, stage, key]).encode()).hexdigest()
         request = Request(instructions=sanitize(instructions, self.credentials),
                           messages=[Message(role="user", content=content)], output_schema=schema_for_transport(schema),
-                          effort=effort, max_output_tokens=16384, session_id=session_id)
+                          effort=effort, max_output_tokens=16384 if max_output_tokens is None else max_output_tokens,
+                          session_id=session_id)
         now = time.monotonic()
         stage_end = self.stage_deadlines.setdefault(stage, now + timeout if timeout else float("inf"))
         until = min(stage_end, self.deadline if self.deadline is not None and stage != "summary" else float("inf"),

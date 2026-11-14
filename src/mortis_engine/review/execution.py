@@ -17,6 +17,7 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
             deadline=None, session=None):
     async def run():
         outcomes = {}
+        active_batches = {}
         options = prepared[0].options if prepared else {}
         budget = options.get("token_budget")
         seconds = options.get("timeout_seconds")
@@ -32,6 +33,20 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
             for unit in batch.units:
                 if outcomes.get(unit.key, {}).get("status") != "completed":
                     outcomes[unit.key] = {"status": "failed", "error": code}
+
+        def report_progress():
+            progress({"phase": "analysis", "completed_units": sum(
+                value["status"] == "completed" for value in outcomes.values()),
+                "selected_units": len(plan.units),
+                "selected_files": len(plan.selected),
+                "completed_files": sum(not item.error and bool(item.units) and all(
+                    outcomes.get(unit.key, {}).get("status") == "completed" for unit in item.units)
+                    for item in plan.selected),
+                "failed_files": sum(bool(item.error) or any(
+                    outcomes.get(unit.key, {}).get("status") == "failed" for unit in item.units)
+                    for item in plan.selected) if not plan.limit_reason else 0,
+                "active_requests": len(active_batches),
+                "active_paths": sorted({unit.path for batch in active_batches.values() for unit in batch.units})})
 
         async def batch_run(batch, client, *, recovered=False, session_id=None):
             if plan.limit_reason or batch.error:
@@ -124,6 +139,9 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                             fail(batch, "cancelled" if stopped() else "deadline")
                         else:
                             try:
+                                if not batch.error and not plan.limit_reason:
+                                    active_batches[batch.key] = batch
+                                    report_progress()
                                 await batch_run(batch, client)
                             except ReviewStopped:
                                 fail(batch, "cancelled" if stopped() else "deadline")
@@ -131,10 +149,9 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                                 fail(batch, "deadline")
                             except (ValueError, OSError):
                                 fail(batch, "source_unavailable")
-                        progress({"phase": "analysis", "completed_units": sum(
-                            value["status"] == "completed" for value in outcomes.values()),
-                            "selected_units": len(plan.units)})
                     finally:
+                        active_batches.pop(batch.key, None)
+                        report_progress()
                         queue.task_done()
 
             workers = [asyncio.create_task(worker()) for _ in range(min(options.get("concurrency", 2), len(prepared)))]

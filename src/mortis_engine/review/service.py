@@ -18,6 +18,8 @@ def scope_ref(repo, env, ref):
 
 
 def effective_connection(connection, options):
+    if options.get("max_output_tokens") == 0 and connection["protocol"] in {"anthropic", "anthropic-bedrock"}:
+        raise ValueError("Anthropic and Bedrock require a positive max_output_tokens value; their APIs cannot omit the output limit.")
     return {**connection, "model": options.get("model") or connection["model"],
             "options": {"timeout_sec": 300, **connection.get("options", {})}}
 
@@ -48,16 +50,21 @@ def _inputs(history, repository, mode, base, head, resume):
         yield snap, saved
 
 
-def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None):
+def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,
+                   progress=lambda value: None, concurrency=None, overrides=None):
     """Review the changes from the common ancestor to the pinned head."""
     return review_local(repository, mode="commits", base=base, head=head, connection=connection,
-                        get_credentials=get_credentials, on_plan=on_plan)
+                        get_credentials=get_credentials, on_plan=on_plan, progress=progress, concurrency=concurrency,
+                        overrides=overrides)
 
 
 def review_local(repository, *, connection, get_credentials, mode="worktree", base=None, head="HEAD",
-                 effort=None, graph=False, resume=None, profile=None, on_plan=None):
+                 effort=None, graph=False, resume=None, profile=None, on_plan=None, progress=lambda value: None,
+                 concurrency=None, overrides=None):
     """Review local inputs with the saved connection and independent workflow budgets."""
     started = time.time()
+    if resume and (concurrency is not None or overrides):
+        raise ValueError("--resume uses the inputs and options of the saved run.")
     with History(repository) as history:
         if resume and history.row(resume, "review")["report"] is not None:
             return history.report(resume)
@@ -65,8 +72,13 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
             if saved:
                 effort, graph = saved["effort"], saved["graph"]
+                concurrency = saved.get("concurrency")
+                overrides = saved.get("overrides")
                 started = history.row(resume)["started"]
             options.update(effort=effort or options["effort"], review_mode=snap.mode, _settings_sha=snap.settings_sha)
+            settings.apply_overrides(options, overrides)
+            if concurrency is not None:
+                options["concurrency"] = settings.RepoSettings.model_validate({"concurrency": concurrency}, strict=True).concurrency
             connection = effective_connection(connection, options)
             if saved:
                 if planning.fingerprint(connection) != saved["connection"]:
@@ -79,7 +91,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 previous = history.previous_ids("review", scope)
                 manifest = {f.name: getattr(snap, f.name) for f in fields(snap) if f.name not in {"env", "repo"}}
                 run_id = history.begin("review", scope, {"connection": planning.fingerprint(connection), "profile": profile,
-                    "snapshot": manifest, "history": previous, "effort": effort, "graph": graph})
+                    "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
+                    "overrides": overrides})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)
@@ -104,9 +117,10 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 graphs, graph_status = {}, None
                 if graph and plan.batches:
                     from mortis_engine import code_graph
+                    progress({"phase": "graph"})
                     graphs, graph_status = code_graph.enrich(snap.repo, snap.env, plan, {**options, "_graph": graph}, credentials, stopped)
                 status, raw, findings = engine.run(snap.repo, snap.env, plan, connection, options, credentials,
-                    deadline=deadline, session=session, graph_by_path=graphs)
+                    deadline=deadline, session=session, graph_by_path=graphs, progress=progress)
                 result = {"schema_version": "mortis.review/v1", "run_id": run_id, "status": status,
                     "base_sha": snap.base_sha, "head_sha": snap.head_sha, "merge_base": snap.merge_base,
                     "settings_sha": snap.settings_sha, "revision": (snap.settings_sha if snap.mode == "all" else snap.head_sha),
@@ -126,6 +140,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                         return await workflows.postprocess(snap.repo, snap.env, result, options, session,
                             history=[history.report(row) for row in previous])
 
+                progress({"phase": "postprocess"})
                 result = asyncio.run(finish())
                 result["usage"] = session.usage()
                 result["usage"]["budget_exceeded"] |= raw["summary"]["budget_exceeded"]
