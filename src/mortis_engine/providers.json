@@ -1,0 +1,195 @@
+[
+  {
+    "name": "anthropic",
+    "displayName": "Anthropic Claude API",
+    "protocol": "anthropic",
+    "baseUrl": "https://api.anthropic.com"
+  },
+  {
+    "name": "baidu-qianfan",
+    "displayName": "Baidu Qianfan API",
+    "protocol": "openai",
+    "baseUrl": "https://qianfan.baidubce.com/v2"
+  },
+  {
+    "name": "bedrock",
+    "displayName": "AWS Bedrock (Anthropic models)",
+    "protocol": "anthropic-bedrock",
+    "baseUrl": "",
+    "ambientAuth": true
+  },
+  {
+    "name": "dashscope",
+    "displayName": "Alibaba DashScope API",
+    "protocol": "openai",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  },
+  {
+    "name": "dashscope-tokenplan",
+    "displayName": "Alibaba DashScope Token Plan API",
+    "protocol": "openai",
+    "baseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+  },
+  {
+    "name": "deepseek",
+    "displayName": "DeepSeek API",
+    "protocol": "openai",
+    "baseUrl": "https://api.deepseek.com"
+  },
+  {
+    "name": "edenai",
+    "displayName": "Eden AI",
+    "protocol": "openai",
+    "baseUrl": "https://api.edenai.run/v3"
+  },
+  {
+    "name": "gemini",
+    "displayName": "Google Gemini API",
+    "protocol": "openai",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai"
+  },
+  {
+    "name": "hy-tokenplan",
+    "displayName": "Tencent Hunyuan Token Plan API",
+    "protocol": "openai",
+    "baseUrl": "https://api.lkeap.cloud.tencent.com/plan/v3"
+  },
+  {
+    "name": "iflytek",
+    "displayName": "iFlytek Spark API",
+    "protocol": "openai",
+    "baseUrl": "https://spark-api-open.xf-yun.com/v1"
+  },
+  {
+    "name": "kimi",
+    "displayName": "Kimi Moonshot API",
+    "protocol": "openai",
+    "baseUrl": "https://api.moonshot.cn/v1"
+  },
+  {
+    "name": "kimi-global",
+    "displayName": "Kimi Moonshot API (Global)",
+    "protocol": "openai",
+    "baseUrl": "https://api.moonshot.ai/v1"
+  },
+  {
+    "name": "litellm",
+    "displayName": "LiteLLM AI Gateway",
+    "protocol": "openai",
+    "baseUrl": "http://localhost:4000/v1"
+  },
+  {
+    "name": "mimo",
+    "displayName": "Xiaomi MiMo API",
+    "protocol": "openai",
+    "baseUrl": "https://api.xiaomimimo.com/v1"
+  },
+  {
+    "name": "minimax",
+    "displayName": "MiniMax API",
+    "protocol": "openai",
+    "baseUrl": "https://api.minimax.io/v1"
+  },
+  {
+    "name": "minimax-cn",
+    "displayName": "MiniMax CN API",
+    "protocol": "openai",
+    "baseUrl": "https://api.minimaxi.com/v1"
+  },
+  {
+    "name": "mistral",
+    "displayName": "Mistral AI",
+    "protocol": "openai",
+    "baseUrl": "https://api.mistral.ai/v1"
+  },
+  {
+    "name": "novita",
+    "displayName": "Novita API",
+    "protocol": "openai",
+    "baseUrl": "https://api.novita.ai/openai"
+  },
+  {
+    "name": "ollama-cloud",
+    "displayName": "Ollama Cloud API",
+    "protocol": "openai",
+    "baseUrl": "https://ollama.com/v1"
+  },
+  {
+    "name": "openai",
+    "displayName": "OpenAI API",
+    "protocol": "openai",
+    "baseUrl": "https://api.openai.com/v1"
+  },
+  {
+    "name": "openai-responses",
+    "displayName": "OpenAI Responses API",
+    "protocol": "openai-responses",
+    "baseUrl": "https://api.openai.com/v1"
+  },
+  {
+    "name": "openrouter",
+    "displayName": "OpenRouter",
+    "protocol": "openai",
+    "baseUrl": "https://openrouter.ai/api/v1"
+  },
+  {
+    "name": "siliconflow",
+    "displayName": "SiliconFlow API",
+    "protocol": "openai",
+    "baseUrl": "https://api.siliconflow.com/v1"
+  },
+  {
+    "name": "siliconflow-cn",
+    "displayName": "SiliconFlow CN API",
+    "protocol": "openai",
+    "baseUrl": "https://api.siliconflow.cn/v1"
+  },
+  {
+    "name": "tencent-tokenhub",
+    "displayName": "Tencent TokenHub API",
+    "protocol": "openai",
+    "baseUrl": "https://tokenhub.tencentmaas.com/v1"
+  },
+  {
+    "name": "volcengine",
+    "displayName": "Volcano Engine Ark API",
+    "protocol": "openai",
+    "baseUrl": "https://ark.cn-beijing.volces.com/api/v3"
+  },
+  {
+    "name": "xai",
+    "displayName": "xAI Grok API",
+    "protocol": "openai",
+    "baseUrl": "https://api.x.ai/v1"
+  },
+  {
+    "name": "z-ai",
+    "displayName": "Z.AI API",
+    "protocol": "openai",
+    "baseUrl": "https://open.bigmodel.cn/api/paas/v4"
+  },
+  {
+    "name": "z-ai-coding",
+    "displayName": "Z.AI Coding Plan API",
+    "protocol": "openai",
+    "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4"
+  },
+  {
+    "name": "opencode",
+    "displayName": "OpenCode API",
+    "protocol": "openai-responses",
+    "baseUrl": "https://opencode.ai/zen/v1"
+  },
+  {
+    "name": "opencode-go",
+    "displayName": "OpenCode Go",
+    "protocol": "openai",
+    "baseUrl": "https://opencode.ai/zen/go/v1"
+  },
+  {
+    "name": "custom",
+    "displayName": "Custom endpoint",
+    "protocol": "openai",
+    "baseUrl": ""
+  }
+]
