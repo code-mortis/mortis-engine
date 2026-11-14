@@ -9,7 +9,7 @@ uv tool install --editable .
 mortis --help
 ```
 
-Requires Python 3.12–3.14. `uv` can provide the compatible Python interpreter. To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`. PyPI publication is a later release step.
+Requires Python 3.13–3.14. `uv` can provide the compatible Python interpreter. To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`. PyPI publication is a later release step.
 
 ## Choose what to review
 
@@ -213,7 +213,7 @@ mortis connect aws \
 
 Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
 
-GitHub Actions runs the test suite on Python 3.12, 3.13 and 3.14 for pushes to `main`
+GitHub Actions runs the test suite on Python 3.13 and 3.14 for pushes to `main`
 (including merges), pull requests targeting `main` and manual dispatches.
 Python 3.13 also checks Ruff, builds the wheel/source distribution
 and tests native graph extraction with the parser's pinned dependencies. Provider, Trivy

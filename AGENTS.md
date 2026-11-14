@@ -55,7 +55,7 @@ Paths above are relative to `src/mortis_engine/` unless stated otherwise.
 
 ## Checks and isolation
 
-Use the existing Python 3.12–3.14 / uv / pytest / Ruff setup from `pyproject.toml`:
+Use the existing Python 3.13–3.14 / uv / pytest / Ruff setup from `pyproject.toml`:
 
 ```sh
 uv sync --group dev
