@@ -12,7 +12,7 @@ from mortis_engine.findings import snapshot as triage_snapshot
 from mortis_engine.history import History
 from mortis_engine.workflow import Session
 
-from . import context, engine, planning, settings, snapshots, source, workflows
+from . import assessment, context, engine, planning, settings, snapshots, source, workflows
 
 
 def scope_ref(repo, env, ref):
@@ -39,9 +39,10 @@ def credentials_for_history(history, get_credentials):
 
 
 @contextmanager
-def _inputs(history, repository, mode, base, head, resume):
+def _inputs(history, repository, mode, base, head, resume, overrides):
     if resume is None:
-        with snapshots.snapshot(repository, mode=mode, base=base, head=head, object_cache=history.objects) as snap:
+        with snapshots.snapshot(repository, mode=mode, base=base, head=head, object_cache=history.objects,
+                                overrides=overrides) as snap:
             yield snap, None
         return
     row = history.row(resume, "review")
@@ -51,6 +52,23 @@ def _inputs(history, repository, mode, base, head, resume):
         for sha in (snap.base_sha, snap.head_sha, snap.settings_sha):
             source.resolve_commit(repo, env, sha)
         yield snap, saved
+
+
+
+def unit_byte_limit(prompt_token_ceiling=None):
+    """Use the same bounded source units for execution and connection-free previews."""
+    if prompt_token_ceiling is not None and (
+        type(prompt_token_ceiling) is not int or not 4096 <= prompt_token_ceiling <= 2_000_000
+    ):
+        raise ValueError("prompt_token_ceiling must be a whole number from 4096 to 2000000 tokens.")
+    return max(1024, min(49152, (prompt_token_ceiling - 8192) // 2)) if prompt_token_ceiling is not None else 49152
+
+
+def plan_snapshot(snap, options, stopped=lambda: False, *, prompt_token_ceiling=None,
+                  full_tree_source_policy=planning.FULL_TREE_SOURCE_POLICY):
+    return planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
+        options, stopped, max_unit_bytes=unit_byte_limit(prompt_token_ceiling), trusted_rules_sha=snap.settings_sha,
+        full_tree_source_policy=full_tree_source_policy)
 
 
 def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,
@@ -74,8 +92,21 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
     with History(repository) as history:
         if resume and history.row(resume, "review")["report"] is not None:
             return history.report(resume)
-        with _inputs(history, repository, mode, base, head, resume) as (snap, saved):
+        with _inputs(history, repository, mode, base, head, resume, overrides) as (snap, saved):
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
+            full_tree_source_policy = saved.get("full_tree_source_policy") if saved else planning.FULL_TREE_SOURCE_POLICY
+            source_tool_policy = saved.get("source_tool_policy", "bounded-reads/v2") if saved else engine.SOURCE_TOOL_POLICY
+            attribution = saved.get("assessment_attribution") if saved else assessment.ATTRIBUTION_VERSION
+            options["_evidence_policy"] = planning.saved_evidence_policy(saved) if saved else planning.EVIDENCE_POLICY
+            planning.supports_test_evidence(options)
+            if saved and "evidence_policy" not in saved:
+                options["_unmarked_verification_policy"] = True
+            options["_discovery_result_policy"] = saved.get("discovery_result_policy") if saved else engine.DISCOVERY_RESULT_POLICY
+            if options["_discovery_result_policy"] not in {None, engine.DISCOVERY_RESULT_POLICY}:
+                raise ValueError("The saved discovery result policy is unsupported.")
+            if attribution not in {None, assessment.ATTRIBUTION_VERSION}:
+                raise ValueError("The saved assessment attribution version is unsupported.")
+            options["_assessment_attribution"] = attribution
             if saved:
                 effort, graph = saved["effort"], saved["graph"]
                 concurrency = saved.get("concurrency")
@@ -110,7 +141,10 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 run_id = history.begin("review", scope, {"connection": connection_identity, "profile": profile,
                     "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
                     "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
-                    "triage_versions": decisions, "assessment_runs": assessment_runs})
+                    "triage_versions": decisions, "assessment_runs": assessment_runs,
+                    "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution,
+                    "source_tool_policy": source_tool_policy, "evidence_policy": options["_evidence_policy"],
+                    "discovery_result_policy": options["_discovery_result_policy"]})
             options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
@@ -123,10 +157,9 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                         raise TimeoutError("The review reached its configured time limit.")
                     return False
 
-                ceiling = connection["options"].get("prompt_token_ceiling")
-                unit_bytes = max(1024, min(49152, (ceiling - 8192) // 2)) if ceiling is not None else 49152
-                plan = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
-                    options, stopped, max_unit_bytes=unit_bytes, trusted_rules_sha=snap.settings_sha)
+                plan = plan_snapshot(snap, options, stopped,
+                    prompt_token_ceiling=connection["options"].get("prompt_token_ceiling"),
+                    full_tree_source_policy=full_tree_source_policy)
                 if on_plan is not None and plan.batches:
                     on_plan(len(plan.selected), connection["model"])
                 # An empty diff needs neither a model nor credentials unless there are prior fixes to verify.
@@ -140,7 +173,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     progress({"phase": "graph"})
                     graphs, graph_status = code_graph.enrich(snap.repo, snap.env, plan, {**options, "_graph": graph}, credentials, stopped)
                 status, raw, findings = engine.run(snap.repo, snap.env, plan, connection, options, credentials,
-                    deadline=deadline, session=session, graph_by_path=graphs, progress=progress)
+                    deadline=deadline, session=session, graph_by_path=graphs, progress=progress,
+                    source_tool_policy=source_tool_policy)
                 result = {"schema_version": "mortis.review/v1", "run_id": run_id, "status": status,
                     "base_sha": snap.base_sha, "head_sha": snap.head_sha, "merge_base": snap.merge_base,
                     "settings_sha": snap.settings_sha, "revision": (snap.settings_sha if snap.mode == "all" else snap.head_sha),
@@ -150,6 +184,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "excluded_files": list({i["path"]: i for i in [*snap.excluded, *raw["excluded_files"]]}.values()),
                     "errors": raw["errors"], "warnings": raw["warnings"] + [{"message": w} for w in snap.warnings],
                     "usage": session.usage()}
+                if "second_pass" in raw:
+                    result["second_pass"] = raw["second_pass"]
                 if graph_status is not None:
                     result["code_graph"] = graph_status
                 if graphs:

@@ -51,6 +51,11 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
             options = (settings.load_scan(repo, env, sha) if kind == "scan" else
                        settings.load(repo, env, original["settings_sha"] if kind == "summary" else sha))
             options["_settings_sha"] = original["settings_sha"] if kind == "summary" else sha
+            if kind == "verify":
+                options["_evidence_policy"] = planning.saved_evidence_policy(saved) if saved else planning.EVIDENCE_POLICY
+                planning.supports_test_evidence(options)
+                if saved and "evidence_policy" not in saved:
+                    options["_unmarked_verification_policy"] = True
             settings.apply_overrides(options, overrides, scan=kind == "scan")
             if effort:
                 options["effort"] = effort
@@ -71,7 +76,8 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                 assessment_runs = history.previous_ids("assessment")
                 run_id = history.begin(kind, scope, {"ref": ref, "sha": sha, "connection": identity, "previous": previous,
                     "profile": profile, "finding_run": finding_run, "effort": effort, "rotations": list(rotations),
-                    "concurrency": concurrency, "overrides": overrides, "triage_versions": decisions, "assessment_runs": assessment_runs})
+                    "concurrency": concurrency, "overrides": overrides, "triage_versions": decisions, "assessment_runs": assessment_runs,
+                    **({"evidence_policy": options["_evidence_policy"]} if kind == "verify" else {})})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)

@@ -1,12 +1,83 @@
 import pytest
 
-from mortis_engine.review import snapshots, source
+from mortis_engine.review import engine, planning, preview, settings, snapshots, source
+from mortis_engine.schemas import ToolCall
 
 from .git_helpers import commit, git
 
 
 def contents(value, path):
     return source.read_source(value.repo, value.env, value.head_sha, path)
+
+
+def supporting_sources(value, paths):
+    options = settings.load(value.repo, value.env, value.settings_sha)
+    plan = planning.plan_review(value.repo, value.env, value.base_sha, value.head_sha, value.merge_base,
+                                options, lambda: False)
+    calls = [ToolCall(id=str(index), name="read_source", arguments={"path": path, "start_line": 1, "end_line": 1})
+             for index, path in enumerate(paths)]
+    notice, sources = engine.read_sources(calls, repo=value.repo, env=value.env, plan=plan, options=options,
+                                         credentials={}, authorize=lambda: None, stopped=lambda: False)
+    return plan, notice, sources
+
+
+@pytest.mark.parametrize("mode,expected", [("worktree", "working"), ("staged", "staged"), ("commits", "original")])
+def test_supporting_tests_read_the_selected_snapshot_without_becoming_targets(repo, mode, expected):
+    path, untracked = "tests/test_retry.py", "tests/test_new.py"
+    base = commit(repo, {"app.py": "value = 1\n", path: "assert original\n",
+                         "tests/test_unchanged.py": "assert unchanged\n"})
+    commit(repo, {"app.py": "value = 2\n"})
+    (repo / path).write_text("assert staged\n")
+    git(repo, "add", path)
+    (repo / path).write_text("assert working\n")
+    (repo / untracked).write_text("assert untracked\n")
+    index = (repo / ".git/index").read_bytes()
+    objects = sorted(p.relative_to(repo / ".git/objects") for p in (repo / ".git/objects").rglob("*") if p.is_file())
+    arguments = {"base": base} if mode == "commits" else {}
+    with snapshots.snapshot(repo, mode=mode, **arguments) as value:
+        (repo / path).write_text("assert later_mutation\n")
+        (repo / untracked).write_text("assert later_mutation\n")
+        plan, notice, sources = supporting_sources(value, [path, untracked])
+        assert all(not row.path.startswith("tests/") for row in plan.selected)
+        assert notice["selections"][0]["reason"] == "available"
+        assert {row["path"]: row["text"] for row in sources} == {
+            path: f"assert {expected}", **({untracked: "assert untracked"} if mode == "worktree" else {})}
+        assert notice["selections"][1]["reason"] == ("available" if mode == "worktree" else "unavailable")
+    assert (repo / ".git/index").read_bytes() == index
+    assert objects == sorted(p.relative_to(repo / ".git/objects") for p in (repo / ".git/objects").rglob("*") if p.is_file())
+    if mode == "worktree":
+        result = preview.preview_local(repo)
+        exclusions = {row["path"]: row["reason"] for row in result["excluded_files"]}
+        assert all(exclusions[name] == "default_test" for name in (path, untracked, "tests/test_unchanged.py"))
+
+
+@pytest.mark.parametrize("old,new,configuration,permitted", [
+    ("tests/test_old.py", "tests/test_retry.py", "", True),
+    ("tests/test_privatekey.py", "tests/test_retry.py", "", False),
+    ("tests/test_retry.py", "tests/test_privatekey.py", "", False),
+    ("blocked/test_retry.py", "tests/test_retry.py", '[review]\nexclusions = "blocked/**"\n', False),
+    ("tests/test_retry.py", "blocked/test_retry.py", '[review.rules]\nexclude = ["blocked/**"]\n', False),
+    ("fixtures/test_retry.py", "tests/test_retry.py", "", False),
+])
+def test_worktree_supporting_test_renames_preserve_both_endpoint_exclusions(repo, old, new, configuration, permitted):
+    commit(repo, {"mortis.toml": configuration, old: "assert child_count == 0\n"})
+    (repo / new).parent.mkdir(parents=True, exist_ok=True)
+    (repo / old).rename(repo / new)
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        plan, notice, sources = supporting_sources(value, [new])
+        assert not plan.selected
+        assert notice["selections"][0]["reason"] == ("available" if permitted else "excluded")
+        assert [row["text"] for row in sources] == (["assert child_count == 0"] if permitted else [])
+
+
+@pytest.mark.parametrize("limit,message", [("MAX_SOURCE_BYTES", "20 MB read limit"),
+                                        ("MAX_SNAPSHOT_BYTES", "100 MB snapshot admission limit")])
+def test_worktree_supporting_tests_keep_snapshot_admission_limits(repo, monkeypatch, limit, message):
+    commit(repo, {"app.py": "value = 1\n"})
+    (repo / "test_new.py").write_text("assert True\n")
+    monkeypatch.setattr(snapshots, limit, 8)
+    with pytest.raises(ValueError, match=message), snapshots.snapshot(repo, mode="worktree"):
+        pass
 
 
 def test_worktree_includes_staged_unstaged_and_untracked_with_immutable_sources(repo, tmp_path):

@@ -85,6 +85,8 @@ def pin_input(session, candidate_id, kind, candidate, context, options, task_key
     """Persist sanitized input before dispatch; existing records can never be replaced."""
     from .findings import snapshot
 
+    if kind == "review":
+        options = {**options, "_evidence_policy": options.get("_evidence_policy", planning.EVIDENCE_POLICY)}
     row = session.history.row(session.run_id)
     plan = json.loads(row["plan"])
     value = review_context.sanitize({"schema_version": INPUT_VERSION, "validator_version": 1,
@@ -149,7 +151,7 @@ def _candidates(history, run_id):
     if origin["kind"] not in {"review", "scan"}:
         raise ValueError("Choose a review or security scan run.")
     report = json.loads(origin["report"]) if origin["report"] else {}
-    return origin, report.get("candidates", []), history.assessment_inputs(run_id)
+    return origin, report.get("candidates", [])
 
 
 def _validate_evidence(repo, env, value):
@@ -168,7 +170,8 @@ def _validate_evidence(repo, env, value):
 def list_assessments(repository, *, run_id):
     """List candidates and retry blockers without loading connection credentials."""
     with History(repository) as history:
-        origin, candidates, inputs = _candidates(history, run_id)
+        origin, candidates = _candidates(history, run_id)
+        inputs = history.assessment_inputs(run_id)
         rows = []
         for candidate in candidates:
             children = _children(history, run_id, candidate["id"])
@@ -237,6 +240,7 @@ def _finding(value, candidate_id, result):
 async def _execute(repository, repo, env, value, session):
     options = value["options"]
     if value["workflow_kind"] == "review":
+        options = {**options, "_evidence_policy": planning.saved_evidence_policy(options)}
         report = {"base_sha": value["base_sha"], "head_sha": value["head_sha"]}
         return await workflows._assess(repo, env, workflows._run(report, options, session),
                                        value["candidate"], {}, session, pinned_context=value["context"])
@@ -271,7 +275,7 @@ def retry_assessment(repository, *, run_id=None, candidate_id=None, resume=None,
             raise ValueError("Assessment retry requires a run ID and candidate ID.")
         claim = hashlib.sha256(encode([run_id, candidate_id]).encode()).hexdigest()[:32]
         with history.claim(claim):
-            origin, candidates, inputs = _candidates(history, run_id)
+            origin, candidates = _candidates(history, run_id)
             candidate = next((item for item in candidates if item["id"] == candidate_id), None)
             if candidate is None:
                 raise ValueError("No saved assessment candidate with that ID; this run may predate retry support.")
@@ -282,7 +286,7 @@ def retry_assessment(repository, *, run_id=None, candidate_id=None, resume=None,
                 return success
             if resume and retry["report"]:
                 return json.loads(retry["report"])
-            value = inputs.get(candidate_id)
+            value = history.assessment_input(run_id, candidate_id)
             reason = _eligibility(history, origin, candidate, value,
                                   [child for child in children if child["id"] != resume])
             if reason:

@@ -12,6 +12,8 @@ from mortis_engine.review.errors import ReviewStopped
 
 VERSION = "mortis-pr-plan/v1"
 RULES_VERSION = "mortis-rules/v1"
+FULL_TREE_SOURCE_POLICY = "source-only/v1"
+EVIDENCE_POLICY = "supporting-tests/v1"
 # Language admission is independent of the optional structural graph's parsers.
 CODE_SUFFIXES = set((
     "java kt kts scala groovy py pyi js jsx ts tsx mjs cjs c h cpp cc cxx hpp hxx cs vb fs fsi fsx "
@@ -26,15 +28,18 @@ DEFAULT_DIRS = set((
     ".pnpm-store .svelte-kit .astro .angular .parcel-cache .docusaurus .bundle .gradle "
     "site-packages .tox Pods Carthage .build obj .dart_tool .terraform .stack-work kitex_gen"
 ).lower().split())
-DEFAULT_PATTERNS = (
+DEFAULT_TEST_PATTERNS = (
     "**/*_test.{go,py,rs,zig}", "**/test_*.py", "**/*.test.{js,jsx,ts,tsx,ets}",
     "**/*.spec.{js,jsx,ts,tsx}", "**/*_spec.rb", "**/*Test.java", "**/*Tests.java", "**/*Test.fs",
-    "**/*Test.swift", "**/*Tests.swift", "**/*Spec.hs", "**/*Spec.lhs", "**/*.snap", "**/*.generated.*",
-    "**/*.gen.go", "**/*.pb.{go,cc,h}", "**/*.capnp.{h,go,ts}", "**/*_capnp.{rs,py}",
+    "**/*Test.swift", "**/*Tests.swift", "**/*Spec.hs", "**/*Spec.lhs",
     "**/src/test/java/**", "**/src/test/**/*.{kt,kts}", "**/Tests/**/*.swift", "**/test/**/*.{jl,hs,lhs}",
     "**/tests/**/*.nim", "**/tests/**/*.R", "**/tests/**/*.elm", "**/test/**/*.zig", "**/test/**/*.ml",
-    "**/tb_*.{v,sv,vhd,vhdl}", "**/*_tb.{v,sv,vhd,vhdl}", "lib/**/*.sol", "**/*.t.sol",
-    "**/test/**/*.sol", "**/tests/**/*.sol", "**/test/**/*.vy", "**/tests/**/*.vy", "**/.pnp.cjs",
+    "**/tb_*.{v,sv,vhd,vhdl}", "**/*_tb.{v,sv,vhd,vhdl}", "**/*.t.sol",
+    "**/test/**/*.sol", "**/tests/**/*.sol", "**/test/**/*.vy", "**/tests/**/*.vy",
+)
+DEFAULT_PATTERNS = (
+    *DEFAULT_TEST_PATTERNS, "**/*.snap", "**/*.generated.*", "**/*.gen.go", "**/*.pb.{go,cc,h}",
+    "**/*.capnp.{h,go,ts}", "**/*_capnp.{rs,py}", "lib/**/*.sol", "**/.pnp.cjs",
     "**/.pnp.loader.mjs", "**/.terraform.lock.hcl", "**/.yarn/{cache,unplugged,releases,sdks,patches}/**",
 )
 BUILTIN_RULE = (
@@ -189,28 +194,58 @@ def load_rules(repo, env, base_sha, options, stopped):
     return {**result, "digest": fingerprint(result)}
 
 
-def allowed_path(path, options, rules):
+def exclusion_reason(path, options, rules, *, supporting_evidence=False):
+    """Explain target admission; evidence relaxes only default test omissions."""
+    if file_policy.excluded(path):
+        return "mandatory_exclusion"
     if file_policy.excluded(path, file_policy.policy(options)):
-        return False
+        return "configured_exclusion"
     # The runtime custom layer always contains mandatory excludes and text includes,
     # preserving its priority over project-local include/exclude configuration.
     custom = rules["layers"][0]
     if any(rule_matches(path, pattern) for pattern in custom["exclude"]):
-        return False
+        return "rule_exclusion"
     if any(rule_matches(path, pattern) for pattern in [*custom["include"], *file_policy.TEXT_CONTEXT]):
-        return True
+        return None
     source_path = file_policy.template_source_path(path)
     suffix = PurePosixPath(source_path).suffix.lstrip(".").lower()
     if (suffix or source_path != path) and suffix not in CODE_SUFFIXES:
-        return False
-    return not (any(part.lower() in DEFAULT_DIRS for part in PurePosixPath(path).parts)
-                or any(rule_matches(value, pattern) for value in (path, source_path)
-                       for pattern in DEFAULT_PATTERNS))
+        return "unsupported_source"
+    directories = DEFAULT_DIRS - {"__tests__"} if supporting_evidence else DEFAULT_DIRS
+    if any(part.lower() in directories for part in PurePosixPath(path).parts):
+        return "default_directory"
+    for pattern in DEFAULT_PATTERNS:
+        if supporting_evidence and pattern in DEFAULT_TEST_PATTERNS:
+            continue
+        if any(rule_matches(value, pattern) for value in (path, source_path)):
+            return "default_test" if pattern in DEFAULT_TEST_PATTERNS else "default_pattern"
+    return None
+
+
+def allowed_path(path, options, rules, *, supporting_evidence=False):
+    return exclusion_reason(path, options, rules, supporting_evidence=supporting_evidence) is None
+
+
+def saved_evidence_policy(saved):
+    if "evidence_policy" in saved or "_evidence_policy" in saved:
+        return saved.get("evidence_policy", saved.get("_evidence_policy"))
+    # These markers were introduced after default-omitted tests became supporting evidence.
+    return EVIDENCE_POLICY if any(key in saved for key in (
+        "assessment_attribution", "_assessment_attribution", "source_tool_policy",
+    )) else None
+
+
+def supports_test_evidence(options):
+    policy = options.get("_evidence_policy", EVIDENCE_POLICY)
+    if policy not in {None, EVIDENCE_POLICY}:
+        raise ValueError("The saved evidence policy is unsupported.")
+    return policy == EVIDENCE_POLICY
 
 
 def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, rules=None):
     rules = rules or load_rules(repo, env, options.get("_settings_sha", base_sha), options, stopped)
-    allowed = {path for path in paths if allowed_path(path, options, rules)}
+    supporting = supports_test_evidence(options)
+    allowed = {path for path in paths if allowed_path(path, options, rules, supporting_evidence=supporting)}
     if not allowed:
         return allowed
     # Trusted rules come from the current base; PR rename scope comes from its merge base.
@@ -218,7 +253,8 @@ def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, r
     if not re.fullmatch(r"[a-f0-9]{40}", merge_base):
         raise ValueError("Supporting context requires the exact PR merge base.")
     for path, old_path, _status in _changes(repo, env, merge_base, head_sha, stopped):
-        if old_path and not all(allowed_path(value, options, rules) for value in (path, old_path)):
+        if old_path and not all(allowed_path(value, options, rules, supporting_evidence=supporting)
+                                for value in (path, old_path)):
             allowed.difference_update((path, old_path))
     return allowed
 
@@ -244,6 +280,21 @@ class ReviewUnit:
     patch: str
     rule: str
     input_hash: str
+    source_only: bool = False
+
+
+def assigned_unit(unit):
+    value = {"key": unit.key, "path": unit.path, "old_path": unit.old_path,
+             "source_sha": unit.source_sha, "start_line": unit.start_line, "end_line": unit.end_line,
+             "source": unit.source}
+    if not unit.source_only:
+        value["diff"] = unit.patch
+    value["rules"] = unit.rule
+    return value
+
+
+def _unit_bytes(unit):
+    return len(json.dumps(assigned_unit(unit), ensure_ascii=False).encode())
 
 
 @dataclass
@@ -349,18 +400,22 @@ def _range_patch(metadata, rows):
     return output
 
 
-def split_units(path, old_path, status, sha, text, patch, rule, maximum):
+def split_units(path, old_path, status, sha, text, patch, rule, maximum, *, source_only=False):
     lines = text.splitlines(keepends=True)
-    metadata, rows = _patch_rows(patch, len(lines))
+    metadata, rows = ("", []) if source_only else _patch_rows(patch, len(lines))
     by_line = {}
     for row in rows:
         by_line.setdefault(row[0], []).append(row)
     chunks, chunk_lines, chunk_rows, start = [], [], [], 1
     fixed_size = len((metadata + rule + path + (old_path or "")).encode()) + 512
+    if source_only:
+        last = max(1, len(lines))
+        fixed_size = _unit_bytes(ReviewUnit("pr-" + "0" * 64, path, old_path, status, sha,
+                                          last, last, "", "", rule, "", source_only=True))
     used = fixed_size
     for number, line in enumerate(lines or [""], 1):
         selected_rows = by_line.get(number, [])
-        line_size = len(line.encode())
+        line_size = len(json.dumps(line, ensure_ascii=False).encode()) - 2 if source_only else len(line.encode())
         size = line_size + sum(len(row[3].encode()) + 80 for row in selected_rows)
         if fixed_size + line_size > maximum:
             raise ValueError("A required source/diff line exceeds the bounded review context.")
@@ -393,13 +448,16 @@ def split_units(path, old_path, status, sha, text, patch, rule, maximum):
     for first, last, content, difference in chunks:
         value = {"path": path, "old_path": old_path, "status": status, "source_sha": sha,
                  "start_line": first, "end_line": last, "source": content, "patch": difference, "rule": rule}
+        if source_only:
+            value["source_only"] = True
         identity = fingerprint(value)
         units.append(ReviewUnit(key=f"pr-{identity}", **value, input_hash=identity))
     return units
 
 
 def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
-                max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None):
+                max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None,
+                full_tree_source_policy=FULL_TREE_SOURCE_POLICY):
     for sha in (base_sha, head_sha, merge_base):
         if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{40}", sha):
             raise ValueError("PR planning requires exact Git revisions.")
@@ -409,6 +467,9 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
         raise ValueError("A batch must admit a complete bounded unit.")
     if source.git(repo, env, "merge-base", base_sha, head_sha, stopped=stopped).strip() != merge_base:
         raise ValueError("PR planning cannot substitute a different merge base.")
+    if full_tree_source_policy not in {None, FULL_TREE_SOURCE_POLICY}:
+        raise ValueError("The saved full-tree source policy is unsupported.")
+    source_only = options.get("review_mode") == "all" and full_tree_source_policy is not None
     rules = load_rules(repo, env, trusted_rules_sha or base_sha, options, stopped)
     plan = ReviewPlan(base_sha, head_sha, merge_base, fingerprint({"file_policy": file_policy.policy(options), "rules": rules["digest"]}),
                       rules["digest"], rules, [], [])
@@ -442,13 +503,14 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
             if used + entry["size"] > max_source_bytes:
                 raise ValueError("Required source exceeds the aggregate PR source admission limit.")
             text = source.read_source(repo, env, head_sha, selected.path, stopped)
-            patch = source.git(repo, env, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--find-renames",
+            patch = "" if source_only else source.git(repo, env, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--find-renames",
                                "--unified=3", merge_base, head_sha, "--", *dict.fromkeys(filter(None, (selected.old_path, selected.path))), stopped=stopped)
             size = len((text + patch).encode())
             if used + size > max_source_bytes:
                 raise ValueError("Required source and diff exceed the aggregate PR source admission limit.")
             units = split_units(selected.path, selected.old_path, selected.status, head_sha,
-                                text, patch, rule_for(selected.path, rules, full_tree=options.get('review_mode') == 'all'), max_unit_bytes)
+                                text, patch, rule_for(selected.path, rules, full_tree=options.get('review_mode') == 'all'),
+                                max_unit_bytes, source_only=source_only)
             size = sum(len((unit.source + unit.patch).encode()) for unit in units)
             if used + size > max_source_bytes:
                 raise ValueError("Required split context exceeds the aggregate PR source admission limit.")
@@ -459,7 +521,7 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
             selected.error = str(exc)
     batch, size = [], 0
     for unit in plan.units:
-        unit_size = len((unit.source + unit.patch + unit.rule).encode()) + 512
+        unit_size = _unit_bytes(unit) + 2 if unit.source_only else len((unit.source + unit.patch + unit.rule).encode()) + 512
         if batch and size + unit_size > max_batch_bytes:
             plan.batches.append(batch)
             batch, size = [], 0

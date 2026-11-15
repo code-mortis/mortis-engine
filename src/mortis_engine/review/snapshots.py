@@ -179,10 +179,11 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
         source.repository_path(path)
         if not planning.allowed_path(path, options, rules):
             excluded.append({"path": path, "reason": "excluded"})
-            # Reuse an existing excluded blob without reading or ingesting its contents.
-            if path in staged and (_worktree_stat(root, path) is not None or path in sparse_paths):
-                entries[path] = staged[path]
-            continue
+            if not planning.allowed_path(path, options, rules, supporting_evidence=True):
+                # Reuse an existing excluded blob without reading or ingesting its contents.
+                if path in staged and (_worktree_stat(root, path) is not None or path in sparse_paths):
+                    entries[path] = staged[path]
+                continue
         if stopped():
             raise source.ReviewStopped("The review was cancelled.")
         if path in staged and (path not in changed or staged[path][0] == "160000"):
@@ -203,7 +204,8 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
 
 
 @contextmanager
-def snapshot(repository, *, mode="commits", base=None, head="HEAD", object_cache=None, stopped=lambda: False):
+def snapshot(repository, *, mode="commits", base=None, head="HEAD", object_cache=None, stopped=lambda: False,
+             overrides=None):
     """Pin a review input. Persist generated objects only in the supplied private cache."""
     if mode not in {"commits", "worktree", "staged", "all"}:
         raise ValueError("Choose commits, worktree, staged or all as the review mode.")
@@ -227,6 +229,8 @@ def snapshot(repository, *, mode="commits", base=None, head="HEAD", object_cache
         else:
             root = _worktree_root(repository)
             options = settings.load(repo, env, target)
+            if overrides:
+                settings.apply_overrides(options, overrides)
             rules = planning.load_rules(repo, env, target, options, stopped)
             tree, excluded = _local_tree(repo, env, root, source.find_repository(root), mode, stopped, options, rules)
             pinned = _commit(repo, env, tree, target)

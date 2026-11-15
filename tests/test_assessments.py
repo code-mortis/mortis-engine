@@ -87,6 +87,7 @@ def test_retry_review_exact_input_idempotency_and_immutable_origin(local, monkey
         value = history.assessment_inputs(parent)["candidate-fixture"]
     assert value["schema_version"] == "mortis.assessment-input/v1"
     assert assessments.list_assessments(repo, run_id=parent)["candidates"][0]["retry_eligible"]
+    monkeypatch.setattr(History, "assessment_inputs", lambda *args: pytest.fail("Retry loaded every candidate"))
     sent = []
 
     async def send(connection, credentials, request, **kwargs):

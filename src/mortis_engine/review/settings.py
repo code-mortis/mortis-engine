@@ -33,6 +33,7 @@ class RepoSettings(RunLimits):
     automatic: bool = True
     include_bot_prs: bool = False
     auto_resolve: bool = False
+    second_pass: bool = Field(default=False, strict=True)
     model: str = Field(default="", max_length=150)
     effort: Literal["low", "medium", "high"] = "medium"
     review_sensitivity: Literal["low_noise", "balanced", "broad"] = "balanced"

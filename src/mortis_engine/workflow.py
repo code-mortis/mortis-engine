@@ -226,16 +226,21 @@ class Session:
         result = await self.send("analysis", key, request, accept=accept, **kwargs)
         return Response.model_validate(result)
 
-    async def ask(self, stage, key, *, instructions, context, schema, validate, effort="medium", token_budget=None,
-                  timeout=None, max_output_tokens=None):
+    def request(self, stage, key, *, instructions, context, schema, effort="medium", max_output_tokens=None):
+        """Reconstruct immutable stage inputs without dispatching a provider request."""
         supplied = sanitize(context, self.credentials)
         content = (evidence_bundle(supplied) if "sources" in supplied and "diff" in supplied
                    else json.dumps(supplied, ensure_ascii=False))
         session_id = hashlib.sha256(encode([self.run_id, stage, key]).encode()).hexdigest()
-        request = Request(instructions=sanitize(instructions, self.credentials),
-                          messages=[Message(role="user", content=content)], output_schema=schema_for_transport(schema),
-                          effort=effort, max_output_tokens=16384 if max_output_tokens is None else max_output_tokens,
-                          session_id=session_id)
+        return Request(instructions=sanitize(instructions, self.credentials),
+                       messages=[Message(role="user", content=content)], output_schema=schema_for_transport(schema),
+                       effort=effort, max_output_tokens=16384 if max_output_tokens is None else max_output_tokens,
+                       session_id=session_id)
+
+    async def ask(self, stage, key, *, instructions, context, schema, validate, effort="medium", token_budget=None,
+                  timeout=None, max_output_tokens=None):
+        request = self.request(stage, key, instructions=instructions, context=context, schema=schema,
+                               effort=effort, max_output_tokens=max_output_tokens)
         now = time.monotonic()
         stage_end = self.stage_deadlines.setdefault(stage, now + timeout if timeout else float("inf"))
         until = min(stage_end, self.deadline if self.deadline is not None and stage != "summary" else float("inf"),
