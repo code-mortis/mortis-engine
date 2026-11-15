@@ -322,7 +322,7 @@ def retry_assessment(repository, *, run_id=None, candidate_id=None, resume=None,
                 try:
                     result = asyncio.run(execute())
                     status, error = "completed", None
-                except (ValueError, TimeoutError, InferenceError) as exc:
+                except (ValueError, OSError, InferenceError) as exc:
                     result, status = None, "failed"
                     error = review_context.sanitize(str(exc), credentials)
                 from .findings import snapshot

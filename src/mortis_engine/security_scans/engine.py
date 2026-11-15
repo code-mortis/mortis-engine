@@ -380,6 +380,12 @@ def normalize_trivy(item, report):
         for raw in row.get("Misconfigurations", []):
             if raw.get("Status", "FAIL") not in {"FAIL", "EXCEPTION"}:
                 continue
+            cause = raw.get("CauseMetadata", {})
+            start, end = cause.get("StartLine"), cause.get("EndLine")
+            if all(value is None or type(value) is int and value == 0 for value in (start, end)):
+                start = end = None
+            elif type(start) is not int or type(end) is not int or not (1 <= start <= end <= item.inventory[path]["lines"]):
+                raise ValueError("Misconfiguration result has invalid lines")
             identity = json.dumps(["infrastructure", path, raw["ID"], raw.get("CauseMetadata", {}).get("Resource", "")])
             findings.append({"kind": "infrastructure", "fingerprint": digest(identity), "path": path,
                              "rule_id": raw["ID"], "title": raw["Title"], "severity": raw.get("Severity", "unknown").lower(),
@@ -388,8 +394,7 @@ def normalize_trivy(item, report):
                              "remediation": raw.get("Resolution", "Apply the scanner's referenced configuration guidance."),
                              "verification": "Rescan the changed configuration with the same security check enabled.",
                              "references": raw.get("References", [])[:20],
-                             "start_line": raw.get("CauseMetadata", {}).get("StartLine", 1) or 1,
-                             "end_line": raw.get("CauseMetadata", {}).get("EndLine", 1) or 1})
+                             "start_line": start, "end_line": end})
     normalized = {}
     for finding in findings:
         finding.update(source_sha=item.sha, source_hash=item.inventory[finding["path"]]["hash"], sources=["trivy"])

@@ -192,6 +192,63 @@ def test_stale_advisories_prevent_clean_grade(repository):
     assert report["grade"] is None
 
 
+@pytest.mark.parametrize("severity", ["unknown", "unrated"])
+@pytest.mark.parametrize("state", ["open", "accepted_risk"])
+def test_unknown_history_severity_retains_risk_and_explains_partial_grade(repository, monkeypatch, severity, state):
+    finding = {"id": "old", "fingerprint": "legacy", "path": "a.py", "title": "Retained issue",
+        "severity": severity, "kind": "infrastructure", "rule_id": "config", "state": state,
+        "source_sha": git(repository, "rev-parse", "HEAD")}
+    previous = {"schema_version": "mortis.security/v1", "findings": [finding]}
+    saved = json.dumps(previous, sort_keys=True)
+    monkeypatch.setattr(service, "deterministic_fix", lambda *args, **kwargs: {"verdict": "still_present"})
+    report = asyncio.run(service.scan(repository, session=EmptySession(), scanner=scan_result, previous=previous))
+    assert report["status"] == "partial" and report["grade"] is None
+    assert report["problems"] == [
+        "Unresolved findings have unknown severity; a security grade cannot be established."]
+    assert report["findings"][0]["severity"] == severity and report["findings"][0]["state"] == state
+    assert json.dumps(previous, sort_keys=True) == saved
+
+
+@pytest.mark.parametrize("current_unknown", [False, True])
+def test_unknown_severity_precedes_resolution_without_blocking_verified_unknown_fix(repository, monkeypatch, current_unknown):
+    finding = {"id": "old", "fingerprint": "legacy", "path": "a.py", "title": "Retained issue",
+        "severity": "unknown", "kind": "infrastructure", "rule_id": "config", "state": "open",
+        "source_sha": git(repository, "rev-parse", "HEAD")}
+    monkeypatch.setattr(service, "deterministic_fix", lambda *args, **kwargs: {"verdict": "fixed"})
+
+    def current(item, timeout, stopped):
+        result = scan_result(item, timeout, stopped)
+        if current_unknown:
+            result["findings"] = [{**finding, "fingerprint": "new", "title": "New unknown risk"}]
+        return result
+
+    report = asyncio.run(service.scan(repository, session=EmptySession(), scanner=current,
+        previous={"schema_version": "mortis.security/v1", "findings": [finding]}))
+    old = next(row for row in report["findings"] if row["id"] == "old")
+    if current_unknown:
+        assert report["status"] == "partial" and report["grade"] is None
+        assert old["state"] == "open" and old["outcome"] == "not_observed"
+    else:
+        assert report["status"] == "completed" and report["grade"] == "A"
+        assert old["state"] == "resolved" and old["outcome"] == "fixed"
+
+
+@pytest.mark.parametrize("severity", [None, "UNRATED"])
+def test_unknown_scanner_severity_is_preserved_with_partial_grade(repository, severity):
+    def current(item, timeout, stopped):
+        raw = {"ID": "config", "Title": "Unknown risk"}
+        if severity is not None:
+            raw["Severity"] = severity
+        return engine.normalize_trivy(item, {"Results": [
+            {"Target": str(item.files / "a.py"), "Misconfigurations": [raw]}]})
+
+    report = asyncio.run(service.scan(repository, session=EmptySession(), scanner=current))
+    assert report["status"] == "partial" and report["grade"] is None
+    assert report["findings"][0]["severity"] == (severity.lower() if severity else "unknown")
+    assert report["problems"] == [
+        "Unresolved findings have unknown severity; a security grade cannot be established."]
+
+
 def test_failed_analysis_does_not_count_as_validated_coverage(repository):
     class FailedSession(EmptySession):
         async def ask(self, *args, **kwargs):
@@ -322,6 +379,29 @@ def test_trivy_secret_normalization_redacts_literal_and_json_forms(repository):
         assert item.redact("value=abcdefgh") == "value=[redacted]"
         assert ".env" in item.inventory
         assert item.inventory[".env"]["code"] is False
+
+
+@pytest.mark.parametrize("start,end", [(-1, 1), (1, 3), (2, 1), ("1", 1), (1, 1.0), (False, 0),
+                                      (True, 1), (1, None), (0, 1)])
+def test_trivy_misconfiguration_rejects_invalid_lines(start, end):
+    item = SimpleNamespace(files=Path("/snapshot"), inventory={"a.py": {"lines": 2}})
+    report = {"Results": [{"Target": "/snapshot/a.py", "Misconfigurations": [{
+        "ID": "config", "Title": "Invalid location", "CauseMetadata": {"StartLine": start, "EndLine": end}}]}]}
+    with pytest.raises(ValueError, match="Misconfiguration result has invalid lines"):
+        engine.normalize_trivy(item, report)
+
+
+@pytest.mark.parametrize("cause,expected", [({}, None), ({"StartLine": 0, "EndLine": 0}, None),
+    ({"StartLine": None, "EndLine": None}, None), ({"StartLine": 1, "EndLine": 2}, (1, 2))])
+def test_trivy_misconfiguration_preserves_file_only_and_valid_locations(cause, expected):
+    item = SimpleNamespace(files=Path("/snapshot"), inventory={"a.py": {"lines": 2, "hash": "source"}},
+                           sha="a" * 40, redact=lambda value: value)
+    report = {"Results": [{"Target": "/snapshot/a.py", "Misconfigurations": [{
+        "ID": "config", "Title": "Configuration issue", "CauseMetadata": cause}]}]}
+    finding = engine.normalize_trivy(item, report)["findings"][0]
+    start, end = expected or (None, None)
+    assert finding["start_line"] == start and finding["end_line"] == end
+    assert finding["locations"] == [{"path": "a.py", "start_line": start, "end_line": end}]
 
 
 def test_historical_secret_rules_find_changed_location_and_fail_closed():
@@ -459,7 +539,8 @@ def test_independent_assessment_preserves_identity_and_supporting_source(reposit
     assert initial["findings"][0]["version"] == 1
 
 
-def test_scanner_ignores_repository_config_and_denies_network(repository, monkeypatch):
+@pytest.mark.parametrize("updated_at", ["fresh", None, 123, [], {}])
+def test_scanner_ignores_repository_config_and_denies_network(repository, monkeypatch, updated_at):
     from datetime import UTC, datetime
 
     calls = []
@@ -476,7 +557,8 @@ def test_scanner_ignores_repository_config_and_denies_network(repository, monkey
         if "--download-db-only" in args:
             cache = Path(args[args.index("--cache-dir") + 1])
             (cache / "db").mkdir()
-            (cache / "db/metadata.json").write_text(json.dumps({"UpdatedAt": datetime.now(UTC).isoformat()}))
+            timestamp = datetime.now(UTC).isoformat() if updated_at == "fresh" else updated_at
+            (cache / "db/metadata.json").write_text(json.dumps({"UpdatedAt": timestamp}))
         return 0, '{"SchemaVersion":2,"Results":[]}', ""
 
     monkeypatch.setattr(scanner, "command", run)
@@ -493,8 +575,10 @@ def test_scanner_ignores_repository_config_and_denies_network(repository, monkey
     assert "--config" in final
     assert "PROVIDER_API_KEY" not in environment
     assert all("should-never-reach-scanner" not in str(env) for _, env in calls)
-    assert result["metadata"]["database_fresh"] is True
-    assert result["problems"] == []
+    fresh = updated_at == "fresh"
+    assert result["metadata"]["database_fresh"] is fresh
+    assert result["metadata"]["scanners"] == (["vuln", "misconfig", "secret"] if fresh else ["misconfig", "secret"])
+    assert result["problems"] == ([] if fresh else ["Vulnerability database is missing or older than 24 hours."])
 
 
 def test_dependency_fix_requires_changed_evidence_and_fresh_safe_inventory():

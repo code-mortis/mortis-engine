@@ -1,4 +1,7 @@
 import base64
+import sys
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -121,7 +124,8 @@ def test_optional_failure_has_explicit_omission(tmp_path, monkeypatch):
         assert diagnostics == {"status": "unavailable", "reason": "offline parser unavailable"}
 
 
-def test_docker_boundary_disables_network_mounts_credentials_and_automatic_pulls(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cleanup_error", [None, OSError("cleanup failed"), transport.subprocess.TimeoutExpired("docker rm", 15)])
+def test_docker_boundary_disables_network_mounts_credentials_and_automatic_pulls(tmp_path, monkeypatch, cleanup_error):
     request = request_fixture()
     seen = []
     monkeypatch.setenv("CM_DATABASE_URL", "postgresql://private-db")
@@ -134,8 +138,12 @@ def test_docker_boundary_disables_network_mounts_credentials_and_automatic_pulls
         kwargs["stdout"].write(parsed(payload).model_dump_json().encode())
         return SimpleNamespace(poll=lambda: 0, returncode=0)
 
+    def cleanup(*args, **kwargs):
+        if cleanup_error:
+            raise cleanup_error
+
     monkeypatch.setattr(transport.subprocess, "Popen", spawn)
-    monkeypatch.setattr(transport.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(transport.subprocess, "run", cleanup)
     assert transport.extract(request).commit_sha == request.commit_sha
     command, kwargs = seen[0]
     for flag in ("--network=none", "--read-only", "--pull=never", "--memory=512m", "--memory-swap=512m",
@@ -146,15 +154,21 @@ def test_docker_boundary_disables_network_mounts_credentials_and_automatic_pulls
     assert kwargs["env"]["DOCKER_CONFIG"] != str(tmp_path)
 
 
-def test_docker_cleanup_after_cancellation(monkeypatch):
+@pytest.mark.parametrize("cleanup_error", [None, OSError("cleanup failed"), transport.subprocess.TimeoutExpired("docker rm", 15)])
+def test_docker_cleanup_after_cancellation(monkeypatch, cleanup_error):
     request = request_fixture()
     removed = []
     process = SimpleNamespace(returncode=None, poll=lambda: None)
     process.terminate = lambda: setattr(process, "returncode", -15)
     process.wait = lambda **kwargs: process.returncode
+    def cleanup(command, **kwargs):
+        removed.append(command)
+        if cleanup_error:
+            raise cleanup_error
+
     monkeypatch.setattr(transport.shutil, "which", lambda *args, **kwargs: "/trusted/docker")
     monkeypatch.setattr(transport.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(transport.subprocess, "run", lambda command, **kwargs: removed.append(command))
+    monkeypatch.setattr(transport.subprocess, "run", cleanup)
     calls = iter((False, True))
     with pytest.raises(Exception, match="cancelled"):
         transport.extract(request, stopped=lambda: next(calls))
@@ -197,6 +211,32 @@ def test_native_extractor_retains_real_source_contract():
     result = validate_result(request, extract(request))
     assert result.imports[0].target_path == "dep.js"
     assert result.files[0].unresolved_calls == 1
+
+
+@pytest.mark.parametrize("failure", ["missing_args", "extra_args", "missing_request", "unreadable_request"])
+def test_native_extractor_request_failures_return_exit_two(tmp_path, monkeypatch, failure):
+    monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace(Language=None, Parser=None))
+    spec = spec_from_file_location("_mortis_extractor_request_test", Path(transport.__file__).with_name("extract.py"))
+    extract = module_from_spec(spec)
+    spec.loader.exec_module(extract)
+    request_path, result_path = tmp_path / "request.json", tmp_path / "result.json"
+    request_path.write_text(request_fixture().model_dump_json())
+    argv = ["extract", str(request_path), str(result_path)]
+    if failure == "missing_args":
+        argv.pop()
+    elif failure == "extra_args":
+        argv.append("extra")
+    elif failure == "missing_request":
+        request_path.unlink()
+    else:
+        def unreadable(path):
+            raise PermissionError("request unavailable")
+        monkeypatch.setattr(extract.Path, "read_bytes", unreadable)
+    monkeypatch.setattr(extract.sys, "argv", argv)
+    monkeypatch.setattr(extract.resource, "setrlimit", lambda *args: None)
+    monkeypatch.setattr(extract, "extract", lambda *args: pytest.fail("Parsed invalid request"))
+    assert extract.main() == 2
+    assert not result_path.exists()
 
 
 def test_graph_excludes_renamed_secret_before_parser_and_related_context(tmp_path, monkeypatch):

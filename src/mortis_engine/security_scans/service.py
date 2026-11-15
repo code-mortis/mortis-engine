@@ -436,6 +436,11 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 "fixed": "fixed", "still_present": "present", "uncertain": "not_observed"}[verdict["verdict"]]})
         if not code_paths and not result["targets"]:
             problems.append("No supported security analysis targets were available.")
+        rating = grade_for(row["severity"] for row in findings
+            if row.get("state", "open") in {"open", "accepted_risk"}
+            and not (not problems and row.get("fix_verification", {}).get("verdict") == "fixed"))
+        if rating is None:
+            problems.append("Unresolved findings have unknown severity; a security grade cannot be established.")
         # Complete source/scanner coverage is required before changing retained resolution state.
         if not problems:
             for finding in findings:
@@ -450,7 +455,6 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         stages["report"] = {"status": "completed"}
         assessment_progress("report")
         complete = not problems
-        rating = grade_for(row["severity"] for row in findings if row.get("state", "open") in {"open", "accepted_risk"})
         report = {"schema_version": "mortis.security/v1", "repository": repository_name, "commit": sha, "ref": ref,
             "status": "completed" if complete else "partial", "grade": rating if complete else None,
             "rating_policy": "highest-unresolved-severity/v1", "findings": findings, "assessments": assessments,

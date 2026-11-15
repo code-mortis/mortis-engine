@@ -6,7 +6,7 @@ from threading import Barrier
 
 import pytest
 
-from mortis_engine import findings
+from mortis_engine import findings, operations
 from mortis_engine.cli import main
 from mortis_engine.history import History, encode
 
@@ -108,6 +108,36 @@ def test_scan_decision_keeps_evidence_outcome_and_original_grade(repo):
     with History(repo) as history:
         assert history.row(run)["report"] == original
         assert findings.effective_report(history, run)["findings"][0]["state"] == "false_positive"
+
+
+@pytest.mark.parametrize("state", ["open", "accepted_risk"])
+def test_scan_unknown_severity_reopened_by_decision_explains_partial_grade(repo, monkeypatch, state):
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test", "-c",
+                    "user.email=test@localhost", "-c", "commit.gpgsign=false", "commit", "--allow-empty",
+                    "-qm", "fixture"], cwd=repo, check=True)
+    scope = subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=repo, check=True,
+                           capture_output=True, text=True).stdout.strip()
+    with History(repo) as history, history.db:
+        history.db.execute("INSERT INTO triage_events VALUES ('scan',?,'risk',1,'origin','open',?,'reviewed',1)",
+                           (scope, state))
+
+    async def scan(*args, **kwargs):
+        return {"schema_version": "mortis.security/v1", "status": "completed", "grade": "A", "problems": [],
+                "findings": [{"id": "risk", "severity": "unknown", "state": "resolved", "outcome": "fixed"}],
+                "coverage": {"selected_files": 1, "completed_files": 1}, "stages": {"report": {"status": "completed"}}}
+
+    monkeypatch.setattr(operations.security, "scan", scan)
+    connection = {"kind": "api", "provider": "test", "protocol": "openai", "model": "fixture",
+                  "base_url": "https://example.com/v1", "options": {}}
+    result = operations.run(repo, kind="scan", connection=connection, get_credentials=lambda: {})
+    assert result["status"] == "partial" and result["grade"] is None
+    assert result["problems"] == [
+        "Unresolved findings have unknown severity; a security grade cannot be established."]
+    assert result["findings"][0]["state"] == state and result["findings"][0]["severity"] == "unknown"
+    assert result["coverage"] == {"selected_files": 1, "completed_files": 1}
+    assert result["stages"] == {"report": {"status": "completed"}}
+    with History(repo) as history:
+        assert history.report(result["run_id"]) == result
 
 
 def test_current_view_includes_retry_confirmations_without_rewriting_origin(repo):
