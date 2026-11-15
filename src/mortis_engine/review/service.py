@@ -53,6 +53,23 @@ def _inputs(history, repository, mode, base, head, resume):
         yield snap, saved
 
 
+
+def unit_byte_limit(prompt_token_ceiling=None):
+    """Use the same bounded source units for execution and connection-free previews."""
+    if prompt_token_ceiling is not None and (
+        type(prompt_token_ceiling) is not int or not 4096 <= prompt_token_ceiling <= 2_000_000
+    ):
+        raise ValueError("prompt_token_ceiling must be a whole number from 4096 to 2000000 tokens.")
+    return max(1024, min(49152, (prompt_token_ceiling - 8192) // 2)) if prompt_token_ceiling is not None else 49152
+
+
+def plan_snapshot(snap, options, stopped=lambda: False, *, prompt_token_ceiling=None,
+                  full_tree_source_policy=planning.FULL_TREE_SOURCE_POLICY):
+    return planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
+        options, stopped, max_unit_bytes=unit_byte_limit(prompt_token_ceiling), trusted_rules_sha=snap.settings_sha,
+        full_tree_source_policy=full_tree_source_policy)
+
+
 def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,
                    progress=lambda value: None, concurrency=None, overrides=None):
     """Review the changes from the common ancestor to the pinned head."""
@@ -125,10 +142,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                         raise TimeoutError("The review reached its configured time limit.")
                     return False
 
-                ceiling = connection["options"].get("prompt_token_ceiling")
-                unit_bytes = max(1024, min(49152, (ceiling - 8192) // 2)) if ceiling is not None else 49152
-                plan = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
-                    options, stopped, max_unit_bytes=unit_bytes, trusted_rules_sha=snap.settings_sha,
+                plan = plan_snapshot(snap, options, stopped,
+                    prompt_token_ceiling=connection["options"].get("prompt_token_ceiling"),
                     full_tree_source_policy=full_tree_source_policy)
                 if on_plan is not None and plan.batches:
                     on_plan(len(plan.selected), connection["model"])
@@ -153,6 +168,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "excluded_files": list({i["path"]: i for i in [*snap.excluded, *raw["excluded_files"]]}.values()),
                     "errors": raw["errors"], "warnings": raw["warnings"] + [{"message": w} for w in snap.warnings],
                     "usage": session.usage()}
+                if "second_pass" in raw:
+                    result["second_pass"] = raw["second_pass"]
                 if graph_status is not None:
                     result["code_graph"] = graph_status
                 if graphs:
