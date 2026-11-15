@@ -158,12 +158,13 @@ def score(results, expected):
         observed = set()
         for candidate in report.get("candidates", []):
             raw_candidates += 1
-            defect = matched(candidate["snapshot"], defects)
+            snapshot = candidate["snapshot"]
+            anchor = (snapshot["path"], snapshot["start_line"], snapshot["end_line"])
+            duplicate_candidates += int(anchor in observed)
+            observed.add(anchor)
+            defect = matched(snapshot, defects)
             if defect:
-                identity = (case_id, defect)
-                duplicate_candidates += int(identity in observed)
-                observed.add(identity)
-                discovered.add(identity)
+                discovered.add((case_id, defect))
         published = set()
         for finding in report.get("findings", []):
             defect = matched(finding, defects)

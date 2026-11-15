@@ -62,7 +62,8 @@ Metrics are deliberately separate:
 - **Confirmed precision**: unique correctly confirmed defects divided by all unique
   published confirmations. No confirmations means unavailable precision, never 100%.
 - Duplicate candidates and duplicate published confirmations are counted independently
-  of unique defects. Candidate identity uses curated path/line anchors, not title text.
+  of unique defects. Repeated candidate path/line anchors count even for preexisting or
+  refuted allegations, independently of grader truth labels and title text.
 - Incomplete cases retain failed/waived/missing file coverage, stage errors and uncertain
   assessments. A clean result never erases incomplete coverage.
 - Known tokens sum only requests with known consumption. Unknown request counts remain

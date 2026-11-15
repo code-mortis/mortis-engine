@@ -96,6 +96,22 @@ def test_no_confirmations_has_unavailable_precision_and_wrong_corpus_is_rejected
         evaluation.compare(baseline, experiment)
 
 
+@pytest.mark.parametrize("case_id", ["c02", "c04"])
+def test_duplicate_candidates_count_preexisting_and_refuted_allegations(case_id):
+    baseline = evaluation.read(evaluation.ROOT / "baseline-result.json")
+    row = copy.deepcopy(next(row for row in baseline["cases"] if row["id"] == case_id))
+    duplicate = copy.deepcopy(row["report"]["candidates"][0])
+    duplicate["snapshot"]["content"] = "Reworded allegation at the same source anchor"
+    row["report"]["candidates"].append(duplicate)
+    expected = {case_id: {"defects": []}}
+    metrics = evaluation.score([row], expected)
+    assert metrics["raw_candidates"] == 2
+    assert metrics["duplicate_candidates"] == 1
+    assert metrics["discovered_defects"] == 0
+    assert metrics["confirmed_true"] == metrics["confirmed_false"] == 0
+    assert metrics["confirmed_precision"] is None
+
+
 def test_pinned_git_identity_and_paths_fail_closed(tmp_path):
     _, cases = evaluation.verify_inputs()
     changed = copy.deepcopy(cases[0])
