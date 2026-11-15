@@ -64,13 +64,16 @@ def search(repo, env, plan, options, symbol, credentials, authorize, stopped):
     for offset, path in enumerate(paths):
         check()
         oid, length = entries[path]
-        if (result["scanned_files"] >= MAX_FILES or result["scanned_bytes"] + length > MAX_BYTES):
+        if result["scanned_files"] >= MAX_FILES:
             result["omitted_files"] += len(paths) - offset
             break
+        result["scanned_files"] += 1
         if length > MAX_FILE_BYTES:
             result["omitted_files"] += 1
             continue
-        result["scanned_files"] += 1
+        if result["scanned_bytes"] + length > MAX_BYTES:
+            result["omitted_files"] += len(paths) - offset
+            break
         result["scanned_bytes"] += length
         text = source.git(repo, env, "cat-file", "blob", oid, stopped=stopped)
         if "\0" in text or "\ufffd" in text:

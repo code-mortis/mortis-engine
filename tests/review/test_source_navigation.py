@@ -164,3 +164,42 @@ def test_search_hints_cannot_be_cited_and_legacy_requests_keep_read_only_tools(r
             "evidence": [{"source_id": context.source_id(sha, "unread.py"), "start_line": 1, "end_line": 1}]}]}
         with pytest.raises(engine.ResultValidationError, match="supplied citation sources"):
             engine.validate_result(candidate, batch, batch.sources, {})
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_service_pins_search_policy_and_preserves_legacy_request_hash(repo, tmp_path_factory, monkeypatch, legacy):
+    from mortis_engine.history import History, encode
+    from mortis_engine.review import service
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("navigation-state")))
+    commit(repo, {"app.py": "value = 1\n"})
+    observed = []
+
+    def interrupted(repo, env, plan, connection, options, credentials, **kwargs):
+        selected = kwargs["source_tool_policy"]
+        batch = engine.prepare_batches(plan, connection, options, credentials, source_tool_policy=selected)[0]
+        observed.append((selected, planning.fingerprint(batch.request.model_dump())))
+        if legacy:
+            old = engine.prepare_batches(plan, connection, options, credentials, source_tool_policy="bounded-reads/v2")[0]
+            old_hashes.append(planning.fingerprint(old.request.model_dump()))
+        raise KeyboardInterrupt
+
+    old_hashes = []
+    monkeypatch.setattr(engine, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        service.review_local(repo, mode="all", connection=CONNECTION, get_credentials=lambda: {})
+    with History(repo) as history:
+        identity = history.list()[0]["id"]
+        saved = json.loads(history.row(identity)["plan"])
+        assert saved["source_tool_policy"] == engine.SOURCE_TOOL_POLICY
+        if legacy:
+            saved.pop("source_tool_policy")
+            history.db.execute("UPDATE runs SET plan=? WHERE id=?", (encode(saved), identity))
+            history.db.commit()
+        original_plan = history.row(identity)["plan"]
+    with pytest.raises(KeyboardInterrupt):
+        service.review_local(repo, resume=identity, connection=CONNECTION, get_credentials=lambda: {})
+    assert observed[1][0] == ("bounded-reads/v2" if legacy else engine.SOURCE_TOOL_POLICY)
+    assert observed[1][1] == (old_hashes[0] if legacy else observed[0][1])
+    with History(repo) as history:
+        assert history.row(identity)["plan"] == original_plan

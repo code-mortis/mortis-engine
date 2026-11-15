@@ -94,6 +94,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
         with _inputs(history, repository, mode, base, head, resume) as (snap, saved):
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
             full_tree_source_policy = saved.get("full_tree_source_policy") if saved else planning.FULL_TREE_SOURCE_POLICY
+            source_tool_policy = saved.get("source_tool_policy", "bounded-reads/v2") if saved else engine.SOURCE_TOOL_POLICY
             attribution = saved.get("assessment_attribution") if saved else assessment.ATTRIBUTION_VERSION
             if attribution not in {None, assessment.ATTRIBUTION_VERSION}:
                 raise ValueError("The saved assessment attribution version is unsupported.")
@@ -133,7 +134,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
                     "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
                     "triage_versions": decisions, "assessment_runs": assessment_runs,
-                    "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution})
+                    "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution,
+                    "source_tool_policy": source_tool_policy})
             options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
@@ -162,7 +164,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     progress({"phase": "graph"})
                     graphs, graph_status = code_graph.enrich(snap.repo, snap.env, plan, {**options, "_graph": graph}, credentials, stopped)
                 status, raw, findings = engine.run(snap.repo, snap.env, plan, connection, options, credentials,
-                    deadline=deadline, session=session, graph_by_path=graphs, progress=progress)
+                    deadline=deadline, session=session, graph_by_path=graphs, progress=progress,
+                    source_tool_policy=source_tool_policy)
                 result = {"schema_version": "mortis.review/v1", "run_id": run_id, "status": status,
                     "base_sha": snap.base_sha, "head_sha": snap.head_sha, "merge_base": snap.merge_base,
                     "settings_sha": snap.settings_sha, "revision": (snap.settings_sha if snap.mode == "all" else snap.head_sha),
