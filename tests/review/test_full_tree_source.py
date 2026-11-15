@@ -112,7 +112,8 @@ def test_resume_reuses_cached_analysis_with_historical_plan_layout(repo, tmp_pat
         saved_before = history.row(run_id)["plan"]
         plan = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
             options, lambda: False, trusted_rules_sha=snap.settings_sha, full_tree_source_policy=source_policy)
-        batch, = engine.prepare_batches(plan, connection, options, {})
+        batch, = engine.prepare_batches(plan, connection, options, {}, source_tool_policy="bounded-reads/v2")
+        assert [tool.name for tool in batch.request.tools] == ["read_source"]
         payload = json.loads(batch.request.messages[0].content)
         assert ("diff" in payload["assigned_units"][0]) == (source_policy is None)
         request = batch.request.model_copy(update={"session_id": planning.fingerprint([run_id, batch.key])})

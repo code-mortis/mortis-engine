@@ -143,10 +143,11 @@ def test_analysis_search_then_requests_real_caller_source(repo, monkeypatch):
 
 
 def test_search_hints_cannot_be_cited_and_legacy_requests_keep_read_only_tools(repo):
-    sha = commit(repo, {"app.py": "result = divide(0)\n", "caller.py": "divide(0)\n"})
+    base = commit(repo, {"app.py": "result = divide(1)\n", "caller.py": "divide(0)\n"})
+    head = commit(repo, {"app.py": "result = divide(0)\n"})
     options = RepoSettings().model_dump()
     with source.local_repository(repo) as (isolated, env):
-        plan = planning.plan_review(isolated, env, sha, sha, sha, {**options, "review_mode": "all"}, lambda: False)
+        plan = planning.plan_review(isolated, env, base, head, base, options, lambda: False)
         batch = engine.prepare_batches(plan, CONNECTION, options, {})[0]
         result, additional = engine.read_sources([ToolCall(id="s", name="search_source", arguments={"symbol": "divide"})],
             repo=isolated, env=env, plan=plan, options=options, credentials={}, authorize=lambda: None, stopped=lambda: False)
@@ -161,7 +162,7 @@ def test_search_hints_cannot_be_cited_and_legacy_requests_keep_read_only_tools(r
         candidate = {"task_key": batch.key, "completed_units": [unit.key for unit in batch.units], "findings": [{
             "unit_key": batch.units[0].key, "path": batch.units[0].path, "start_line": 1, "end_line": 1,
             "content": "Division by zero", "trigger": "Zero argument", "consequence": "Exception",
-            "evidence": [{"source_id": context.source_id(sha, "unread.py"), "start_line": 1, "end_line": 1}]}]}
+            "evidence": [{"source_id": context.source_id(head, "caller.py"), "start_line": 1, "end_line": 1}]}]}
         with pytest.raises(engine.ResultValidationError, match="supplied citation sources"):
             engine.validate_result(candidate, batch, batch.sources, {})
 
