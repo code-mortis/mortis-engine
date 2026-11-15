@@ -10,4 +10,4 @@ No PyPI release is claimed by this entry.
 - Export JSON/Markdown reports, retry failed assessments and record local finding decisions.
 - Scan repository security with Trivy and the selected AI connection.
 - Extract optional isolated code graph context and support an opt-in second discovery pass.
-- Package the Python library and `mortis` CLI for Python 3.13–3.14.
+- Package the Python library and `mortis` CLI for Python 3.13–3.15, with Python 3.15 as the development default.

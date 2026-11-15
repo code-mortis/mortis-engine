@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.13", "3.14"]
+        python: ["3.13", "3.14", "3.15"]
     env:
       AWS_EC2_METADATA_DISABLED: "true"
     steps:
@@ -37,7 +37,7 @@ jobs:
           echo "XDG_STATE_HOME=$RUNNER_TEMP/mortis-state" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.9.14"
+          version: "0.13.8"
           python-version: ${{ matrix.python }}
           enable-cache: true
       - name: Install locked dependencies
@@ -50,27 +50,27 @@ jobs:
           uv run --locked --with-requirements src/mortis_engine/code_graph/requirements.txt
           pytest -q tests/code_graph/test_graph.py::test_native_extractor_retains_real_source_contract
       - name: Lint
-        if: matrix.python == '3.13'
+        if: matrix.python == '3.15'
         run: uv run --locked ruff check .
       - name: Build wheel and source distribution
-        if: matrix.python == '3.13'
+        if: matrix.python == '3.15'
         run: uv build
       - name: Check distribution contents
-        if: matrix.python == '3.13'
+        if: matrix.python == '3.15'
         run: uv run --locked python scripts/check_dist.py
       - name: Smoke test isolated wheel and source installations
-        if: matrix.python == '3.13'
+        if: matrix.python == '3.15'
         run: |
           uv export --locked --no-dev --no-emit-project --no-hashes > "$RUNNER_TEMP/runtime-requirements.txt"
           version=$(uv run --locked python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           for archive in "$GITHUB_WORKSPACE"/dist/*; do
             environment=$(mktemp -d "$RUNNER_TEMP/mortis-installed-XXXXXX")
-            uv venv --python 3.13 "$environment"
+            uv venv --python 3.15 "$environment"
             uv pip install --python "$environment/bin/python" -r "$RUNNER_TEMP/runtime-requirements.txt" "$archive"
             (cd "$RUNNER_TEMP" && "$environment/bin/python" -I "$GITHUB_WORKSPACE/tests/smoke_test.py" "$version" "$GITHUB_WORKSPACE")
           done
       - name: Upload validated distributions
-        if: matrix.python == '3.13'
+        if: matrix.python == '3.15'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: distributions

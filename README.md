@@ -9,7 +9,8 @@ uv tool install --editable .
 mortis --help
 ```
 
-Requires Python 3.13–3.14 and Git. `uv` can provide the compatible Python interpreter.
+Requires Python 3.13–3.15 and Git. Development defaults to Python 3.15 through
+`.python-version`; `uv` can provide the compatible Python interpreter.
 To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`.
 PyPI publication is pending; [the release guide](docs/releasing.md) describes the
 prepared workflow. Trivy is required for security scans and Docker is optional
@@ -375,10 +376,11 @@ mortis connect aws \
 
 Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
 
-GitHub Actions runs the test suite on Python 3.13 and 3.14 for pushes to `main`
+GitHub Actions runs the test suite on Python 3.13, 3.14 and 3.15 for pushes to `main`
 (including merges), pull requests targeting `main` and manual dispatches.
-Python 3.13 also checks Ruff, builds and checks the wheel/source distribution,
-smoke-tests isolated installations and tests native graph extraction with the parser's pinned dependencies. Provider, Trivy
+Python 3.15 checks Ruff, builds and checks the wheel/source distribution and
+smoke-tests isolated installations. Python 3.13 tests native graph extraction with
+the parser's pinned dependencies. Provider, Trivy
 and Docker boundaries use mocks in this suite; CI does not make live analysis requests.
 
 ```sh

@@ -6,8 +6,9 @@ ownership and invariants.
 
 ## Development
 
-Install Python 3.13 or 3.14 and [uv](https://docs.astral.sh/uv/getting-started/installation/),
-then run:
+Use Python 3.15 for development and a current
+[uv](https://docs.astral.sh/uv/getting-started/installation/) (CI uses 0.13.8).
+The repository's `.python-version` selects Python 3.15. Then run:
 
 ```sh
 git clone https://github.com/code-mortis/mortis-engine.git
@@ -19,6 +20,9 @@ uv run --locked mortis --help
 Git is required. The offline suite uses mocked providers, Trivy and Docker;
 normal tests need no AI account or API keys. The native parser check installs
 its separately pinned Python dependencies.
+
+CI also checks Python 3.13 and 3.14 compatibility. Ruff targets the minimum
+supported version so lint fixes do not introduce newer-only syntax.
 
 ## Checks
 

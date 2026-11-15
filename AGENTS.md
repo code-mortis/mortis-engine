@@ -55,7 +55,8 @@ Paths above are relative to `src/mortis_engine/` unless stated otherwise.
 
 ## Checks and isolation
 
-Use the existing Python 3.13–3.14 / uv / pytest / Ruff setup from `pyproject.toml`:
+Develop with Python 3.15, pinned in `.python-version`, using uv, pytest and Ruff.
+Keep runtime code compatible with the supported Python 3.13–3.15 range in `pyproject.toml`:
 
 ```sh
 uv sync --group dev

@@ -6,7 +6,8 @@ The first PyPI release is pending.
 
 ## Prepare and validate
 
-Use Python 3.13 or 3.14 and the locked development environment:
+Use Python 3.15 (selected by `.python-version`), a current uv (CI uses 0.13.8)
+and the locked development environment:
 
 ```sh
 uv sync --locked --group dev
@@ -31,7 +32,7 @@ version=$(uv run --locked python -c 'import tomllib; print(tomllib.load(open("py
 uv export --locked --no-dev --no-emit-project --no-hashes > /tmp/mortis-runtime-requirements.txt
 for archive in "$workspace"/dist/*; do
   environment=$(mktemp -d)
-  uv venv --python 3.13 "$environment"
+  uv venv --python 3.15 "$environment"
   uv pip install --python "$environment/bin/python" -r /tmp/mortis-runtime-requirements.txt "$archive"
   (cd /tmp && "$environment/bin/python" -I "$workspace/tests/smoke_test.py" "$version" "$workspace")
 done
@@ -71,8 +72,8 @@ for the effects of making a repository public.
 
 The following are account/repository settings, not configuration supplied by these files:
 
-- Protect `main` against deletion and force pushes. Require the Python 3.13 and
-  3.14 CI checks using their names from the first hosted run, and review workflow
+- Protect `main` against deletion and force pushes. Require the Python 3.13,
+  3.14 and 3.15 CI checks using their names from the first hosted run, and review workflow
   changes through PRs.
 - Restrict creating/updating/deleting `v*` tags to release maintainers.
 - Enable private vulnerability reporting before advertising the reporting form,
