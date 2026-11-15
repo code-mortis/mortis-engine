@@ -68,6 +68,51 @@ def test_changed_caller_activates_unchanged_line_and_uses_actual_merge_base(repo
     assert result["evidence"][2]["quote"] == "inverse(1)\n"
 
 
+def test_same_head_confirmation_is_reassessed_when_merge_base_changes(repo):
+    base = commit(repo, {"app.py": "def inverse(value):\n    return value\n"})
+    introduced = commit(repo, {"app.py": "def inverse(value):\n    return 1 / value\n"})
+    head = commit(repo, {"app.py": "def inverse(value):\n    return 1 / value\n# logging change\n"})
+    first = assess(repo, run_for(base, head), Session(lambda stage, context: decision(evidence=[selected(context)])))
+    assert first["verdict"] == "confirmed"
+    previous = {"findings": [{"id": "established", "sha": head, "snapshot": candidate(head),
+        "fingerprint": workflows.planning.fingerprint(candidate(head)), "assessment": first,
+        "review_sensitivity": RepoSettings().review_sensitivity}], "prior_candidates": []}
+
+    def respond(stage, context):
+        assert context["original_sha"] == introduced
+        if not context["sources"].get("original"):
+            return decision(verdict="uncertain", required_base_paths=["app.py"])
+        return decision(verdict="rejected", relationship="duplicate", finding_id=context["history"][0]["id"],
+            explanation="The new merge base already contains the failure; only logging changed.",
+            history_explanation="Same defect as the earlier confirmed finding, now pre-existing in this comparison.",
+            evidence=[selected(context, "original"), selected(context)])
+
+    session = Session(respond)
+    with source.local_repository(repo) as (isolated, env):
+        result = asyncio.run(workflows._assess(isolated, env, run_for(introduced, head), candidate(head), previous, session))
+    assert len(session.calls) == 2
+    assert result["verdict"] == "rejected"
+    assert result["relationship"] == "duplicate"
+    assert result["finding_id"] == "established"
+
+
+@pytest.mark.parametrize("options", [{"review_mode": "all"}, {"_assessment_attribution": None}])
+def test_same_head_shortcut_is_preserved_without_attribution(repo, options):
+    sha = commit(repo, {"app.py": "def inverse(value):\n    return 1 / value\n"})
+    run = run_for(sha, sha, **options)
+    first = assess(repo, run, Session(lambda stage, context: decision(evidence=[selected(context)])))
+    previous = {"findings": [{"id": "established", "sha": sha, "snapshot": candidate(sha),
+        "fingerprint": workflows.planning.fingerprint(candidate(sha)), "assessment": first,
+        "review_sensitivity": RepoSettings().review_sensitivity}], "prior_candidates": []}
+    session = Session(lambda *args: pytest.fail("Legacy and full-tree exact repeats should reuse their assessment"))
+    with source.local_repository(repo) as (isolated, env):
+        result = asyncio.run(workflows._assess(isolated, env, run, candidate(sha), previous, session))
+    assert result["verdict"] == "confirmed"
+    assert result["relationship"] == "duplicate"
+    assert result["finding_id"] == "established"
+    assert not session.calls
+
+
 def test_base_rename_missing_path_feedback_and_corrected_citation(repo):
     base = commit(repo, {"math.py": "def inverse(value):\n    return 1 / value\n"})
     git(repo, "mv", "math.py", "app.py")

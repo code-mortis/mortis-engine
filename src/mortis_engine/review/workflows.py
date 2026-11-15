@@ -81,7 +81,8 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
                       base_sha=run.base_sha, head_sha=run.head_sha)
     else:
         context = copy.deepcopy(pinned_context)
-    result = assessment.exact_repeat(context)
+    # Same-head history does not establish attribution against this review's merge base.
+    result = None if context.get("attribution", {}).get("version") == 1 else assessment.exact_repeat(context)
     if result is not None:
         return result
     instructions = assessment.INSTRUCTIONS + "\n\n" + policy.instructions(options)
