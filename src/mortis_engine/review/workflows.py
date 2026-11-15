@@ -65,6 +65,10 @@ def _related_paths(repo, env, context, options, base_sha, head_sha):
 
 async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=None, pinned_context=None):
     options = run.config["settings"]
+    if pinned_context is None and candidate_id and getattr(session, "history", None):
+        saved = session.history.assessment_inputs(session.run_id).get(candidate_id)
+        if saved:
+            pinned_context = saved["context"]
     if pinned_context is None:
         context = assessment.build_context(repo, env, env, run, snapshot, previous, lambda: False)
         context["review_sensitivity"] = options.get("review_sensitivity")
@@ -81,6 +85,8 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
     if result is not None:
         return result
     instructions = assessment.INSTRUCTIONS + "\n\n" + policy.instructions(options)
+    if context.get("attribution", {}).get("version") == 1:
+        instructions += "\n\n" + assessment.ATTRIBUTION_INSTRUCTIONS
     if options.get("review_mode") == "all":
         instructions = instructions.replace("introduced by the change", "present in the supplied snapshot")
     identity = planning.fingerprint(snapshot)
@@ -88,14 +94,18 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
         result = await _ask(session, "assessment", f"{identity}:{round}", context, instructions,
                             assessment.output_schema(context), assessment.validate_response, options)
         requested = result.pop("required_paths", [])
-        if not requested:
+        base_requested = result.pop("required_base_paths", [])
+        if not requested and not base_requested:
             return result
         if round == 2:
             return {**result, "verdict": "uncertain", "relationship": "uncertain", "finding_id": None,
                     "suggestion_supported": False,
                     "explanation": "Assessment still needs evidence after three passes. " + result["explanation"]}
         try:
-            assessment.expand_context(repo, env, run, context, requested, lambda: False)
+            if requested:
+                assessment.expand_context(repo, env, run, context, requested, lambda: False)
+            if base_requested:
+                assessment.expand_base_context(repo, env, run, context, base_requested, lambda: False)
         except verification.ResultValidationError as exc:
             context["validation_feedback"] = exc.feedback
     raise AssertionError("Bounded assessment did not produce a result")

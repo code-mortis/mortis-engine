@@ -12,7 +12,7 @@ from mortis_engine.findings import snapshot as triage_snapshot
 from mortis_engine.history import History
 from mortis_engine.workflow import Session
 
-from . import context, engine, planning, settings, snapshots, source, workflows
+from . import assessment, context, engine, planning, settings, snapshots, source, workflows
 
 
 def scope_ref(repo, env, ref):
@@ -77,6 +77,10 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
         with _inputs(history, repository, mode, base, head, resume) as (snap, saved):
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
             full_tree_source_policy = saved.get("full_tree_source_policy") if saved else planning.FULL_TREE_SOURCE_POLICY
+            attribution = saved.get("assessment_attribution") if saved else assessment.ATTRIBUTION_VERSION
+            if attribution not in {None, assessment.ATTRIBUTION_VERSION}:
+                raise ValueError("The saved assessment attribution version is unsupported.")
+            options["_assessment_attribution"] = attribution
             if saved:
                 effort, graph = saved["effort"], saved["graph"]
                 concurrency = saved.get("concurrency")
@@ -112,7 +116,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
                     "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
                     "triage_versions": decisions, "assessment_runs": assessment_runs,
-                    "full_tree_source_policy": full_tree_source_policy})
+                    "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution})
             options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
