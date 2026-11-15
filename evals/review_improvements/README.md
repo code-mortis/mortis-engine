@@ -64,6 +64,8 @@ Metrics are deliberately separate:
 - Duplicate candidates and duplicate published confirmations are counted independently
   of unique defects. Repeated candidate path/line anchors count even for preexisting or
   refuted allegations, independently of grader truth labels and title text.
+  False confirmations use the same source anchor plus assessment cause/trigger when
+  available, so different finding IDs do not hide duplicates or merge distinct causes.
 - Incomplete cases retain failed/waived/missing file coverage, stage errors and uncertain
   assessments. A clean result never erases incomplete coverage.
 - Known tokens sum only requests with known consumption. Unknown request counts remain

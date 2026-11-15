@@ -168,7 +168,10 @@ def score(results, expected):
         published = set()
         for finding in report.get("findings", []):
             defect = matched(finding, defects)
-            identity = (case_id, defect) if defect else (case_id, finding.get("id", json.dumps(finding, sort_keys=True)))
+            assessment = finding.get("assessment", finding)
+            identity = ((case_id, defect) if defect else
+                        (case_id, finding["path"], finding["start_line"], finding["end_line"],
+                         assessment.get("cause", ""), assessment.get("trigger", "")))
             duplicate_confirmations += int(identity in published)
             if identity not in published:
                 if defect:

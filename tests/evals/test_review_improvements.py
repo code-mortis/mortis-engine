@@ -112,6 +112,20 @@ def test_duplicate_candidates_count_preexisting_and_refuted_allegations(case_id)
     assert metrics["confirmed_precision"] is None
 
 
+def test_duplicate_false_confirmations_ignore_ids_but_keep_distinct_causes():
+    first = {"id": "first", "path": "app.py", "start_line": 2, "end_line": 2,
+             "assessment": {"cause": "Unguarded division", "trigger": "Zero input"}}
+    duplicate = {**first, "id": "different-id", "content": "Reworded finding"}
+    distinct = {**first, "id": "distinct-cause", "assessment": {"cause": "Truncated input", "trigger": "Fraction"}}
+    report = {"status": "completed", "workflow_status": "completed", "candidates": [],
+              "findings": [first, duplicate, distinct], "coverage": {"selected": [], "completed": []},
+              "usage": {"requests": []}}
+    metrics = evaluation.score([{"id": "clean", "report": report}], {"clean": {"defects": []}})
+    assert metrics["duplicate_confirmations"] == 1
+    assert metrics["confirmed_false"] == 2
+    assert metrics["confirmed_precision"] == 0
+
+
 def test_pinned_git_identity_and_paths_fail_closed(tmp_path):
     _, cases = evaluation.verify_inputs()
     changed = copy.deepcopy(cases[0])
