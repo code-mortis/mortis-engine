@@ -181,11 +181,11 @@ def test_base_requests_require_uncertain_and_validate_paths():
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_service_pins_attribution_before_analysis_and_restores_legacy(repo, tmp_path, monkeypatch, legacy):
+def test_service_pins_attribution_before_analysis_and_restores_legacy(repo, tmp_path_factory, monkeypatch, legacy):
     from mortis_engine.history import History, encode
     from mortis_engine.review import engine, service
 
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("attribution-state")))
     commit(repo, {"app.py": "value = 1\n"})
     connection = {"kind": "api", "provider": "test", "protocol": "openai", "model": "fixture",
                   "base_url": "https://example.com/v1", "options": {}}
