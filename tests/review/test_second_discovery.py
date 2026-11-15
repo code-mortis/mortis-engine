@@ -86,17 +86,21 @@ def test_second_pass_cannot_reset_budget_unknown_usage_or_deadline(monkeypatch, 
         calls.append(request)
         response = final(request, tokens=None if reason == "usage_unknown" else budget if reason == "budget" else 10)
         response.output["findings"] = [draft_finding(request)]
+        return response
+
+    def progress(event):
+        if event.get("discovery_pass") == 2 or event.get("completed_units") != 1:
+            return
         if reason == "deadline":
             monkeypatch.setattr(time, "monotonic", lambda: started + 3)
         if reason == "cancelled":
             stopped[0] = True
-        return response
 
     monkeypatch.setattr(gateway, "send", send)
     session = Session(CONNECTION, {})
     started = time.monotonic()
     status, raw, candidates = engine.run(None, {}, plan(), CONNECTION, options, {}, session=session,
-        deadline=started + 2 if reason == "deadline" else None, stopped=lambda: stopped[0])
+        deadline=started + 2 if reason == "deadline" else None, stopped=lambda: stopped[0], progress=progress)
     assert status == "partial" and len(calls) == len(candidates) == 1
     assert raw["manifest"]["coverage"]["completed"]
     assert raw["second_pass"]["status"] == "partial"
