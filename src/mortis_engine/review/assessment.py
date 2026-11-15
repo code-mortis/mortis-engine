@@ -280,7 +280,44 @@ def validate_result(value, context):
     ):
         result["verdict"] = "uncertain"
         result["explanation"] = "The AI could not fully support this proposed finding with current code or determine whether it repeats an earlier finding. " + result["explanation"]
+    if result["suggestion_supported"] and _invalid_python_suggestion(context):
+        result["suggestion_supported"] = False
+        result["explanation"] += " The suggested replacement was withheld because it introduces invalid Python syntax."
     return result
+
+def _invalid_python_suggestion(context):
+    finding = context["finding"]
+    path = finding.get("path", "")
+    if (not path.endswith((".py", ".pyi"))
+        or finding.get("source_sha", context["head_sha"]) != context["head_sha"]
+        or context.get("current_path", path) != path):
+        return False
+    source = context["sources"].get("current", {}).get(path)
+    suggestion = finding.get("suggestion_code")
+    start, end = finding.get("start_line"), finding.get("end_line")
+    if source is None or not isinstance(suggestion, str) or type(start) is not int or type(end) is not int:
+        return False
+    lines = source.splitlines(keepends=True)
+    if not 1 <= start <= end <= len(lines):
+        return False
+    existing = finding.get("existing_code")
+    if not isinstance(existing, str) or existing.splitlines() != source.splitlines()[start - 1:end]:
+        return False
+    # Only a valid original and an exact whole-line replacement support a syntax veto.
+    try:
+        compile(source, path, "exec", dont_inherit=True)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    if end < len(lines) and suggestion and not suggestion.endswith(("\n", "\r")):
+        suggestion += "\r\n" if lines[end - 1].endswith("\r\n") else "\n"
+    patched = "".join(lines[:start - 1]) + suggestion + "".join(lines[end:])
+    try:
+        compile(patched, path, "exec", dont_inherit=True)
+    except (SyntaxError, ValueError):
+        return True
+    except (RecursionError, MemoryError):
+        return False
+    return False
 
 def exact_repeat(context):
     candidate = context["finding"]
