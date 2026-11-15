@@ -56,16 +56,28 @@ class History:
         self.db = sqlite3.connect(path, timeout=10)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
+            BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, scope TEXT NOT NULL,
                 started REAL NOT NULL, plan TEXT NOT NULL, report TEXT
             );
             CREATE INDEX IF NOT EXISTS runs_scope ON runs(kind, scope, started);
+            CREATE TABLE IF NOT EXISTS assessment_inputs (
+                run TEXT NOT NULL, candidate TEXT NOT NULL, input TEXT NOT NULL,
+                PRIMARY KEY (run, candidate)
+            );
+            CREATE TABLE IF NOT EXISTS triage_events (
+                kind TEXT NOT NULL, scope TEXT NOT NULL, finding TEXT NOT NULL,
+                version INTEGER NOT NULL, run TEXT NOT NULL, previous TEXT NOT NULL,
+                state TEXT NOT NULL, reason TEXT NOT NULL, created REAL NOT NULL,
+                PRIMARY KEY (kind, scope, finding, version)
+            );
             CREATE TABLE IF NOT EXISTS attempts (
                 run TEXT NOT NULL, stage TEXT NOT NULL, task TEXT NOT NULL, input TEXT NOT NULL,
                 reserved INTEGER NOT NULL, record TEXT NOT NULL, result TEXT,
                 PRIMARY KEY (run, stage, task)
             );
+            COMMIT;
         """)
 
     def __enter__(self):
@@ -145,3 +157,17 @@ class History:
             self.db.execute("UPDATE attempts SET record=?, result=? WHERE run=? AND stage=? AND task=?",
                             (encode(record), encode(result) if result is not None else None,
                              run_id, record["stage"], record["task_key"]))
+
+    def save_assessment_input(self, run_id, candidate_id, value):
+        encoded = encode(value)
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO assessment_inputs VALUES (?, ?, ?)",
+                            (run_id, candidate_id, encoded))
+            row = self.db.execute("SELECT input FROM assessment_inputs WHERE run=? AND candidate=?",
+                                  (run_id, candidate_id)).fetchone()
+            if row[0] != encoded:
+                raise ValueError("The saved candidate has different immutable assessment inputs.")
+
+    def assessment_inputs(self, run_id):
+        return {row["candidate"]: json.loads(row["input"]) for row in self.db.execute(
+            "SELECT candidate, input FROM assessment_inputs WHERE run=? ORDER BY rowid", (run_id,))}

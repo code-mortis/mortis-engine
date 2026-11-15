@@ -17,6 +17,7 @@ from mortis_engine.review import review_local, settings
 
 LIMIT_FLAGS = ("max_output_tokens", "token_budget", "timeout_seconds", "max_files", "assessment_token_budget",
                "verification_token_budget", "summary_token_budget", "summary_timeout_seconds")
+GRAPH_LIMIT_FLAGS = ("max_files", "max_file_bytes", "max_source_bytes")
 
 
 def limit_overrides(args):
@@ -59,13 +60,22 @@ def progress_display(enabled, *, scan=False):
     coverage = ""
     possible, scanner = "", ""
     assessment = []
+    capacity, current = "", None
+    waiting = 0
     with (Live(display, console=console, transient=True, redirect_stdout=False)
           if console.is_interactive else nullcontext()) as live:
 
         def update(value):
-            nonlocal coverage, possible, scanner, assessment
+            nonlocal coverage, possible, scanner, assessment, capacity, current, waiting
+            if value["phase"] == "connection_capacity":
+                waiting = value["waiting_requests"]
+                capacity = f"Connection requests: {value['active_requests']} active, {value['waiting_requests']} waiting"
+                value = {**(current or {"phase": "connection_capacity"}),
+                         "active_requests": value["active_requests"], "waiting_requests": waiting}
+            else:
+                current = value
             phase = value["phase"]
-            lines = []
+            lines = [capacity] if capacity else []
             if "possible_findings" in value:
                 possible = f"Possible findings found so far: {value['possible_findings']}"
             if "scanner_findings" in value:
@@ -92,7 +102,9 @@ def progress_display(enabled, *, scan=False):
                     "snapshot": "Preparing security snapshot…", "trivy": "Running Trivy security checks…",
                     "assessment": "Checking security findings…" if scan else "Checking findings…",
                     "summary": "Writing review summary…", "verification": "Verifying previous findings…",
-                    "report": "Preparing security report…"}[phase]
+                    "report": "Preparing security report…", "connection_capacity": "Preparing AI request…"}[phase]
+            if waiting:
+                description = "Waiting for connection capacity…"
             lines = [line for line in (coverage, possible, scanner, *assessment) if line] + lines
             display.update(task, description=description)
             if live is not None:
@@ -145,9 +157,15 @@ def render(result):
 def run(args):
     overrides = limit_overrides(args)
     settings.apply_overrides({}, overrides)
+    graph_limits = {key: getattr(args, "graph_" + key) for key in GRAPH_LIMIT_FLAGS
+                    if getattr(args, "graph_" + key, None) is not None}
+    if graph_limits:
+        overrides["code_graph_limits"] = graph_limits
     if args.resume and (args.base or args.head or args.staged or args.all or args.effort or args.graph
                         or args.concurrency is not None or overrides):
         raise ValueError("--resume uses the inputs and options of the saved run.")
+    if graph_limits and not args.graph:
+        raise ValueError("Graph limit overrides require --graph.")
     if args.head and not (args.base or args.all):
         raise ValueError("Use --head with --base for a comparison or with --all for a full-branch review.")
     mode = "all" if args.all else "staged" if args.staged else "commits" if args.base else "worktree"
@@ -208,6 +226,9 @@ def add_parser(commands):
     mode.add_argument("--all", action="store_true", help="Review all eligible tracked files at --head")
     parser.add_argument("--head", help="Branch, tag or commit (default: HEAD)")
     parser.add_argument("--graph", action="store_true", help="Include related source from the isolated local code graph parser")
+    for field in GRAPH_LIMIT_FLAGS:
+        parser.add_argument("--graph-" + field.replace("_", "-"), type=int,
+                            help=f"Override graph {field} for this run (requires --graph; positive integer)")
     execution_options(parser)
     options(parser)
     parser.set_defaults(run=run)

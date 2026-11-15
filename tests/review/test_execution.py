@@ -48,7 +48,7 @@ def test_only_validated_results_count_and_partial_file_stays_incomplete(monkeypa
 @pytest.mark.parametrize("same_file", [False, True])
 @pytest.mark.parametrize("failed", [False, True])
 def test_progress_tracks_concurrent_files_before_dispatch_and_clears_them(monkeypatch, same_file, failed):
-    events, calls = [], []
+    events, calls, capacity = [], [], []
     both_started = asyncio.Event()
 
     async def send(connection, credentials, request, **kwargs):
@@ -64,18 +64,21 @@ def test_progress_tracks_concurrent_files_before_dispatch_and_clears_them(monkey
         return final(request)
 
     monkeypatch.setattr(gateway, "send", send)
+    def progress(value):
+        (events if value["phase"] == "analysis" else capacity).append(value)
+
     state, report, _ = engine.run(None, {}, plan(2, same_file), CONNECTION, {**OPTIONS, "concurrency": 2}, {},
-                                  progress=events.append)
+                                  progress=progress)
     assert state == ("partial" if failed else "completed")
     assert events[0]["completed_units"] == 0
     assert events[1]["active_paths"] == (["app.py"] if same_file else ["app0.py", "app1.py"])
-    assert events[1]["active_requests"] == 2
+    assert max(event["active_requests"] for event in capacity) == 2
     assert events[1]["completed_files"] == 0
     assert events[1]["selected_files"] == (1 if same_file else 2)
     assert len(events[2]["active_paths"]) == 1
     assert events[-1] == {"phase": "analysis", "active_paths": [], "selected_units": 2,
                           "possible_findings": 0,
-                          "completed_units": 1 if failed else 2, "active_requests": 0,
+                          "completed_units": 1 if failed else 2, "active_requests": 0, "waiting_requests": 0,
                           "selected_files": 1 if same_file else 2, "failed_files": int(failed),
                           "completed_files": (0 if failed else 1) if same_file else (1 if failed else 2)}
     assert sum(unit["status"] == "completed" for unit in report["units"]) == events[-1]["completed_units"]
@@ -363,6 +366,8 @@ def test_possible_findings_update_while_other_analysis_is_active(monkeypatch):
     first_finished = asyncio.Event()
 
     def progress(event):
+        if event["phase"] != "analysis":
+            return
         events.append(event)
         if event["possible_findings"] == 1:
             first_finished.set()
@@ -386,7 +391,7 @@ def test_possible_findings_update_while_other_analysis_is_active(monkeypatch):
 
 
 def test_recovery_possible_findings_include_validated_partial_units(monkeypatch):
-    calls, events = [], []
+    calls, events, capacity = [], [], []
     value = plan(2, same_file=True)
     value.batches = [value.units]
 
@@ -397,14 +402,15 @@ def test_recovery_possible_findings_include_validated_partial_units(monkeypatch)
         if len(calls) == 3:
             assert events[-1]["possible_findings"] == 1
             assert events[-1]["completed_files"] == 0
-            assert events[-1]["active_requests"] == 1
+            assert capacity[-1]["active_requests"] == 1
             raise TimeoutError
         response = final(request)
         response.output["findings"] = [draft_finding(request)]
         return response
 
     monkeypatch.setattr(gateway, "send", send)
-    state, _, findings = engine.run(None, {}, value, CONNECTION, OPTIONS, {}, progress=events.append)
+    state, _, findings = engine.run(None, {}, value, CONNECTION, OPTIONS, {},
+        progress=lambda v: (events if v["phase"] == "analysis" else capacity).append(v))
     assert state == "partial"
     assert events[-1]["possible_findings"] == len(findings) == 1
 
@@ -429,7 +435,8 @@ def test_repair_reconsiders_valid_and_invalid_candidates_from_prior_draft(monkey
         return response
 
     monkeypatch.setattr(gateway, "send", send)
-    state, report, findings = engine.run(None, {}, plan(), CONNECTION, OPTIONS, {}, progress=events.append)
+    state, report, findings = engine.run(None, {}, plan(), CONNECTION, OPTIONS, {},
+        progress=lambda v: events.append(v) if v["phase"] == "analysis" else None)
     assert state == "completed" and len(calls) == 2
     assert len(findings) == report["summary"]["findings"] == 2
     assert calls[0].messages[0] == calls[1].messages[0]

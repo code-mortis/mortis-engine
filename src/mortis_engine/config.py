@@ -63,7 +63,6 @@ def validate_profile(name, saved):
     allowed = {"provider", "protocol", "base_url", "model", "options", "credential_id", "api_key_env", "headers_env"}
     if set(saved) - allowed:
         raise ValueError("A saved profile contains unsupported fields")
-    connection(name, saved)
     if "credential_id" in saved and (not isinstance(saved["credential_id"], str) or not saved["credential_id"]
                                       or len(saved["credential_id"]) > 200):
         raise ValueError("A saved credential ID must be nonempty text")
@@ -74,6 +73,7 @@ def validate_profile(name, saved):
         raise ValueError("Saved header references must map header names to environment variable names")
     for source in headers.values():
         environment_name(source)
+    connection(name, saved)
 
 
 def environment_name(name):
@@ -128,9 +128,16 @@ def credentials(saved, *, api_key=True, headers=True):
 def connection(name, saved):
     from mortis_engine.schemas import ConnectionInput
 
-    return ConnectionInput(name=name, **{key: saved[key] for key in (
+    from .admission import connection_key
+
+    value = ConnectionInput(name=name, **{key: saved[key] for key in (
         "provider", "protocol", "base_url", "model", "options"
     ) if key in saved}).model_dump(exclude={"api_key", "extra_headers", "name"})
+    references = {key: saved[key] for key in ("credential_id", "api_key_env") if saved.get(key)}
+    if saved.get("headers_env"):
+        references["headers_env"] = {key.lower(): source for key, source in saved["headers_env"].items()}
+    value["_admission_key"] = connection_key(value, references)
+    return value
 
 
 def credential_destination(value):

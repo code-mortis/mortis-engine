@@ -23,7 +23,7 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
         seconds = options.get("timeout_seconds")
         run_deadline = min(deadline if deadline is not None else float("inf"),
                            time.monotonic() + seconds if seconds else float("inf"))
-        active = session or Session(prepared[0].connection if prepared else {}, credentials)
+        active = session or Session(prepared[0].connection if prepared else {}, credentials, progress=progress)
         run_id = active.run_id
 
         def cancelled():
@@ -47,7 +47,8 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                 "failed_files": sum(bool(item.error) or any(
                     outcomes.get(unit.key, {}).get("status") == "failed" for unit in item.units)
                     for item in plan.selected) if not plan.limit_reason else 0,
-                "active_requests": len(active_batches),
+                "active_requests": active.active_requests,
+                "waiting_requests": active.waiting_requests,
                 "active_paths": sorted({unit.path for batch in active_batches.values() for unit in batch.units})})
 
         async def batch_run(batch, client, *, recovered=False, session_id=None):

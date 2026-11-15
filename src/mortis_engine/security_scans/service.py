@@ -200,9 +200,10 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
     previous_findings = history_findings(previous)
     stages = {name: {"status": "pending"} for name in ("snapshot", "trivy", "analysis", "assessment", "verification", "report")}
     findings, assessments, verifications, problems = [], [], [], []
+    candidate_rows = []
     units, observed = [], set()
     progress({"phase": "snapshot"})
-    with source.local_repository(repository) as (repo, env), tempfile.TemporaryDirectory(prefix="mortis-security-") as temporary:
+    with source.local_repository(repository, object_cache=getattr(getattr(session, "history", None), "objects", None)) as (repo, env), tempfile.TemporaryDirectory(prefix="mortis-security-") as temporary:
         sha = source.resolve_commit(repo, env, ref)
         item = engine.Snapshot(Path(temporary), sha, env, stopped, git=repo, key=identity_key(create=not (previous and secret_rules(previous))))
         item.deadline = deadline
@@ -262,7 +263,9 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 "failed_files": sum(unit["status"] == "failed" for unit in units),
                 "possible_findings": sum(len(proposals) for proposals in proposals_by_path.values()),
                 "scanner_findings": scanner_findings,
-                "active_requests": len(active_paths), "active_paths": sorted(item.redact(path) for path in active_paths)})
+                "active_requests": getattr(session, "active_requests", len(active_paths)),
+                **({"waiting_requests": session.waiting_requests} if hasattr(session, "waiting_requests") else {}),
+                "active_paths": sorted(item.redact(path) for path in active_paths)})
 
         async def analyze(path):
             async with semaphore:
@@ -289,14 +292,28 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                               "total": len(code_paths), "completed": completed}
         async def assess(candidate, history):
             index, proposal, paths = candidate
+            candidate_id = "candidate-" + digest(json.dumps([getattr(session, "run_id", sha), index, proposal], sort_keys=True))[:32]
+            row = {"id": candidate_id, "snapshot": proposal, "position": index}
+            candidate_rows.append(row)
             try:
                 context = {"proposal": proposal, "history": assessment_history(proposal, history, item),
                            "head_sha": sha, "diff": "",
                            "sources": {"current": {path: item.source(path) for path in paths}}}
-                assessed, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options)
+                def pin(context):
+                    if getattr(session, "history", None):
+                        from mortis_engine.assessments import pin_input
+                        # Keep scanner redaction identities and line masks, never raw secret matches.
+                        redaction = {"secret_rules": [*item.secret_rules, *secret_rules({"schema_version": "mortis.security/v1", "findings": findings})],
+                                     "secret_lines": item.secret_lines, "inventory": item.inventory,
+                                     "key_check": engine.secure_digest("assessment-redaction-key", item.key)}
+                        pin_input(session, candidate_id, "scan", proposal, context, options,
+                                  f"assessment:{index}", repo, env, head_sha=sha, redaction=redaction)
+                assessed, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options, pin=pin)
+                row.update(status="completed", result=assessed)
                 return assessed
             except Exception as exc:
-                problems.append(f"Security assessment incomplete: {item.redact(str(exc))[:1000]}")
+                row.update(status="failed", result=None, error=item.redact(str(exc))[:1000])
+                problems.append(f"Security assessment incomplete: {row['error']}")
                 units.append({"task": f"assessment:{index}", "status": "failed"})
                 return None
 
@@ -397,6 +414,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         report = {"schema_version": "mortis.security/v1", "repository": repository_name, "commit": sha, "ref": ref,
             "status": "completed" if complete else "partial", "grade": rating if complete else None,
             "rating_policy": "highest-unresolved-severity/v1", "findings": findings, "assessments": assessments,
+            "candidates": sorted(candidate_rows, key=lambda row: row["position"]),
             "verifications": verifications, "stages": stages, "problems": problems,
             "coverage": {"inventory": item.inventory, "excluded": item.excluded, "units": units,
                          "selected_files": len(code_paths), "completed_files": completed},
