@@ -13,7 +13,7 @@ from rich.text import Text
 
 from mortis_engine import config
 from mortis_engine.history import History
-from mortis_engine.review import review_local, settings
+from mortis_engine.review import preview_local, review_local, settings
 
 from .reports import destinations, output_options, write_outputs
 
@@ -156,9 +156,37 @@ def render(result):
     return terminal("\n".join(lines))
 
 
+
+def render_preview(result):
+    totals = result["totals"]
+    lines = [f"Review scope preview ({result['mode']})  {result['merge_base'][:12]}..{result['head_sha'][:12]}",
+             f"Selected: {totals['selected_files']} files. Excluded: {totals['excluded_files']}. "
+             f"Units: {totals['units']}. Planned batches: {totals['planned_batches']}.",
+             f"Assigned source: {totals['source_bytes']} bytes. Diff: {totals['diff_bytes']} bytes. "
+             f"Assigned unit JSON: {totals['assigned_unit_json_bytes']} bytes."]
+    for row in result["selected_files"]:
+        sizes = f"{row['source_bytes']} source bytes, {row['diff_bytes']} diff bytes" if row["source_bytes"] is not None else "bytes unavailable"
+        lines.append(f"Selected: {row['path']} ({len(row['unit_keys'])} units; {sizes})")
+    for row in result["excluded_files"]:
+        lines.append(f"Excluded: {row['path']} ({row['reason']})")
+    for batch in result["batches"]:
+        lines.append(f"Batch {batch['number']}: {len(batch['unit_keys'])} units; " + ", ".join(batch["paths"]))
+    if result["limit_reason"]:
+        lines.append("Blocked: " + result["limit_reason"])
+    for row in result["errors"]:
+        lines.append(f"Incomplete: {row['path']}: {row['message']}")
+    lines.extend(result["warnings"])
+    lines.extend(result["assumptions"])
+    return terminal("\n".join(lines))
+
+
 def run(args):
     outputs = destinations(args.output)
     overrides = limit_overrides(args)
+    if args.preview and args.second_pass:
+        raise ValueError("--preview shows primary scope only; omit --second-pass.")
+    if args.second_pass:
+        overrides["second_pass"] = True
     settings.apply_overrides({}, overrides)
     graph_limits = {key: getattr(args, "graph_" + key) for key in GRAPH_LIMIT_FLAGS
                     if getattr(args, "graph_" + key, None) is not None}
@@ -172,6 +200,15 @@ def run(args):
     if args.head and not (args.base or args.all):
         raise ValueError("Use --head with --base for a comparison or with --all for a full-branch review.")
     mode = "all" if args.all else "staged" if args.staged else "commits" if args.base else "worktree"
+    if args.preview:
+        if args.resume or args.connection or args.graph or args.progress or args.output or args.second_pass or args.concurrency is not None:
+            raise ValueError("--preview inspects local scope only; omit --resume, --connection, --graph, --progress, --output, --second-pass and --concurrency.")
+        result = preview_local(args.repo, mode=mode, base=args.base, head=args.head or "HEAD",
+                               effort=args.effort, overrides=overrides, prompt_token_ceiling=args.prompt_token_ceiling)
+        print(json.dumps(result, indent=2) if args.format == "json" else render_preview(result))
+        return 2 if result["limit_reason"] or result["errors"] else 0
+    if args.prompt_token_ceiling is not None:
+        raise ValueError("--prompt-token-ceiling is a preview sizing assumption and requires --preview.")
     name, profile = selected(args)
 
     def announce(count, model):
@@ -229,6 +266,9 @@ def add_parser(commands):
     mode.add_argument("--staged", action="store_true", help="Review the index against HEAD")
     mode.add_argument("--all", action="store_true", help="Review all eligible tracked files at --head")
     parser.add_argument("--head", help="Branch, tag or commit (default: HEAD)")
+    parser.add_argument("--second-pass", action="store_true", help="Opt into a bounded complementary discovery pass after primary analysis")
+    parser.add_argument("--preview", action="store_true", help="Show local files, exclusions, bytes, units and planned batches without a connection or saved run")
+    parser.add_argument("--prompt-token-ceiling", type=int, help="Explicit preview-only sizing assumption (4096–2000000); never reads a saved connection")
     parser.add_argument("--graph", action="store_true", help="Include related source from the isolated local code graph parser")
     for field in GRAPH_LIMIT_FLAGS:
         parser.add_argument("--graph-" + field.replace("_", "-"), type=int,
