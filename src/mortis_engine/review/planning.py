@@ -26,15 +26,18 @@ DEFAULT_DIRS = set((
     ".pnpm-store .svelte-kit .astro .angular .parcel-cache .docusaurus .bundle .gradle "
     "site-packages .tox Pods Carthage .build obj .dart_tool .terraform .stack-work kitex_gen"
 ).lower().split())
-DEFAULT_PATTERNS = (
+DEFAULT_TEST_PATTERNS = (
     "**/*_test.{go,py,rs,zig}", "**/test_*.py", "**/*.test.{js,jsx,ts,tsx,ets}",
     "**/*.spec.{js,jsx,ts,tsx}", "**/*_spec.rb", "**/*Test.java", "**/*Tests.java", "**/*Test.fs",
-    "**/*Test.swift", "**/*Tests.swift", "**/*Spec.hs", "**/*Spec.lhs", "**/*.snap", "**/*.generated.*",
-    "**/*.gen.go", "**/*.pb.{go,cc,h}", "**/*.capnp.{h,go,ts}", "**/*_capnp.{rs,py}",
+    "**/*Test.swift", "**/*Tests.swift", "**/*Spec.hs", "**/*Spec.lhs",
     "**/src/test/java/**", "**/src/test/**/*.{kt,kts}", "**/Tests/**/*.swift", "**/test/**/*.{jl,hs,lhs}",
     "**/tests/**/*.nim", "**/tests/**/*.R", "**/tests/**/*.elm", "**/test/**/*.zig", "**/test/**/*.ml",
-    "**/tb_*.{v,sv,vhd,vhdl}", "**/*_tb.{v,sv,vhd,vhdl}", "lib/**/*.sol", "**/*.t.sol",
-    "**/test/**/*.sol", "**/tests/**/*.sol", "**/test/**/*.vy", "**/tests/**/*.vy", "**/.pnp.cjs",
+    "**/tb_*.{v,sv,vhd,vhdl}", "**/*_tb.{v,sv,vhd,vhdl}", "**/*.t.sol",
+    "**/test/**/*.sol", "**/tests/**/*.sol", "**/test/**/*.vy", "**/tests/**/*.vy",
+)
+DEFAULT_PATTERNS = (
+    *DEFAULT_TEST_PATTERNS, "**/*.snap", "**/*.generated.*", "**/*.gen.go", "**/*.pb.{go,cc,h}",
+    "**/*.capnp.{h,go,ts}", "**/*_capnp.{rs,py}", "lib/**/*.sol", "**/.pnp.cjs",
     "**/.pnp.loader.mjs", "**/.terraform.lock.hcl", "**/.yarn/{cache,unplugged,releases,sdks,patches}/**",
 )
 BUILTIN_RULE = (
@@ -189,28 +192,41 @@ def load_rules(repo, env, base_sha, options, stopped):
     return {**result, "digest": fingerprint(result)}
 
 
-def allowed_path(path, options, rules):
+def exclusion_reason(path, options, rules, *, supporting_evidence=False):
+    """Explain target admission; evidence relaxes only default test omissions."""
+    if file_policy.excluded(path):
+        return "mandatory_exclusion"
     if file_policy.excluded(path, file_policy.policy(options)):
-        return False
+        return "configured_exclusion"
     # The runtime custom layer always contains mandatory excludes and text includes,
     # preserving its priority over project-local include/exclude configuration.
     custom = rules["layers"][0]
     if any(rule_matches(path, pattern) for pattern in custom["exclude"]):
-        return False
+        return "rule_exclusion"
     if any(rule_matches(path, pattern) for pattern in [*custom["include"], *file_policy.TEXT_CONTEXT]):
-        return True
+        return None
     source_path = file_policy.template_source_path(path)
     suffix = PurePosixPath(source_path).suffix.lstrip(".").lower()
     if (suffix or source_path != path) and suffix not in CODE_SUFFIXES:
-        return False
-    return not (any(part.lower() in DEFAULT_DIRS for part in PurePosixPath(path).parts)
-                or any(rule_matches(value, pattern) for value in (path, source_path)
-                       for pattern in DEFAULT_PATTERNS))
+        return "unsupported_source"
+    directories = DEFAULT_DIRS - {"__tests__"} if supporting_evidence else DEFAULT_DIRS
+    if any(part.lower() in directories for part in PurePosixPath(path).parts):
+        return "default_directory"
+    for pattern in DEFAULT_PATTERNS:
+        if supporting_evidence and pattern in DEFAULT_TEST_PATTERNS:
+            continue
+        if any(rule_matches(value, pattern) for value in (path, source_path)):
+            return "default_test" if pattern in DEFAULT_TEST_PATTERNS else "default_pattern"
+    return None
+
+
+def allowed_path(path, options, rules, *, supporting_evidence=False):
+    return exclusion_reason(path, options, rules, supporting_evidence=supporting_evidence) is None
 
 
 def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, rules=None):
     rules = rules or load_rules(repo, env, options.get("_settings_sha", base_sha), options, stopped)
-    allowed = {path for path in paths if allowed_path(path, options, rules)}
+    allowed = {path for path in paths if allowed_path(path, options, rules, supporting_evidence=True)}
     if not allowed:
         return allowed
     # Trusted rules come from the current base; PR rename scope comes from its merge base.
@@ -218,7 +234,8 @@ def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, r
     if not re.fullmatch(r"[a-f0-9]{40}", merge_base):
         raise ValueError("Supporting context requires the exact PR merge base.")
     for path, old_path, _status in _changes(repo, env, merge_base, head_sha, stopped):
-        if old_path and not all(allowed_path(value, options, rules) for value in (path, old_path)):
+        if old_path and not all(allowed_path(value, options, rules, supporting_evidence=True)
+                                for value in (path, old_path)):
             allowed.difference_update((path, old_path))
     return allowed
 

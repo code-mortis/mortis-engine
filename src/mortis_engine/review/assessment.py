@@ -174,11 +174,11 @@ def build_context(repo, env, fetch_env, run, snapshot, previous, stopped):
                                            run.config["settings"], stopped, **scope)
     merge_base = git_source.git(repo, env, "merge-base", run.base_sha, head, stopped=stopped).strip()
     selected &= verification.review_paths(repo, env, merge_base, head, selected,
-                                    run.config["settings"], stopped)
+                                    run.config["settings"], stopped, supporting_evidence=True)
     context["changed_paths"] = sorted(selected)
     context["excluded_paths"] = sorted(set(context.get("excluded_paths", [])) | (set(filter(None, paths)) - selected))
     focused = {snapshot["path"], context["current_path"]} - {None}
-    if not focused <= verification.review_paths(repo, env, merge_base, head, focused, run.config["settings"], stopped):
+    if not focused <= verification.review_paths(repo, env, merge_base, head, focused, run.config["settings"], stopped, supporting_evidence=True):
         raise ValueError("The finding rename is excluded by repository policy.")
     if focused:
         context["diff"] = git_source.git(repo, env, "diff", "--no-ext-diff", "--no-textconv", "--unified=5",
