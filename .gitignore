@@ -6,3 +6,16 @@ __pycache__/
 dist/
 *.egg-info/
 reports/
+build/
+.DS_Store
+.env
+.env.*
+!.env.example
+.aws/
+.coverage
+.coverage.*
+htmlcov/
+.local/
+.codex/
+PLAN.md
+REVIEW_IMPROVEMENTS.md

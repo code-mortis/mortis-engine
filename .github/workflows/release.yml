@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      AWS_EC2_METADATA_DISABLED: 'true'
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Isolate configuration and state
+        run: |
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/mortis-config" >> "$GITHUB_ENV"
+          echo "XDG_STATE_HOME=$RUNNER_TEMP/mortis-state" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.9.14'
+          python-version: '3.13'
+          enable-cache: false
+      - run: uv sync --locked --group dev
+      - name: Check tag, versions and main ancestry
+        run: uv run --locked python scripts/release_check.py "$RELEASE_TAG" "$RELEASE_SHA"
+
+  validate:
+    name: Validate exact release distributions
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish to PyPI
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mortis-engine
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: distributions
+          path: dist
+      - name: Publish validated distributions with attestations
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          attestations: true
+
+  github-release:
+    name: Attach distributions to GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: distributions
+          path: dist
+      - name: Create release without replacing published assets
+        run: |
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --target "$RELEASE_SHA" --generate-notes

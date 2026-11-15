@@ -3,8 +3,8 @@
 ## Source of truth
 
 Read [README.md](README.md) for supported commands, configuration, public contracts and
-development checks, and [PLAN.md](PLAN.md) for repository boundaries. Verify behavior
-against current source and callers. This repository is the standalone Python library
+development checks, and [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
+Verify behavior against current source and callers. This repository is the standalone Python library
 and CLI; GitHub authorization, scheduling and publication belong to the Code Mortis app.
 There is no app backend, frontend, Celery, PostgreSQL or Redis test stack here.
 
@@ -70,34 +70,20 @@ Configuration/documentation-only changes need structural checks, not provider ca
 
 Tests use temporary Git repositories and isolated state/configuration paths; preserve
 those fixtures. Exactly one agent owns local state/database-backed test execution at a
-time, including the coordinator; explicitly transfer ownership to `verification_runner`.
+time, including the coordinator; explicitly transfer ownership before another agent runs them.
 Do not point tests at the user's XDG directories, OS vault, saved runs or live profiles.
 Worktrees do not isolate shared state, Docker resources, ports or external services.
 Mocked HTTP/Bedrock/Trivy/Docker checks do not establish live integration or experimental
 acceptance. Report each verification boundary separately.
 
-## Codex coordination
+## Collaboration
 
-The primary chat coordinates substantial development through `.codex/agents/`. Small,
-self-contained changes can be handled directly. Read `.codex/config.toml` for defaults.
+Keep one writer per file and preserve unrelated working changes. Give delegated work
+clear ownership, acceptance criteria and verification scope. Review a stable diff and
+affected callers; require file/line evidence and a reachable failure scenario for
+findings. Keep personal agent configuration local; it is not required to contribute.
 
-- Use `explorer` only for a bounded mapping question; it returns owning code, callers,
-  contracts and tests without edits.
-- Give `implementer` required behavior, acceptance criteria, owned files/modules and
-  constraints. Include affected callers, exports, contract compatibility, history migration
-  and regression tests. Keep one writer per file and preserve unrelated working changes.
-- Review a stable diff and relevant callers with only the relevant roles:
-  `workflow_reviewer` for analysis lifecycle, persistence, inference and recovery;
-  `security_reviewer` for credentials, endpoints, source/process isolation and trust
-  boundaries; `contract_reviewer` for CLI, public Python APIs and versioned schemas.
-- Require file/line evidence and a reachable failure scenario. Separate confirmed defects
-  from uncertainties. Return confirmed fixes to the implementer, then transfer test
-  ownership to `verification_runner` for final checks. Review fixes again only when they
-  introduce new risks or require checking a previous finding.
-- Subagents finish their assignment and return to the coordinator without recursively
-  delegating. If a configured role/model is unavailable, report it and keep the assignment
-  with the coordinator; do not silently substitute or claim an agent ran.
 - Do not commit, push, publish, resolve GitHub issues/review threads, deploy, run live
   provider evaluations or start long benchmarks without explicit task authorization.
   Connection probes and model discovery may make network/provider calls; do not use them
-  as routine verification. The coordinator owns integration and reports checks and risks.
+  as routine verification. Report checks and risks, separating local and hosted results.

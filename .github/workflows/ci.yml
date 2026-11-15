@@ -6,13 +6,14 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   tests:
@@ -26,8 +27,9 @@ jobs:
     env:
       AWS_EC2_METADATA_DISABLED: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Isolate local configuration and state
         run: |
@@ -53,3 +55,25 @@ jobs:
       - name: Build wheel and source distribution
         if: matrix.python == '3.13'
         run: uv build
+      - name: Check distribution contents
+        if: matrix.python == '3.13'
+        run: uv run --locked python scripts/check_dist.py
+      - name: Smoke test isolated wheel and source installations
+        if: matrix.python == '3.13'
+        run: |
+          uv export --locked --no-dev --no-emit-project --no-hashes > "$RUNNER_TEMP/runtime-requirements.txt"
+          version=$(uv run --locked python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          for archive in "$GITHUB_WORKSPACE"/dist/*; do
+            environment=$(mktemp -d "$RUNNER_TEMP/mortis-installed-XXXXXX")
+            uv venv --python 3.13 "$environment"
+            uv pip install --python "$environment/bin/python" -r "$RUNNER_TEMP/runtime-requirements.txt" "$archive"
+            (cd "$RUNNER_TEMP" && "$environment/bin/python" -I "$GITHUB_WORKSPACE/tests/smoke_test.py" "$version" "$GITHUB_WORKSPACE")
+          done
+      - name: Upload validated distributions
+        if: matrix.python == '3.13'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

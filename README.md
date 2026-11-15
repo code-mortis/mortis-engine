@@ -9,7 +9,11 @@ uv tool install --editable .
 mortis --help
 ```
 
-Requires Python 3.13–3.14. `uv` can provide the compatible Python interpreter. To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`. PyPI publication is a later release step.
+Requires Python 3.13–3.14 and Git. `uv` can provide the compatible Python interpreter.
+To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`.
+PyPI publication is pending; [the release guide](docs/releasing.md) describes the
+prepared workflow. Trivy is required for security scans and Docker is optional
+for code graph context; neither executable is bundled in the Python package.
 
 ## Choose what to review
 
@@ -116,6 +120,7 @@ For an exact Python line replacement, Mortis checks the proposed source in memor
 If a valid original would become syntactically invalid, the confirmed finding remains
 and its suggestion is withheld. Ambiguous replacements and originally invalid source
 retain the assessor's decision; this check does not establish runtime correctness.
+See [Python suggestion checks](docs/python-suggestions.md) for the exact limits.
 
 Discovery can search a literal symbol in bounded, permitted source at the pinned
 revision, including unchanged files. Matches are navigation hints, not proof of a
@@ -127,7 +132,7 @@ The optional `--second-pass` experiment searches for additional candidates throu
 same analysis budget and normal assessment. It is disabled by default and can also be
 configured with `[review].second_pass = true`; resume retains the saved choice. A failed
 second pass preserves validated first-pass results and reports incomplete analysis.
-See [the experiment](SECOND_PASS.md) and the [offline evaluation](evals/review_improvements/README.md)
+See [the experiment](docs/second-pass.md) and the [offline evaluation](evals/review_improvements/README.md)
 for limits and the evidence required before considering default enablement.
 
 The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed only when all assigned units pass validation. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Progress goes to stderr. Exit status 0 indicates completed analysis or no eligible changes, 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
@@ -372,18 +377,23 @@ Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](
 
 GitHub Actions runs the test suite on Python 3.13 and 3.14 for pushes to `main`
 (including merges), pull requests targeting `main` and manual dispatches.
-Python 3.13 also checks Ruff, builds the wheel/source distribution
-and tests native graph extraction with the parser's pinned dependencies. Provider, Trivy
+Python 3.13 also checks Ruff, builds and checks the wheel/source distribution,
+smoke-tests isolated installations and tests native graph extraction with the parser's pinned dependencies. Provider, Trivy
 and Docker boundaries use mocks in this suite; CI does not make live analysis requests.
 
 ```sh
-uv sync --group dev
-uv run pytest -q
-uv run ruff check .
+uv sync --locked --group dev
+uv run --locked pytest -q
+uv run --locked ruff check .
 uv build
+uv run --locked python scripts/check_dist.py
 ```
 
 The `mortis_engine.cli` package contains terminal commands. Python callers can import `review_local` or `review_commits` from `mortis_engine.review` and use `mortis_engine.operations.run` for verification, summaries, background and scans. These entry points return the same versioned dictionaries as the CLI JSON output.
 
 `mortis_engine.operations` also exports `list_assessments`, `retry_assessment`,
 `list_findings` and `triage` for the corresponding local follow-up commands.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing and
+[SECURITY.md](SECURITY.md) to report a vulnerability privately. Release preparation,
+GitHub settings and PyPI setup are documented in [docs/releasing.md](docs/releasing.md).

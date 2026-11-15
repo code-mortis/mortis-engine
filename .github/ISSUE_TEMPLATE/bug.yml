@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible problem in Mortis Engine.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read CONTRIBUTING.md first. Remove credentials, private endpoints and source from examples and output.
+        Use SECURITY.md for vulnerability reports; do not attach your configuration or history database.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed and expected behavior
+      description: What happened, and what should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Exact commands and synthetic sample files, if needed. Include the exit status.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - Mortis version or commit:
+        - Operating system:
+        - Python version:
+        - Installation method:
+        - Provider/protocol and model, if relevant (no credentials):
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Sanitized output
+      description: Include relevant stderr or report fields. Remove private data before sharing.
