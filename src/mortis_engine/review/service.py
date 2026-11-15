@@ -6,6 +6,9 @@ import time
 from contextlib import contextmanager
 from dataclasses import fields
 
+from mortis_engine.code_graph.contracts import CodeGraphLimits
+from mortis_engine.findings import effective_report
+from mortis_engine.findings import snapshot as triage_snapshot
 from mortis_engine.history import History
 from mortis_engine.workflow import Session
 
@@ -62,9 +65,12 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                  effort=None, graph=False, resume=None, profile=None, on_plan=None, progress=lambda value: None,
                  concurrency=None, overrides=None):
     """Review local inputs with the saved connection and independent workflow budgets."""
+    invocation_started = time.monotonic()
     started = time.time()
     if resume and (concurrency is not None or overrides):
         raise ValueError("--resume uses the inputs and options of the saved run.")
+    if not graph and overrides and "code_graph_limits" in overrides:
+        raise ValueError("Graph limit overrides require --graph.")
     with History(repository) as history:
         if resume and history.row(resume, "review")["report"] is not None:
             return history.report(resume)
@@ -76,23 +82,36 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 overrides = saved.get("overrides")
                 started = history.row(resume)["started"]
             options.update(effort=effort or options["effort"], review_mode=snap.mode, _settings_sha=snap.settings_sha)
+            if saved:
+                # Legacy plans used these fixed limits before configurable extraction was supported.
+                options["code_graph_limits"] = CodeGraphLimits.model_validate(saved.get("code_graph_limits", {
+                    "max_files": 1000, "max_file_bytes": 1048576, "max_source_bytes": 8388608,
+                }), strict=True).model_dump()
             settings.apply_overrides(options, overrides)
             if concurrency is not None:
                 options["concurrency"] = settings.RepoSettings.model_validate({"concurrency": concurrency}, strict=True).concurrency
             connection = effective_connection(connection, options)
+            connection_identity = planning.fingerprint({key: value for key, value in connection.items()
+                                                        if key != "_admission_key"})
             if saved:
-                if planning.fingerprint(connection) != saved["connection"]:
+                if connection_identity != saved["connection"]:
                     raise ValueError("The selected connection changed since this run began.")
                 run_id = resume
                 previous = saved["history"]
+                decisions = saved.get("triage_versions", {})
+                assessment_runs = saved.get("assessment_runs", [])
             else:
                 branch = scope_ref(snap.repo, snap.env, head)
                 scope = (scope_ref(snap.repo, snap.env, base) + "..." if snap.mode == "commits" else snap.mode + " ") + branch
                 previous = history.previous_ids("review", scope)
+                decisions = triage_snapshot(history, "review", scope)
+                assessment_runs = history.previous_ids("assessment")
                 manifest = {f.name: getattr(snap, f.name) for f in fields(snap) if f.name not in {"env", "repo"}}
-                run_id = history.begin("review", scope, {"connection": planning.fingerprint(connection), "profile": profile,
+                run_id = history.begin("review", scope, {"connection": connection_identity, "profile": profile,
                     "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
-                    "overrides": overrides})
+                    "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
+                    "triage_versions": decisions, "assessment_runs": assessment_runs})
+            options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)
@@ -113,7 +132,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 # An empty diff needs neither a model nor credentials unless there are prior fixes to verify.
                 verify_previous = options["auto_resolve"] and previous and not plan.limit_reason
                 credentials = credentials_for_history(history, get_credentials) if plan.batches or verify_previous or plan.limit_reason else {}
-                session = Session(connection, credentials, history=history, run_id=run_id, deadline=deadline)
+                session = Session(connection, credentials, history=history, run_id=run_id, deadline=deadline,
+                                  progress=progress)
                 graphs, graph_status = {}, None
                 if graph and plan.batches:
                     from mortis_engine import code_graph
@@ -138,12 +158,15 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 async def finish():
                     async with session:
                         return await workflows.postprocess(snap.repo, snap.env, result, options, session,
-                            history=[history.report(row) for row in previous], progress=progress)
+                            history=[effective_report(history, row, triage_snapshot=decisions,
+                                                      assessment_runs=assessment_runs) for row in previous],
+                            progress=progress)
 
                 progress({"phase": "postprocess"})
                 result = asyncio.run(finish())
                 result["usage"] = session.usage()
                 result["usage"]["budget_exceeded"] |= raw["summary"]["budget_exceeded"]
                 result = context.sanitize(result, credentials)
+                result["elapsed_seconds"] = time.monotonic() - invocation_started
                 history.finish(run_id, result)
                 return result

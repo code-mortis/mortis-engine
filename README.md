@@ -25,6 +25,14 @@ Use `--effort low`, `--effort medium` or `--effort high` to override the reposit
 
 Use `--concurrency 1` through `--concurrency 8` to override the repository setting for a review or security scan. Reviews default to two concurrent AI batches; a batch may contain multiple files. Scans default to four concurrent file analyses. The override applies only to that run and leaves `mortis.toml` unchanged.
 
+Separate Mortis processes sharing the same local state directory also share a ceiling
+of eight active model requests per connection. This applies across repositories and
+workflow stages. Profiles using the same destination and credential reference share
+capacity even with different names or models. Progress shows waiting requests; waiting
+counts toward the configured deadline. This coordinates local clients, not provider
+account rate limits or other machines. Different credential references form separate
+groups, even when they happen to contain the same API key.
+
 Add `--progress` for a compact live view showing reviewed and failed file counts, active AI requests and elapsed time. Files in active requests appear on separate rows, with up to three names and a count of any others. Mortis sends files in batches; file counts update when a request finishes and its results pass validation. Redirected progress uses plain lines. Every review prints its elapsed time to stderr, including failed or interrupted attempts; resuming measures the current invocation. Progress and timing keep JSON on stdout valid.
 
 The view also shows possible findings as validated analysis results arrive. During assessment it shows assessed/total candidates, unique confirmed findings, rejected and uncertain candidates, failed assessments and duplicate confirmations. Failed assessments count as processed candidates and remain separate from rejected findings. These counts stay visible through summary generation. Scan progress shows Trivy findings separately from AI proposals and confirmations; unobserved findings retained from earlier scans are not counted as current confirmations. Finding text remains in the final report.
@@ -84,6 +92,48 @@ Mortis assesses candidates before reporting confirmed findings and generates a s
 
 The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed only when all assigned units pass validation. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Progress goes to stderr. Exit status 0 indicates completed analysis or no eligible changes, 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
 
+## Save and export reports
+
+Use `--output` once or several times to save a review or security scan. The filename
+extension selects Markdown (`.md` or `.markdown`) or structured JSON (`.json`):
+
+```sh
+mortis review --all --progress --output review.md --output review.json
+mortis scan --ref HEAD --progress --output scan.md --output scan.json
+```
+
+The terminal still shows the normal report; `--format json` continues to control stdout.
+Progress and elapsed time stay on stderr. Both files describe the same analysis and
+do not require extra AI calls. Partial reports are saved too, with their incomplete
+coverage and errors preserved; review and scan exit codes retain their usual meaning.
+
+Markdown includes the summary and any generated groups/diagram, findings and evidence,
+supported suggestions or remediation, coverage, errors, model, token usage and duration.
+JSON contains the complete versioned result. New review/scan results save
+`elapsed_seconds`, measuring the analysis invocation, including preparation and follow-up
+stages but excluding export. For resumed runs it measures that invocation. Older saved
+reports remain unchanged and show unavailable timing rather than an estimated duration.
+
+Export an existing saved result without a connection or another analysis:
+
+```sh
+mortis report --run RUN_ID --output reports/review.md --output reports/review.json
+```
+
+Use `--repo` when selecting a different local repository. The export uses the original
+saved review or scan report; later retries and triage remain available through
+`mortis findings`. Successful export returns exit code 0 even if the saved analysis was
+partial; its original status remains in the report.
+
+Output files are private to the current user. Missing parent directories are created
+when saving. Existing files, symlinks, duplicate destinations and unsupported extensions
+are rejected, so reports cannot overwrite source or prior output. Choose new filenames
+when saving another report. A write failure reports the saved run ID so you can export
+it again without repeating analysis.
+
+When saving inside the repository, add the output directory to `.gitignore` if you
+want future working-tree reviews to exclude those generated reports.
+
 ## Saved results and follow-up commands
 
 ```sh
@@ -99,6 +149,54 @@ mortis background --ref HEAD
 Run history, task reservations and retained snapshot objects live under `$XDG_STATE_HOME/mortis` (default `~/.local/state/mortis`). These private files can contain reviewed source. Use `mortis review --resume RUN_ID` to continue an interrupted review with its pinned revisions and saved connection. Each workflow accepts `--resume`. Validated task results can be reused. A request interrupted after dispatch retains its reservation with unknown usage.
 
 Resumed reviews and scans keep their saved concurrency override. Omit `--concurrency` when using `--resume`; `--progress` can be enabled when resuming.
+
+### Retry a failed assessment
+
+```sh
+mortis assessments --run RUN_ID
+mortis assess --run RUN_ID --candidate CANDIDATE_ID --progress
+mortis assess --resume RETRY_RUN_ID --progress
+```
+
+Reviews and security scans save candidate assessment inputs before dispatch. The listing
+shows which failed candidates can be retried and explains blocked retries. A targeted
+retry assesses only that candidate using its original source, settings and connection.
+It saves a separate `mortis.assessment/v1` result and prints its run ID, verdict and any
+confirmed finding. Analysis, Trivy and summary generation are not repeated. Repeating a
+successful retry returns the saved result.
+
+Retries have their own invocation deadline and assessment budget, with usage recorded
+separately and cumulatively across the candidate's attempts. Unknown token consumption
+blocks a retry and retains its reservation. Changed connections or missing original
+evidence also block dispatch. Older runs without saved assessment inputs remain readable
+but cannot be retried through this command. Original reports, coverage and grades stay
+available through `mortis runs RUN_ID`.
+
+A change to finding decisions in the scope blocks a retry whose saved history is stale.
+If decisions change while a retry runs, its result and usage are saved for inspection,
+and the result does not update current findings.
+
+### Record finding decisions
+
+```sh
+mortis findings --run RUN_ID
+mortis triage --run RUN_ID --finding FINDING_ID --state dismissed --version 0 --reason "Caller already checks this condition"
+mortis findings --run RUN_ID --history --format json
+```
+
+`mortis findings` shows the current findings for that run's scope, including confirmed
+assessment retries and local decisions. Review decisions support `dismissed` and `open`.
+Security decisions support `false_positive`, `accepted_risk` and `open`. Reopen a finding
+by selecting `open` and supplying the current version printed by `mortis findings`.
+Every decision requires a reason. A stale version is rejected so simultaneous commands
+cannot overwrite each other's decisions.
+
+Decisions apply to subsequent runs in the same repository and scope. They are saved in
+an audit trail alongside the original reports, and require no AI connection. Evidence
+outcomes remain visible separately from user decisions. Accepted risks still count toward
+security ratings; false positives do not count in future ratings. Triage does not claim
+that a fix was verified or a reported secret was rotated. All four follow-up commands
+support `--repo` and `--format json`.
 
 ## Scan security
 
@@ -122,6 +220,23 @@ mortis review --base main --graph
 ```
 
 Docker builds a separate parser image with the pinned grammars. During review the parser receives bounded file contents at one revision. It runs without network or host mounts. A review records unavailable graph context and can continue using its normal source evidence.
+
+Set extraction limits in the trusted committed configuration:
+
+```toml
+[review.code_graph_limits]
+max_files = 1000
+max_file_bytes = 1048576
+max_source_bytes = 8388608
+```
+
+For one run, use `mortis review --graph --graph-max-files 2000` or the corresponding
+`--graph-max-file-bytes` and `--graph-max-source-bytes` flags. Individual flags preserve
+the other committed limits. `mortis config show` displays effective values. Defaults are
+1,000 files, 1 MiB per file and 8 MiB total; maximum values are 5,000 files, 4 MiB per file
+and 32 MiB total. All must be positive integers, and the individual file limit must fit
+within the total limit. These bounds cannot be made unlimited. Resume restores saved
+limits and rejects new overrides. Persistent graph storage and querying belong to the app.
 
 ## Connect interactively
 
@@ -229,3 +344,6 @@ uv build
 ```
 
 The `mortis_engine.cli` package contains terminal commands. Python callers can import `review_local` or `review_commits` from `mortis_engine.review` and use `mortis_engine.operations.run` for verification, summaries, background and scans. These entry points return the same versioned dictionaries as the CLI JSON output.
+
+`mortis_engine.operations` also exports `list_assessments`, `retry_assessment`,
+`list_findings` and `triage` for the corresponding local follow-up commands.

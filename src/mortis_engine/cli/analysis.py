@@ -8,6 +8,7 @@ from mortis_engine import config, operations
 from mortis_engine.history import History
 from mortis_engine.review import settings
 
+from .reports import destinations, output_options, write_outputs
 from .review import execution_options, limit_overrides, options, progress_display, selected, terminal
 
 
@@ -22,6 +23,7 @@ def run(args):
 
 
 def _run(args):
+    outputs = destinations(args.output) if args.command == "scan" else []
     overrides = limit_overrides(args)
     settings.apply_overrides({}, overrides, scan=args.command == "scan")
     if args.resume and (getattr(args, "ref", None) or args.effort or getattr(args, "run_id", None)
@@ -36,6 +38,7 @@ def _run(args):
             finding_run=getattr(args, "run_id", None), resume=args.resume, effort=args.effort,
             rotations=getattr(args, "rotations", ()), concurrency=getattr(args, "concurrency", None), progress=progress,
             overrides=overrides)
+    write_outputs(result, outputs)
     if args.format == "json":
         print(json.dumps(result, indent=2))
     else:
@@ -96,6 +99,7 @@ def add_parser(commands):
         options(parser, kind=command)
         if command == "scan":
             execution_options(parser)
+            output_options(parser)
             parser.add_argument("--acknowledge-rotation", metavar="FINDING_ID", dest="rotations", action="append",
                                 default=[], help="Record that this retained secret has been rotated or revoked")
         if command != "summary":

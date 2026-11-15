@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
+from mortis_engine.code_graph.contracts import CodeGraphLimits
 from mortis_engine.review import file_policy, planning, source
 from mortis_engine.schemas import StrictModel
 
@@ -42,6 +43,7 @@ class RepoSettings(RunLimits):
     # Retain historical settings for readers; Mortis uses token_budget.
     delegated_context_bytes: int | None = Field(default=None, ge=4096, le=20000000)
     concurrency: int = Field(default=2, ge=1, le=8)
+    code_graph_limits: CodeGraphLimits = Field(default_factory=CodeGraphLimits)
     rules: dict[str, Any] | None = None
 
     @field_validator("rules", mode="before")
@@ -108,7 +110,10 @@ def apply_overrides(options, overrides, *, scan=False):
     from mortis_engine.security_scans.service import ScanOptions
 
     model = ScanOptions if scan else RepoSettings
-    options.update(model.model_validate(overrides or {}, strict=True).model_dump(include=set(overrides or {})))
+    values = dict(overrides or {})
+    if not scan and isinstance(values.get("code_graph_limits"), dict):
+        values["code_graph_limits"] = {**options.get("code_graph_limits", {}), **values["code_graph_limits"]}
+    options.update(model.model_validate(values, strict=True).model_dump(include=set(values)))
     return options
 
 

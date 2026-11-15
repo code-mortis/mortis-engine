@@ -5,6 +5,11 @@ import json
 import time
 from pathlib import Path
 
+from .assessments import list_assessments as list_assessments
+from .assessments import retry_assessment as retry_assessment
+from .findings import apply_decisions, scan_history, snapshot
+from .findings import list_findings as list_findings
+from .findings import triage as triage
 from .history import History
 from .review import planning, settings, source, workflows
 from .review.service import credentials_for_history, effective_connection, scope_ref
@@ -15,6 +20,7 @@ from .workflow import Session
 def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=None,
         finding_run=None, resume=None, effort=None, rotations=(), concurrency=None, progress=lambda value: None,
         overrides=None):
+    invocation_started = time.monotonic()
     if kind not in {"scan", "verify", "background", "summary"}:
         raise ValueError("Choose a supported local workflow.")
     if concurrency is not None and kind != "scan":
@@ -51,17 +57,21 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
             if concurrency is not None:
                 options["concurrency"] = security.ScanOptions(concurrency=concurrency).concurrency
             connection = effective_connection(connection, options)
-            identity = planning.fingerprint(connection)
+            identity = planning.fingerprint({key: value for key, value in connection.items() if key != "_admission_key"})
             if saved:
                 if saved["connection"] != identity:
                     raise ValueError("The selected connection changed since this run began.")
                 previous, run_id = saved["previous"], resume
+                decisions = saved.get("triage_versions", {})
+                assessment_runs = saved.get("assessment_runs", [])
             else:
                 scope = scope_ref(repo, env, ref) if kind != "summary" else finding_run
                 previous = history.previous_ids("scan", scope)[-1:] if kind == "scan" else []
+                decisions = snapshot(history, "scan", scope) if kind == "scan" else {}
+                assessment_runs = history.previous_ids("assessment")
                 run_id = history.begin(kind, scope, {"ref": ref, "sha": sha, "connection": identity, "previous": previous,
                     "profile": profile, "finding_run": finding_run, "effort": effort, "rotations": list(rotations),
-                    "concurrency": concurrency, "overrides": overrides})
+                    "concurrency": concurrency, "overrides": overrides, "triage_versions": decisions, "assessment_runs": assessment_runs})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)
@@ -69,13 +79,14 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                 seconds = options["summary_timeout_seconds" if kind == "summary" else "timeout_seconds"]
                 deadline = time.monotonic() + history.row(run_id)["started"] + seconds - time.time() if seconds else None
                 session = Session(connection, credentials, history=history, run_id=run_id, deadline=deadline,
-                                  scan_budget=options.get("token_budget") if kind == "scan" else None)
+                                  scan_budget=options.get("token_budget") if kind == "scan" else None, progress=progress)
 
                 async def execute():
                     async with session:
                         if kind == "scan":
                             scan_options = {k: v for k, v in options.items() if k in security.ScanOptions.model_fields}
-                            prior = history.report(previous[0]) if previous else None
+                            prior = scan_history(history, previous[0], triage_snapshot=decisions,
+                                                 assessment_runs=assessment_runs) if previous else None
                             if rotations:
                                 acknowledge_rotations(prior, rotations)
                             return await security.scan(root, ref=sha, session=session, options=scan_options, previous=prior,
@@ -94,6 +105,11 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                               provider=connection["provider"], usage=session.usage())
                 if original:
                     result["review_run_id"] = finding_run
+                if kind == "scan":
+                    apply_decisions(history, result, "scan", history.row(run_id)["scope"], decisions)
+                    result["grade"] = security.grade_for(row["severity"] for row in result.get("findings", [])
+                        if row.get("state", "open") in {"open", "accepted_risk"}) if result["status"] == "completed" else None
+                    result["elapsed_seconds"] = time.monotonic() - invocation_started
                 history.finish(run_id, result)
                 return result
 

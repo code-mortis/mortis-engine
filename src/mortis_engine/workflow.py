@@ -5,9 +5,10 @@ import copy
 import hashlib
 import json
 import time
+from contextlib import suppress
 from uuid import uuid4
 
-from . import gateway, llm_http
+from . import admission, gateway, llm_http
 from .history import encode
 from .llm_http import InferenceError
 from .review.context import sanitize
@@ -50,13 +51,17 @@ def evidence_bundle(context):
 
 
 class Session:
-    def __init__(self, connection, credentials, *, history=None, run_id=None, deadline=None, scan_budget=None):
+    def __init__(self, connection, credentials, *, history=None, run_id=None, deadline=None, scan_budget=None,
+                 progress=lambda value: None):
         self.connection = connection
         self.credentials = credentials
         self.history = history
         self.run_id = run_id or uuid4().hex
         self.deadline = deadline
         self.scan_budget = scan_budget
+        self.progress = progress
+        self.active_requests = 0
+        self.waiting_requests = 0
         self.stage_deadlines = {}
         self.uncapped_lock = None
         self.uncapped_loop = None
@@ -85,6 +90,10 @@ class Session:
     @staticmethod
     def charge(row):
         return row["reserved_tokens"] if row["consumption_unknown"] else row["usage"].get("total_tokens") or 0
+
+    def report_capacity(self):
+        self.progress({"phase": "connection_capacity", "active_requests": self.active_requests,
+                       "waiting_requests": self.waiting_requests})
 
     async def send(self, stage, key, request, *, client, timeout_at, token_budget, stopped, accept):
         if request.max_output_tokens == 0 and (token_budget or self.scan_budget):
@@ -127,6 +136,34 @@ class Session:
                                  retryable=row.get("retryable", False), retry_after=row.get("retry_after"))
         if stopped() or time.monotonic() >= until:
             raise InferenceError("deadline", "The stage deadline has expired.", consumption_unknown=False)
+        waiting = False
+
+        def queued():
+            nonlocal waiting
+            waiting = True
+            self.waiting_requests += 1
+            self.report_capacity()
+
+        try:
+            async with admission.slot(self.connection, stopped=stopped, until=until, waiting=queued):
+                if waiting:
+                    self.waiting_requests -= 1
+                    waiting = False
+                self.active_requests += 1
+                try:
+                    self.report_capacity()
+                    return await self._dispatch(stage, key, request, client, until, budget, stopped, accept, digest)
+                finally:
+                    self.active_requests -= 1
+                    self.report_capacity()
+        finally:
+            if waiting:
+                self.waiting_requests -= 1
+                self.report_capacity()
+
+    async def _dispatch(self, stage, key, request, client, until, budget, stopped, accept, digest):
+        if stopped() or time.monotonic() >= until:
+            raise InferenceError("deadline", "The stage deadline has expired.", consumption_unknown=False)
         rows = [row for _, row, _ in self.records.values() if row["stage"] == stage or
                 stage.startswith("security_") and row["stage"].startswith("security_")]
         if any(row["consumption_unknown"] and row["status"] != "running" for row in rows):
@@ -157,8 +194,15 @@ class Session:
         self.records[stage, key] = (digest, row, None)
         result = None
         try:
-            response = await gateway.send(self.connection, self.credentials, request, client=client,
-                                          stopped=stopped, timeout=until - time.monotonic())
+            transport = asyncio.create_task(gateway.send(self.connection, self.credentials, request, client=client,
+                                                        stopped=stopped, timeout=until - time.monotonic()))
+            try:
+                response = await asyncio.shield(transport)
+            except BaseException:
+                transport.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await llm_http._drain(transport)
+                raise
             row.update(usage=response.usage.model_dump(), consumption_unknown=response.usage.total_tokens is None)
             result = accept(response)
             row["status"] = "completed"

@@ -63,12 +63,21 @@ def _related_paths(repo, env, context, options, base_sha, head_sha):
             context["related_paths"] = sorted(permitted)[:20]
 
 
-async def _assess(repo, env, run, snapshot, previous, session):
+async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=None, pinned_context=None):
     options = run.config["settings"]
-    context = assessment.build_context(repo, env, env, run, snapshot, previous, lambda: False)
-    context["review_sensitivity"] = options.get("review_sensitivity")
-    _related_paths(repo, env, context, options, run.base_sha, run.head_sha)
-    result = assessment.exact_repeat(review_context.sanitize(context, session.credentials))
+    if pinned_context is None:
+        context = assessment.build_context(repo, env, env, run, snapshot, previous, lambda: False)
+        context["review_sensitivity"] = options.get("review_sensitivity")
+        _related_paths(repo, env, context, options, run.base_sha, run.head_sha)
+        context = review_context.sanitize(context, session.credentials)
+        if candidate_id and getattr(session, "history", None):
+            from mortis_engine.assessments import pin_input
+            pin_input(session, candidate_id, "review", snapshot, context, options,
+                      planning.fingerprint(snapshot), repo, env,
+                      base_sha=run.base_sha, head_sha=run.head_sha)
+    else:
+        context = copy.deepcopy(pinned_context)
+    result = assessment.exact_repeat(context)
     if result is not None:
         return result
     instructions = assessment.INSTRUCTIONS + "\n\n" + policy.instructions(options)
@@ -226,7 +235,8 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
     async def assess_row(index, snapshot, identity):
         row = {"id": "candidate-" + identity[:32], "snapshot": snapshot, "position": index}
         try:
-            assessment_result = await _assess(repo, env, run, snapshot, previous, session)
+            pinned = {"candidate_id": row["id"]} if getattr(session, "history", None) else {}
+            assessment_result = await _assess(repo, env, run, snapshot, previous, session, **pinned)
             row.update(status="completed", result=assessment_result)
         except (ValueError, TimeoutError, InferenceError) as exc:
             row.update(status="failed", result=None, error=review_context.sanitize(str(exc), session.credentials))
@@ -296,6 +306,10 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
                     and item.get("verification", {}).get("verdict") == "fixed"
                     and item["verification"].get("head_sha") == report["head_sha"]):
                 item["status"] = "resolved"
+    if getattr(session, "history", None):
+        from mortis_engine.findings import apply_decisions
+        origin = session.history.row(session.run_id)
+        apply_decisions(session.history, result, "review", origin["scope"], options.get("_triage_snapshot"))
     if options.get("ai_fix_prompts_enabled"):
         prompts = {item["id"]: item["snapshot"] for item in result["history"]
                    if item["status"] == "open" and item.get("verification", {}).get("verdict") != "fixed"}

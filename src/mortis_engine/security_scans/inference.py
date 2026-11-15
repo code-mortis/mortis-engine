@@ -18,24 +18,27 @@ from .contracts import (
 )
 
 
-async def ask(item, session, task, context, key, options):
+async def ask(item, session, task, context, key, options, *, prepared=False, pin=None):
     model, selected = {"analysis": (SecurityAnalysis, SecurityAnalysisSelection),
         "assessment": (SecurityAssessment, SecurityAssessmentSelection),
         "verification": (SecurityFix, SecurityFixSelection)}[task]
     context = copy.deepcopy(context)
-    context.update(task_contract=policy.TASK_CONTRACT, language=options["language"],
-        available_paths=sorted(path for path in item.inventory if not file_policy.excluded(path, item.policy)))
-    context = engine.redacted_context(item, context)
-    # Small repositories carry their complete supporting evidence into independent assessment.
-    code = [path for path in context["available_paths"] if item.inventory[path]["code"]]
-    if task in {"analysis", "assessment"} and len(code) <= 16:
-        sources = {**context["sources"]["current"]}
-        for path in code:
-            sources.setdefault(path, item.source(path))
-        if sum(len(text.encode()) for text in sources.values()) <= 32768:
-            context["sources"]["current"] = sources
-    context["source_navigation"] = source_navigation(item, context["sources"]["current"],
-                                                       context["available_paths"], item.stopped)
+    if not prepared:
+        context.update(task_contract=policy.TASK_CONTRACT, language=options["language"],
+            available_paths=sorted(path for path in item.inventory if not file_policy.excluded(path, item.policy)))
+        context = engine.redacted_context(item, context)
+        # Small repositories carry their complete supporting evidence into independent assessment.
+        code = [path for path in context["available_paths"] if item.inventory[path]["code"]]
+        if task in {"analysis", "assessment"} and len(code) <= 16:
+            sources = {**context["sources"]["current"]}
+            for path in code:
+                sources.setdefault(path, item.source(path))
+            if sum(len(text.encode()) for text in sources.values()) <= 32768:
+                context["sources"]["current"] = sources
+        context["source_navigation"] = source_navigation(item, context["sources"]["current"],
+                                                           context["available_paths"], item.stopped)
+    if pin is not None:
+        pin(context)
     history_ids = {}
     if task == "assessment":
         history = context.get("history", [])
