@@ -29,7 +29,7 @@ unchanged. `fixtures/second-pass.json` supplies additional scripted discovery of
 c03 and repeats c01 deliberately to exercise duplicate suppression. It retains
 c05's unknown consumption. The evaluator never calls providers or executes source.
 
-Only the designated verification runner executes these commands:
+Reproduce the offline experiment with:
 
 ```sh
 PYTHONPATH=src /path/to/.venv/bin/python evals/review_improvements/run.py replay \

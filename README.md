@@ -23,6 +23,21 @@ Requires Python 3.13–3.14. `uv` can provide the compatible Python interpreter.
 
 Use `--effort low`, `--effort medium` or `--effort high` to override the repository setting for one run. Local working-tree and staged reviews use an immutable snapshot and leave your Git index, objects and refs untouched. Working-tree reviews require an initial commit. Ignored untracked files, credentials and excluded files are outside review scope.
 
+Preview the same local planner without an AI connection or saved analysis run:
+
+```sh
+mortis review --base main --preview
+mortis review --all --preview --format json
+```
+
+The preview lists selected and excluded files, exclusion reasons, source/diff bytes,
+units and planned batches. `--prompt-token-ceiling` reproduces a connection's input
+bound without loading its credentials. Batch counts exclude provider envelopes,
+evidence followups and later workflow stages. See [preview details](docs/review-improvements/2-scope-preview.md).
+New full-tree reviews send source once; historical resumed plans retain their original
+representation and task identities. The [fixed-input measurement](docs/review-improvements/1-full-source.md)
+records the byte and batch reduction.
+
 Use `--concurrency 1` through `--concurrency 8` to override the repository setting for a review or security scan. Reviews default to two concurrent AI batches; a batch may contain multiple files. Scans default to four concurrent file analyses. The override applies only to that run and leaves `mortis.toml` unchanged.
 
 Separate Mortis processes sharing the same local state directory also share a ceiling
@@ -89,6 +104,31 @@ Use `0` for unlimited total token budgets, overall timeouts and maximum files. I
 Review flags also include `--assessment-token-budget`, `--verification-token-budget`, `--summary-token-budget` and `--summary-timeout-seconds`. Scans support the assessment and verification budget flags. Standalone verification uses `--verification-token-budget`; background generation uses `--token-budget`. These commands support `--max-output-tokens` and their corresponding overall timeout flag. `--resume` restores the saved overrides and rejects new limit flags.
 
 Mortis assesses candidates before reporting confirmed findings and generates a summary of the reviewed changes. The JSON report retains rejected and uncertain candidates. With `auto_resolve = true`, later reviews of the same scope check earlier open findings against both revisions. A verified fix can update the current local status. Earlier reports remain available by ID.
+
+Default-omitted tests may be read as pinned supporting evidence without becoming review
+targets. Explicit exclusions and protected paths still apply. Tests are never executed:
+only their supplied inputs and assertions can support or refute a claim. Assessment
+can request bounded merge-base evidence to distinguish an existing defect from one
+introduced or activated by the change. Full-tree reviews continue to evaluate defects
+present at the selected revision.
+
+For an exact Python line replacement, Mortis checks the proposed source in memory.
+If a valid original would become syntactically invalid, the confirmed finding remains
+and its suggestion is withheld. Ambiguous replacements and originally invalid source
+retain the assessor's decision; this check does not establish runtime correctness.
+
+Discovery can search a literal symbol in bounded, permitted source at the pinned
+revision, including unchanged files. Matches are navigation hints, not proof of a
+caller relationship: Mortis requires a separate source read before accepting a
+citation. This works without Docker; aliases and dynamic access may be missed.
+See [symbol search limits](docs/review-improvements/3-symbol-search.md).
+
+The optional `--second-pass` experiment searches for additional candidates through the
+same analysis budget and normal assessment. It is disabled by default and can also be
+configured with `[review].second_pass = true`; resume retains the saved choice. A failed
+second pass preserves validated first-pass results and reports incomplete analysis.
+See [the experiment](SECOND_PASS.md) and the [offline evaluation](evals/review_improvements/README.md)
+for limits and the evidence required before considering default enablement.
 
 The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed only when all assigned units pass validation. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Progress goes to stderr. Exit status 0 indicates completed analysis or no eligible changes, 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
 
