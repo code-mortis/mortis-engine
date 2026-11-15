@@ -1,0 +1,60 @@
+[
+  {
+    "id": "c01",
+    "base": {
+      "app.py": "def price(amount):\n    rate = 10\n    return amount / rate\n"
+    },
+    "changes": {
+      "app.py": "def price(amount):\n    rate = 0\n    return amount / rate\n"
+    },
+    "base_sha": "3f53c680e7a09d45827400cce752b764740ceb41",
+    "head_sha": "52d3675dbcf311cf64b10c97f3b03367f675a5b9"
+  },
+  {
+    "id": "c02",
+    "base": {
+      "app.py": "LABEL = \"alpha\"\n\ndef inverse(value):\n    return 1 / value\n"
+    },
+    "changes": {
+      "app.py": "LABEL = \"beta\"\n\ndef inverse(value):\n    return 1 / value\n"
+    },
+    "base_sha": "623b9861929d2194da55dada2b7eda164e0a923a",
+    "head_sha": "0e8be75c8f717617413102959c669a92fc3a282f"
+  },
+  {
+    "id": "c03",
+    "base": {
+      "maths.py": "def inverse(value):\n    return 1 / value\n",
+      "app.py": "from maths import inverse\nresult = inverse(1)\n"
+    },
+    "changes": {
+      "app.py": "from maths import inverse\nresult = inverse(0)\n"
+    },
+    "base_sha": "4fd52a8c7f4400ab3995c775b4d4845390a3acae",
+    "head_sha": "708292477e51d230f128df832d9b453c4f874ad3"
+  },
+  {
+    "id": "c04",
+    "base": {
+      "app.py": "def inverse(value):\n    return 1 / value if value else 0\n",
+      "test_app.py": "from app import inverse\n\ndef test_inverse():\n    assert inverse(1) == 1\n"
+    },
+    "changes": {
+      "app.py": "def inverse(value):\n    \"\"\"Return zero for zero.\"\"\"\n    return 1 / value if value else 0\n",
+      "test_app.py": "from app import inverse\n\ndef test_inverse():\n    assert inverse(1) == 1\n    assert inverse(0) == 0\n"
+    },
+    "base_sha": "2ac1263fd96ec13c27636aa7f1d585e7d0a0f4ef",
+    "head_sha": "718e602df7057264d9110f40e72acef253d25c9f"
+  },
+  {
+    "id": "c05",
+    "base": {
+      "app.py": "def greeting(name):\n    return f\"hello {name}\"\n"
+    },
+    "changes": {
+      "app.py": "def greeting(name):\n    return f\"Hello {name}\"\n"
+    },
+    "base_sha": "21b13a45d5c7d2b59fb66d55b6438bb676b1cc2e",
+    "head_sha": "a3b8d682ebaa4c6431fac556053d447ca9573066"
+  }
+]
