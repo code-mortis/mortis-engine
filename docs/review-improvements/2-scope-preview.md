@@ -91,3 +91,21 @@ file policy. To keep future generated artifacts outside worktree review, place t
 under an ignored output directory such as `reports/`. To exclude already tracked
 artifacts, add their paths to `[review].exclusions` on the trusted configuration
 revision. An ignore rule alone does not exclude a tracked file.
+
+## Measured historical scope
+
+The offline preview of `c1b8a2f^..c1b8a2f` with default unit/batch bounds selects
+5 files, excludes 3 files and plans 29 units in 10 batches. Generated reports
+account for 26 of the 29 units:
+
+| Selected file | Units | Source bytes | Diff bytes | Assigned unit JSON bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `review-main.json` | 18 | 251,831 | 258,676 | 558,320 |
+| `review-main.md` | 8 | 88,978 | 92,157 | 194,868 |
+| Reports combined | 26 | 340,809 | 350,833 | 753,188 |
+| Complete change | 29 | 408,971 | 359,855 | 836,154 |
+
+These are measured planner assignments, using committed settings and no saved
+connection. The reports occupy approximately 90.1% of assigned unit JSON bytes.
+The preview makes that existing scope visible without rewriting the historical
+reports, changing eligibility or making provider requests.

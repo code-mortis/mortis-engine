@@ -12,8 +12,8 @@ from .git_helpers import commit, git
 
 @pytest.mark.parametrize("mode", ["worktree", "staged", "commits", "all"])
 @pytest.mark.parametrize("ceiling", [None, 10000])
-def test_preview_matches_real_execution_plan(repo, tmp_path, monkeypatch, mode, ceiling):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+def test_preview_matches_real_execution_plan(repo, tmp_path_factory, monkeypatch, mode, ceiling):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("preview-state")))
     base = commit(repo, {"app.py": "value = 1\n", "deleted.py": "old = 1\n"})
     text = "".join(f"value_{i} = {i}\n" for i in range(300))
     commit(repo, {"app.py": text, "README.md": "Instructions\n", "skip_test.py": "assert True\n"})
