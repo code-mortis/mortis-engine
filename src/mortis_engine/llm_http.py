@@ -107,7 +107,7 @@ def _extra_body(body, extra):
                 target[key] = copy.deepcopy(value)
             else:
                 if isinstance(target, dict) and key not in target:
-                    if protected:
+                    if protected or strict_flag:
                         raise ValueError("extra_body cannot replace protected inference inputs, output limits or authentication")
                     target[key] = {}
                 target = target[key]
@@ -350,7 +350,12 @@ def decode_response(protocol: str, data: dict, request: Request, request_id=None
                 if not isinstance(content, str):
                     raise ValueError()
                 texts.append(content)
-            for call in message.get("tool_calls", []):
+            tool_calls = message.get("tool_calls")
+            if tool_calls is None:
+                tool_calls = []
+            if not isinstance(tool_calls, list):
+                raise ValueError()
+            for call in tool_calls:
                 if call.get("type") != "function":
                     raise ValueError()
                 calls.append(ToolCall(id=call["id"], name=call["function"]["name"],

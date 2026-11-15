@@ -227,14 +227,14 @@ def extract(request: CodeGraphRequest) -> CodeGraphResult:
 
 def main():
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RESULT_BYTES, MAX_RESULT_BYTES))
-    request_path, result_path = map(Path, sys.argv[1:])
     try:
+        request_path, result_path = map(Path, sys.argv[1:])
         if request_path.stat().st_size > MAX_REQUEST_BYTES:
             raise ValueError("Oversize request")
         request = CodeGraphRequest.model_validate_json(request_path.read_bytes())
         if not {"schema_version", "extractor_version"} <= request.model_fields_set:
             raise ValueError("Explicit protocol and extractor versions are required")
-    except ValueError:
+    except (ValueError, OSError):
         return 2
     try:
         result_path.write_text(extract(request).model_dump_json(), encoding="utf-8")

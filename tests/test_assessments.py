@@ -213,6 +213,42 @@ def test_failed_retry_preserves_cost_and_allows_new_known_attempt(local, monkeyp
     assert operations.list_assessments(repo, run_id=parent)["candidates"][0]["retry_eligible"]
 
 
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_retry_oserror_finishes_child_and_preserves_unknown_usage(local, monkeypatch, dispatched):
+    repo, _, _ = local
+    parent = failed_review(local, monkeypatch)
+    with History(repo) as history:
+        original = dict(history.row(parent))
+
+    async def fail(*args, **kwargs):
+        raise OSError("Cannot read fixture-private-token")
+
+    monkeypatch.setattr(gateway if dispatched else assessments, "send" if dispatched else "_execute", fail)
+    result = operations.retry_assessment(repo, run_id=parent, candidate_id="candidate-fixture",
+                                        connection=CONNECTION, get_credentials=lambda: {"api_key": "fixture-private-token"})
+    assert result["status"] == "failed" and result["result"] is None and result["finding"] is None
+    assert "Cannot read" in result["error"] and "fixture-private-token" not in result["error"]
+    with History(repo) as history:
+        assert history.report(result["run_id"]) == result
+        assert dict(history.row(parent)) == original
+    candidate = operations.list_assessments(repo, run_id=parent)["candidates"][0]
+    assert candidate["retry_eligible"] is not dispatched
+    if dispatched:
+        assert result["usage"]["total_tokens"] is None and result["usage"]["reserved_tokens"] > 0
+        assert "Unknown token consumption" in candidate["blocked_reason"]
+        with pytest.raises(ValueError, match="Unknown token consumption"):
+            operations.retry_assessment(repo, run_id=parent, candidate_id="candidate-fixture", connection=CONNECTION,
+                                        get_credentials=lambda: pytest.fail("credentials read"))
+    else:
+        assert result["usage"]["total_tokens"] == 0
+        async def succeed(*args, **kwargs):
+            return decision("rejected")
+        monkeypatch.setattr(assessments, "_execute", succeed)
+        again = operations.retry_assessment(repo, run_id=parent, candidate_id="candidate-fixture",
+                                           connection=CONNECTION, get_credentials=lambda: {})
+        assert again["status"] == "completed" and again["run_id"] != result["run_id"]
+
+
 def test_decision_conflict_retains_validated_retry_result_without_publishing(local, monkeypatch):
     repo, _, _ = local
     parent = failed_review(local, monkeypatch)

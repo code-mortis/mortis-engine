@@ -109,6 +109,10 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                     apply_decisions(history, result, "scan", history.row(run_id)["scope"], decisions)
                     result["grade"] = security.grade_for(row["severity"] for row in result.get("findings", [])
                         if row.get("state", "open") in {"open", "accepted_risk"}) if result["status"] == "completed" else None
+                    if result["status"] == "completed" and result["grade"] is None:
+                        result["status"] = "partial"
+                        result.setdefault("problems", []).append(
+                            "Unresolved findings have unknown severity; a security grade cannot be established.")
                     result["elapsed_seconds"] = time.monotonic() - invocation_started
                 history.finish(run_id, result)
                 return result

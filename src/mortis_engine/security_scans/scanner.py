@@ -138,7 +138,7 @@ def trivy(item, timeout=300, stopped=lambda: False):
         metadata = json.loads((cache / "db/metadata.json").read_text())
         updated = datetime.fromisoformat(metadata["UpdatedAt"].replace("Z", "+00:00"))
         fresh = updated.utcoffset() is not None and 0 <= (datetime.now(UTC) - updated).total_seconds() <= 86400
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         fresh = False
     empty = item.root / "check-update"
     empty.mkdir()

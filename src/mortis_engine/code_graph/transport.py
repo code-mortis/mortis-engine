@@ -100,5 +100,8 @@ def extract(request, *, image=DEFAULT_IMAGE, stopped=lambda: False):
                         process.kill()
                         process.wait()
                 # Removing by our generated name also stops daemon-side work after client cancellation.
-                subprocess.run([docker, "rm", "--force", name], env=env, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
+                try:
+                    subprocess.run([docker, "rm", "--force", name], env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
