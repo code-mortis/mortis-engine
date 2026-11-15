@@ -76,6 +76,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             return history.report(resume)
         with _inputs(history, repository, mode, base, head, resume) as (snap, saved):
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
+            full_tree_source_policy = saved.get("full_tree_source_policy") if saved else planning.FULL_TREE_SOURCE_POLICY
             if saved:
                 effort, graph = saved["effort"], saved["graph"]
                 concurrency = saved.get("concurrency")
@@ -110,7 +111,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 run_id = history.begin("review", scope, {"connection": connection_identity, "profile": profile,
                     "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
                     "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
-                    "triage_versions": decisions, "assessment_runs": assessment_runs})
+                    "triage_versions": decisions, "assessment_runs": assessment_runs,
+                    "full_tree_source_policy": full_tree_source_policy})
             options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
@@ -126,7 +128,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 ceiling = connection["options"].get("prompt_token_ceiling")
                 unit_bytes = max(1024, min(49152, (ceiling - 8192) // 2)) if ceiling is not None else 49152
                 plan = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
-                    options, stopped, max_unit_bytes=unit_bytes, trusted_rules_sha=snap.settings_sha)
+                    options, stopped, max_unit_bytes=unit_bytes, trusted_rules_sha=snap.settings_sha,
+                    full_tree_source_policy=full_tree_source_policy)
                 if on_plan is not None and plan.batches:
                     on_plan(len(plan.selected), connection["model"])
                 # An empty diff needs neither a model nor credentials unless there are prior fixes to verify.

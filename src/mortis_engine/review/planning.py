@@ -12,6 +12,7 @@ from mortis_engine.review.errors import ReviewStopped
 
 VERSION = "mortis-pr-plan/v1"
 RULES_VERSION = "mortis-rules/v1"
+FULL_TREE_SOURCE_POLICY = "source-only/v1"
 # Language admission is independent of the optional structural graph's parsers.
 CODE_SUFFIXES = set((
     "java kt kts scala groovy py pyi js jsx ts tsx mjs cjs c h cpp cc cxx hpp hxx cs vb fs fsi fsx "
@@ -244,6 +245,21 @@ class ReviewUnit:
     patch: str
     rule: str
     input_hash: str
+    source_only: bool = False
+
+
+def assigned_unit(unit):
+    value = {"key": unit.key, "path": unit.path, "old_path": unit.old_path,
+             "source_sha": unit.source_sha, "start_line": unit.start_line, "end_line": unit.end_line,
+             "source": unit.source}
+    if not unit.source_only:
+        value["diff"] = unit.patch
+    value["rules"] = unit.rule
+    return value
+
+
+def _unit_bytes(unit):
+    return len(json.dumps(assigned_unit(unit), ensure_ascii=False).encode())
 
 
 @dataclass
@@ -349,18 +365,22 @@ def _range_patch(metadata, rows):
     return output
 
 
-def split_units(path, old_path, status, sha, text, patch, rule, maximum):
+def split_units(path, old_path, status, sha, text, patch, rule, maximum, *, source_only=False):
     lines = text.splitlines(keepends=True)
-    metadata, rows = _patch_rows(patch, len(lines))
+    metadata, rows = ("", []) if source_only else _patch_rows(patch, len(lines))
     by_line = {}
     for row in rows:
         by_line.setdefault(row[0], []).append(row)
     chunks, chunk_lines, chunk_rows, start = [], [], [], 1
     fixed_size = len((metadata + rule + path + (old_path or "")).encode()) + 512
+    if source_only:
+        last = max(1, len(lines))
+        fixed_size = _unit_bytes(ReviewUnit("pr-" + "0" * 64, path, old_path, status, sha,
+                                          last, last, "", "", rule, "", source_only=True))
     used = fixed_size
     for number, line in enumerate(lines or [""], 1):
         selected_rows = by_line.get(number, [])
-        line_size = len(line.encode())
+        line_size = len(json.dumps(line, ensure_ascii=False).encode()) - 2 if source_only else len(line.encode())
         size = line_size + sum(len(row[3].encode()) + 80 for row in selected_rows)
         if fixed_size + line_size > maximum:
             raise ValueError("A required source/diff line exceeds the bounded review context.")
@@ -393,13 +413,16 @@ def split_units(path, old_path, status, sha, text, patch, rule, maximum):
     for first, last, content, difference in chunks:
         value = {"path": path, "old_path": old_path, "status": status, "source_sha": sha,
                  "start_line": first, "end_line": last, "source": content, "patch": difference, "rule": rule}
+        if source_only:
+            value["source_only"] = True
         identity = fingerprint(value)
         units.append(ReviewUnit(key=f"pr-{identity}", **value, input_hash=identity))
     return units
 
 
 def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
-                max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None):
+                max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None,
+                full_tree_source_policy=FULL_TREE_SOURCE_POLICY):
     for sha in (base_sha, head_sha, merge_base):
         if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{40}", sha):
             raise ValueError("PR planning requires exact Git revisions.")
@@ -409,6 +432,9 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
         raise ValueError("A batch must admit a complete bounded unit.")
     if source.git(repo, env, "merge-base", base_sha, head_sha, stopped=stopped).strip() != merge_base:
         raise ValueError("PR planning cannot substitute a different merge base.")
+    if full_tree_source_policy not in {None, FULL_TREE_SOURCE_POLICY}:
+        raise ValueError("The saved full-tree source policy is unsupported.")
+    source_only = options.get("review_mode") == "all" and full_tree_source_policy is not None
     rules = load_rules(repo, env, trusted_rules_sha or base_sha, options, stopped)
     plan = ReviewPlan(base_sha, head_sha, merge_base, fingerprint({"file_policy": file_policy.policy(options), "rules": rules["digest"]}),
                       rules["digest"], rules, [], [])
@@ -442,13 +468,14 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
             if used + entry["size"] > max_source_bytes:
                 raise ValueError("Required source exceeds the aggregate PR source admission limit.")
             text = source.read_source(repo, env, head_sha, selected.path, stopped)
-            patch = source.git(repo, env, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--find-renames",
+            patch = "" if source_only else source.git(repo, env, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--find-renames",
                                "--unified=3", merge_base, head_sha, "--", *dict.fromkeys(filter(None, (selected.old_path, selected.path))), stopped=stopped)
             size = len((text + patch).encode())
             if used + size > max_source_bytes:
                 raise ValueError("Required source and diff exceed the aggregate PR source admission limit.")
             units = split_units(selected.path, selected.old_path, selected.status, head_sha,
-                                text, patch, rule_for(selected.path, rules, full_tree=options.get('review_mode') == 'all'), max_unit_bytes)
+                                text, patch, rule_for(selected.path, rules, full_tree=options.get('review_mode') == 'all'),
+                                max_unit_bytes, source_only=source_only)
             size = sum(len((unit.source + unit.patch).encode()) for unit in units)
             if used + size > max_source_bytes:
                 raise ValueError("Required split context exceeds the aggregate PR source admission limit.")
@@ -459,7 +486,7 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
             selected.error = str(exc)
     batch, size = [], 0
     for unit in plan.units:
-        unit_size = len((unit.source + unit.patch + unit.rule).encode()) + 512
+        unit_size = _unit_bytes(unit) + 2 if unit.source_only else len((unit.source + unit.patch + unit.rule).encode()) + 512
         if batch and size + unit_size > max_batch_bytes:
             plan.batches.append(batch)
             batch, size = [], 0

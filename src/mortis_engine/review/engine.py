@@ -15,7 +15,7 @@ from . import context, policy
 from . import source as git_source
 from .contracts import ReviewComment
 from .errors import ReviewStopped
-from .planning import fingerprint
+from .planning import assigned_unit, fingerprint
 from .settings import output_token_limit
 
 VERSION = "mortis-pr/v1"
@@ -177,9 +177,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
         payload = {"task_key": key, "language": options["language"], "reporting_policy": policy.instructions(options),
                    "background": options.get("background", ""), "base_sha": plan.base_sha,
                    "merge_base": plan.merge_base, "head_sha": plan.head_sha,
-                   "assigned_units": [{"key": unit.key, "path": unit.path, "old_path": unit.old_path,
-                        "source_sha": unit.source_sha, "start_line": unit.start_line, "end_line": unit.end_line,
-                        "source": unit.source, "diff": unit.patch, "rules": unit.rule} for unit in units]}
+                   "assigned_units": [assigned_unit(unit) for unit in units]}
         graphs = {unit.path: graph_by_path[unit.path] for unit in units if graph_by_path and graph_by_path.get(unit.path)}
         if graphs:
             payload["code_graph"] = graphs
@@ -193,6 +191,8 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
         instructions = INSTRUCTIONS
         if options.get("review_mode") == "all":
             instructions = instructions.replace("introduced by this PR", "present at this revision")
+            if all(unit.source_only for unit in units):
+                instructions += " Full-tree units supply source once; no synthetic added-file diff is required."
         if source_code_policy:
             instructions += (
                 " Select precise finding start_line/end_line bounds; do not return existing_code. "
