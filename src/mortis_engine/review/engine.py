@@ -11,7 +11,7 @@ from pydantic import ConfigDict, Field, ValidationError, model_validator
 from mortis_engine import gateway as llm
 from mortis_engine.schemas import Message, Request, StrictModel, Tool
 
-from . import context, policy
+from . import context, policy, source_navigation
 from . import source as git_source
 from .contracts import ReviewComment
 from .errors import ReviewStopped
@@ -21,7 +21,7 @@ from .settings import output_token_limit
 VERSION = "mortis-pr/v1"
 PROMPT_VERSION = "mortis-pr-prompt/v2"
 SCHEMA_VERSION = "mortis-pr-result/v1"
-SOURCE_TOOL_POLICY = "bounded-reads/v2"
+SOURCE_TOOL_POLICY = "bounded-search/v3"
 SOURCE_CODE_POLICY = "selected-lines/v1"
 MAX_READ_BYTES = 64 * 1024
 MAX_REPAIR_DRAFT_BYTES = 256 * 1024
@@ -126,7 +126,7 @@ def read_tool(*, source_code_policy=SOURCE_CODE_POLICY, source_tool_policy=SOURC
     description = "Read permitted source at the pinned PR head; no execution."
     if source_code_policy:
         description += " Request at most 400 lines per read and ten reads per round."
-    if source_tool_policy == "bounded-reads/v2":
+    if source_tool_policy in {"bounded-reads/v2", SOURCE_TOOL_POLICY}:
         description += (
             " Mortis pages larger ranges into at most ten 400-line excerpts and 64 KiB total per round. "
             "Reads stop at EOF. Check returned_ranges and next_start_line for any unreturned source."
@@ -166,7 +166,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
         raise ValueError("The saved source-code policy is unsupported")
     if prompt_version not in {"mortis-pr-prompt/v1", PROMPT_VERSION}:
         raise ValueError("The saved PR prompt version is unsupported")
-    if source_tool_policy not in {None, "remaining-rounds/v1", SOURCE_TOOL_POLICY}:
+    if source_tool_policy not in {None, "remaining-rounds/v1", "bounded-reads/v2", SOURCE_TOOL_POLICY}:
         raise ValueError("The saved source-tool policy is unsupported")
     batches = []
     pending = deque(plan.batches)
@@ -208,9 +208,13 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
                 "At zero, no source tools remain: finish the structured result using available evidence. "
                 "Do not invent evidence or claim completion when indispensable evidence is missing."
             )
+        tools = [read_tool(source_code_policy=source_code_policy, source_tool_policy=source_tool_policy)]
+        if source_tool_policy == SOURCE_TOOL_POLICY:
+            instructions += " " + source_navigation.NOTICE
+            tools.append(source_navigation.search_tool())
         request = Request(instructions=instructions,
                           messages=[Message(role="user", content=json.dumps(supplied, ensure_ascii=False))],
-                          tools=[read_tool(source_code_policy=source_code_policy, source_tool_policy=source_tool_policy)],
+                          tools=tools,
                           output_schema=output_schema(key, units, source_code_policy=source_code_policy),
                           max_output_tokens=output_token_limit(options), effort=options["effort"], session_id=key)
         omitted = []
@@ -327,12 +331,26 @@ def read_sources(calls, *, repo, env, plan, options, credentials, authorize, sto
 
     if not 1 <= len(calls) <= 10:
         raise ResultValidationError("source_call_limit", ["tool_calls"], "Request one to ten source reads per round.")
-    bounded = source_tool_policy == "bounded-reads/v2"
+    bounded = source_tool_policy in {"bounded-reads/v2", SOURCE_TOOL_POLICY}
     selections, sources, size = [], [], 0
+    searches = 0
     for index, call in enumerate(calls):
         field = ["tool_calls", index]
+        if call.name == "search_source" and source_tool_policy == SOURCE_TOOL_POLICY:
+            if set(call.arguments) != {"symbol"} or searches >= source_navigation.MAX_SEARCHES:
+                raise ResultValidationError("search_arguments", [*field, "arguments"],
+                                            "Provide exactly symbol, with at most two searches per round.")
+            try:
+                selection = source_navigation.search(repo, env, plan, options, call.arguments["symbol"],
+                                                     credentials, check_access, stopped)
+            except ValueError as exc:
+                raise ResultValidationError("search_unavailable", field,
+                                            "Search requires one permitted literal identifier and available pinned source.") from exc
+            selections.append(selection)
+            searches += 1
+            continue
         if call.name != "read_source":
-            raise ResultValidationError("source_tool", [*field, "name"], "Use only the read_source tool.")
+            raise ResultValidationError("source_tool", [*field, "name"], "Use only the supplied source tools.")
         if set(call.arguments) != {"path", "start_line", "end_line"}:
             raise ResultValidationError("source_arguments", [*field, "arguments"],
                                         "Provide exactly path, start_line and end_line as read_source arguments.")
@@ -583,7 +601,7 @@ def _report(plan, prepared, outcomes, *, tokens, status=None):
 
 
 def run(repo, env, plan, connection, options, credentials, *, stopped=lambda: False, progress=lambda value: None,
-        deadline=None, session=None, graph_by_path=None):
+        deadline=None, session=None, graph_by_path=None, source_tool_policy=SOURCE_TOOL_POLICY):
     from .execution import execute
 
     def preparing_stopped():
@@ -592,7 +610,8 @@ def run(repo, env, plan, connection, options, credentials, *, stopped=lambda: Fa
         return stopped()
 
     try:
-        prepared = prepare_batches(plan, connection, options, credentials, stopped=preparing_stopped, graph_by_path=graph_by_path)
+        prepared = prepare_batches(plan, connection, options, credentials, stopped=preparing_stopped,
+                                   graph_by_path=graph_by_path, source_tool_policy=source_tool_policy)
     except (TimeoutError, ReviewStopped) as exc:
         code = "deadline" if isinstance(exc, TimeoutError) else "cancelled"
         outcomes = {unit.key: {"status": "failed", "error": code} for unit in plan.units}
