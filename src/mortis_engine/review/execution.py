@@ -88,7 +88,7 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                             return
                         result, additional = await asyncio.to_thread(engine.read_sources, response.tool_calls,
                             repo=repo, env=env, plan=plan, options=batch.options, credentials=credentials,
-                            authorize=lambda: None, stopped=cancelled)
+                            authorize=lambda: None, stopped=cancelled, source_tool_policy=batch.source_tool_policy)
                         rounds += 1
                         supporting.extend(additional)
                         sources.extend(additional)
