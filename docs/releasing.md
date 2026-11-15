@@ -1,8 +1,8 @@
 # Releasing Mortis Engine
 
+Mortis Engine 0.1.0 was published on [PyPI](https://pypi.org/project/mortis-engine/0.1.0/)
+on 2026-11-15. This guide covers subsequent releases and publisher configuration.
 Release preparation is local until a maintainer deliberately pushes a version tag.
-Adding these files does not publish a package or change repository visibility.
-The first PyPI release is pending.
 
 ## Prepare and validate
 
@@ -43,7 +43,7 @@ the CLI/library/metadata versions, and checks parser build assets without runnin
 Docker or calling a provider. Source-checkout tests alone do not establish that
 published packages install correctly.
 
-Update `pyproject.toml`, `src/mortis_engine/__init__.py` and versioned README
+Update `pyproject.toml`, `src/mortis_engine/__init__.py` and any versioned
 installation examples together. Refresh `uv.lock` with `uv lock` when package
 metadata or dependencies change. Replace the Unreleased changelog entry with the
 actual version/date only when preparing that release; never claim a release that
@@ -84,13 +84,13 @@ The following are account/repository settings, not configuration supplied by the
 These settings and hosted workflow execution must be verified in GitHub; a local
 Actionlint pass does not establish that protections are enabled or a hosted run passed.
 
-## One-time PyPI setup, at publication time
+## PyPI publisher configuration
 
-1. Check that `mortis-engine` is available to your PyPI account, or that you have
-   publishing access to the existing project. Enable two-factor authentication.
-2. Create the GitHub environment `pypi`. Restrict deployments to `v*` tags and
+1. Confirm publishing access to the existing `mortis-engine` PyPI project.
+   Enable two-factor authentication.
+2. Check the GitHub environment `pypi`. Restrict deployments to `v*` tags and
    require a maintainer reviewer where supported by the account plan.
-3. Add a PyPI pending Trusted Publisher (or a publisher on your existing project):
+3. Confirm the PyPI project's Trusted Publisher matches:
 
    | Field | Value |
    | --- | --- |
@@ -100,10 +100,8 @@ Actionlint pass does not establish that protections are enabled or a hosted run 
    | Workflow filename | `release.yml` |
    | Environment | `pypi` |
 
-No stored PyPI API token is needed. A pending publisher does not reserve the project
-name; its first successful publication creates the project.
-See [PyPI's first-publication guide](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
-and [publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
+No stored PyPI API token is needed.
+See [PyPI's publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
 An optional TestPyPI rehearsal needs a separate publisher/environment and upload
 destination; the production workflow in this repository targets PyPI only.
 
@@ -114,13 +112,15 @@ package and CLI versions, requires the triggering SHA to match the checkout/tag
 commit, and requires that commit to belong to `origin/main`.
 
 After merging the prepared release and verifying CI, a maintainer can publish a
-single explicit tag. These commands start publication:
+single explicit tag. Replace `MAJOR.MINOR.PATCH` with the prepared version.
+These commands start publication:
 
 ```sh
 git switch main
 git pull --ff-only
-git tag -a v0.1.0 -m "Mortis Engine 0.1.0"
-git push origin v0.1.0
+version=MAJOR.MINOR.PATCH
+git tag -a "v$version" -m "Mortis Engine $version"
+git push origin "v$version"
 ```
 
 The workflow runs CI again for that exact commit, builds and smoke-tests the wheel
@@ -135,7 +135,7 @@ GitHub Release. Do not move a published tag or try to overwrite a PyPI version.
 After publication, verify the PyPI files/provenance, GitHub assets and installation:
 
 ```sh
-uv tool install mortis-engine==0.1.0
+uv tool install "mortis-engine==$version"
 mortis --version
 mortis --help
 ```

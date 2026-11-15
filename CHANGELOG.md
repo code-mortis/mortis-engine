@@ -1,9 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-11-15
 
-Initial Mortis Engine release preparation. Package version: 0.1.0.
-No PyPI release is claimed by this entry.
+Initial Mortis Engine release, available on [PyPI](https://pypi.org/project/mortis-engine/0.1.0/).
 
 - Review working-tree, staged, branch and full-tree Git snapshots with pinned evidence.
 - Assess and verify findings; preserve reports, local history and incomplete coverage.

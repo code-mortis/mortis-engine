@@ -2,18 +2,20 @@
 
 Review local Git changes, verify findings and scan repository security with your saved AI connection. Mortis sends eligible source and diffs to that connection and checks reported evidence against the pinned Git revisions.
 
-## Install from this repository
+## Install
 
 ```sh
-uv tool install --editable .
+uv tool install mortis-engine
+mortis --version
 mortis --help
 ```
 
 Requires Python 3.13–3.15 and Git. Development defaults to Python 3.15 through
 `.python-version`; `uv` can provide the compatible Python interpreter.
-To install a built release wheel, use `uv tool install /path/to/mortis_engine-0.1.0-py3-none-any.whl`.
-PyPI publication is pending; [the release guide](docs/releasing.md) describes the
-prepared workflow. Trivy is required for security scans and Docker is optional
+Mortis Engine is available on [PyPI](https://pypi.org/project/mortis-engine/).
+To upgrade, run `uv tool upgrade mortis-engine`. To install from a local checkout,
+use `uv tool install --editable .`.
+Trivy is required for security scans and Docker is optional
 for code graph context; neither executable is bundled in the Python package.
 
 ## Choose what to review
