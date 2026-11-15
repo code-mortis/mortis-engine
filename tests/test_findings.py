@@ -133,6 +133,23 @@ def test_scan_history_includes_late_retry_of_older_scan(repo):
         assert history.row(newer)["report"] == original
 
 
+@pytest.mark.parametrize("identity", [{}, {"id": None}, {"id": ""}])
+def test_scan_history_preserves_findings_without_ids(repo, identity):
+    older, _ = save(repo, kind="scan")
+    unkeyed = [{"path": path, "content": "An issue", **identity} for path in ("legacy.py", "other.py")]
+    report = {"schema_version": "mortis.security/v1", "coverage": {"complete": False},
+              "findings": [*unkeyed, {"id": "issue", "state": "open"}]}
+    late = {"id": "late", "state": "open"}
+    with History(repo) as history:
+        newer = history.begin("scan", "main", {})
+        history.finish(newer, report)
+        retry = history.begin("assessment", "main", {})
+        history.finish(retry, {"parent_run_id": older, "finding": late})
+        assert findings.scan_history(history, newer) == {**report, "findings": [*report["findings"], late]}
+        assert findings.scan_history(history, newer, assessment_runs=[]) == report
+        assert history.row(newer)["report"] == encode(report)
+
+
 def test_legacy_database_upgrade_and_cli_need_no_connection(repo, capsys):
     run, original = save(repo)
     with History(repo) as history:

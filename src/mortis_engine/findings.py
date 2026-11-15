@@ -85,14 +85,14 @@ def scan_history(history, run_id, *, triage_snapshot=None, assessment_runs=None)
     """Carry late confirmations from older scans into the next scan's evidence history."""
     origin = history.row(run_id, "scan")
     report = effective_report(history, run_id, triage_snapshot=triage_snapshot, assessment_runs=assessment_runs)
-    by_id = {finding["id"]: finding for finding in report.get("findings", [])}
+    by_id = {finding["id"]: finding for finding in report.get("findings", []) if finding.get("id")}
     parents = set(history.previous_ids("scan", origin["scope"]))
     for retry_id in history.previous_ids("assessment") if assessment_runs is None else assessment_runs:
         retry = history.report(retry_id)
         if retry.get("parent_run_id") in parents and retry.get("finding"):
             finding = copy.deepcopy(retry["finding"])
             by_id.setdefault(finding["id"], finding)
-    report["findings"] = list(by_id.values())
+    report["findings"] = [finding for finding in report.get("findings", []) if not finding.get("id")] + list(by_id.values())
     return apply_decisions(history, report, "scan", origin["scope"], triage_snapshot)
 
 
