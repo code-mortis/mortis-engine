@@ -2,15 +2,17 @@
 
 import json
 import time
+from contextlib import asynccontextmanager
 
 import pytest
 from pydantic import ValidationError
 
-from mortis_engine import gateway
+from mortis_engine import admission, gateway
 from mortis_engine.history import History
 from mortis_engine.llm_http import InferenceError
 from mortis_engine.review import engine
 from mortis_engine.review.settings import RepoSettings
+from mortis_engine.schemas import Usage
 from mortis_engine.workflow import Session
 
 from .git_helpers import commit
@@ -135,6 +137,62 @@ def test_second_pass_keeps_independent_repair_rounds_and_first_partial_coverage(
     assert raw["second_pass"]["status"] == "completed"
     assert {unit["path"] for unit in raw["second_pass"]["units"]} == {"app0.py"}
     assert "validation_diagnostics" in json.loads(calls[-1].messages[-1].content)
+
+
+@pytest.mark.parametrize("result_policy", [None, engine.DISCOVERY_RESULT_POLICY])
+def test_second_pass_output_recovery_retains_unassigned_context_and_citations(monkeypatch, result_policy):
+    @asynccontextmanager
+    async def no_state_slot(*args, **kwargs):
+        yield
+
+    monkeypatch.setattr(admission, "slot", no_state_slot)
+    value = plan(3)
+    value.batches = [value.units]
+    calls = []
+    second_recoveries = []
+
+    async def send(connection, credentials, request, **kwargs):
+        payload = json.loads(request.messages[0].content)
+        calls.append(request)
+        assigned = payload["assigned_units"]
+        second = payload.get("discovery_pass") == 2
+        if len(assigned) > 1:
+            if second:
+                assert [unit["path"] for unit in payload["context_units"]] == ["app2.py"]
+            raise InferenceError("output_limit", "Truncated", usage=Usage(total_tokens=10))
+        if assigned[0]["path"] == "app2.py":
+            raise InferenceError("auth", "Fixture failure", consumption_unknown=False)
+        response = final(request)
+        if second:
+            second_recoveries.append(payload)
+            context_paths = {unit["path"] for unit in payload["context_units"]}
+            peer = "app1.py" if assigned[0]["path"] == "app0.py" else "app0.py"
+            expected_context = {peer, "app2.py"} if result_policy else {peer}
+            assert context_paths == expected_context
+            supplied = assigned + payload["context_units"]
+            assert len({unit["key"] for unit in supplied}) == len(supplied)
+            original = {unit["key"]: unit for unit in json.loads(calls[0].messages[0].content)["assigned_units"]}
+            assert all(unit == original[unit["key"]] for unit in supplied)
+            assert {source["path"] for source in payload["citation_sources"]} == {"app0.py", "app1.py", "app2.py"}
+            finding = draft_finding(request)
+            local = next(source for source in payload["citation_sources"] if source["path"] == finding["path"])
+            finding["evidence"][0]["source_id"] = local["source_id"]
+            if result_policy:
+                supporting = next(source for source in payload["citation_sources"] if source["path"] == "app2.py")
+                finding["evidence"].append({"source_id": supporting["source_id"], "start_line": 3, "end_line": 3})
+            response.output["findings"] = [finding]
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    options = {**OPTIONS, "second_pass": True, "_discovery_result_policy": result_policy}
+    status, raw, candidates = engine.run(None, {}, value, CONNECTION, options, {})
+    assert status == "partial" and len(calls) == 7 and len(second_recoveries) == 2
+    assert raw["second_pass"]["status"] == "completed"
+    assert raw["second_pass"]["added_candidates"] == len(candidates) == 2
+    assert {row["path"] for row in raw["manifest"]["coverage"]["failed"]} == {"app2.py"}
+    assert {candidate["path"] for candidate in candidates} == {"app0.py", "app1.py"}
+    if result_policy:
+        assert all(candidate["evidence"][-1]["quote"] == "value = 2" for candidate in candidates)
 
 
 def test_second_pass_unknown_dispatch_is_not_replayed_on_resume(monkeypatch):

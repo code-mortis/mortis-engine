@@ -5,7 +5,7 @@ import json
 import pytest
 
 from mortis_engine import cli, config, gateway
-from mortis_engine.review import engine, planning, preview_local, service
+from mortis_engine.review import engine, planning, preview_local, service, snapshots
 
 from .git_helpers import commit, git
 
@@ -51,6 +51,27 @@ def test_preview_matches_real_execution_plan(repo, tmp_path_factory, monkeypatch
     assert result["totals"]["planned_batches"] == len(plan.batches)
     assert all(row["source_only"] == (mode == "all") for row in result["units"])
     assert (result["bounds"]["max_unit_bytes"] == 1024) == (ceiling is not None)
+
+
+def test_run_exclusions_apply_before_reading_worktree_evidence(repo, tmp_path_factory, monkeypatch):
+    commit(repo, {"app.py": "value = 1\n", "test_tracked.py": "assert old\n"})
+    (repo / "test_tracked.py").write_text("assert modified\n")
+    (repo / "test_new.py").write_text("assert new\n")
+    excluded = {"test_tracked.py", "test_new.py"}
+    overrides = {"exclusions": "test_tracked.py", "rules": {"exclude": ["test_new.py"]}}
+    read = snapshots._worktree_bytes
+
+    def checked_read(root, path):
+        assert path not in excluded
+        return read(root, path)
+
+    monkeypatch.setattr(snapshots, "_worktree_bytes", checked_read)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("snapshot-state")))
+    preview = preview_local(repo, overrides=overrides)
+    report = service.review_local(repo, overrides=overrides, get_credentials=lambda: pytest.fail("No targets"),
+                                  connection={"provider": "custom", "protocol": "openai", "model": "fixture", "options": {}})
+    for result in (preview, report):
+        assert excluded <= {item["path"] for item in result["excluded_files"]}
 
 
 def test_preview_never_reads_profiles_credentials_or_state_or_mutates_repository(repo, tmp_path, monkeypatch):

@@ -94,9 +94,15 @@ python evals/review_improvements/run.py compare \
   --acceptance evals/review_improvements/acceptance.json
 ```
 
-It exits 1 unless both artifacts are explicitly real quality evidence, recall improves
-by at least 0.10, precision is 1.0, coverage is complete, published duplicates are zero
-and consumption is known. Offline replay always sets `quality_evidence=false`, so it
+It exits 1 unless both artifacts are explicitly real quality evidence, discovery recall
+improves by at least 0.10, and the experiment confirms more unique true defects.
+Precision must be 1.0, coverage complete and published duplicates zero. Supply known
+total tokens and measured `metrics.total_cost_usd` for the same evaluation workload
+in both artifacts. The default limits allow up to twice the baseline tokens and twice
+its billed spend. Configure `max_total_token_ratio` and `max_cost_ratio` in the
+acceptance criteria to change those ceilings. Missing measurements or ceilings
+prevent acceptance. Historical artifacts can still be compared without acceptance.
+Offline replay always sets `quality_evidence=false`, so it
 **cannot pass quality acceptance**, even with perfect scripted metrics. These are
 prospective minimum criteria, not permission to call providers or acceptance of this
 corpus as sufficient real quality evidence. Real comparative evaluation additionally

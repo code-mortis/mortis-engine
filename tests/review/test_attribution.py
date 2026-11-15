@@ -190,7 +190,12 @@ def test_saved_legacy_context_reused_without_rebuilding_or_changing_schema(repo,
     saved = copy.deepcopy(context)
     session = Session(lambda stage, supplied: decision(evidence=[selected(supplied)]))
     session.run_id = "origin"
-    session.history = SimpleNamespace(assessment_inputs=lambda identity: {"candidate": {"context": saved}})
+
+    def assessment_input(run_id, candidate_id):
+        assert (run_id, candidate_id) == ("origin", "candidate")
+        return {"context": saved, "options": {}}
+
+    session.history = SimpleNamespace(assessment_input=assessment_input)
     monkeypatch.setattr(assessment, "build_context", lambda *args, **kwargs: pytest.fail("Saved context was rebuilt"))
     result = assess(repo, run_for(sha, sha), session, candidate_id="candidate")
     assert result["verdict"] == "confirmed"

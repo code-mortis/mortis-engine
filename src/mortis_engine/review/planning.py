@@ -13,6 +13,7 @@ from mortis_engine.review.errors import ReviewStopped
 VERSION = "mortis-pr-plan/v1"
 RULES_VERSION = "mortis-rules/v1"
 FULL_TREE_SOURCE_POLICY = "source-only/v1"
+EVIDENCE_POLICY = "supporting-tests/v1"
 # Language admission is independent of the optional structural graph's parsers.
 CODE_SUFFIXES = set((
     "java kt kts scala groovy py pyi js jsx ts tsx mjs cjs c h cpp cc cxx hpp hxx cs vb fs fsi fsx "
@@ -225,9 +226,26 @@ def allowed_path(path, options, rules, *, supporting_evidence=False):
     return exclusion_reason(path, options, rules, supporting_evidence=supporting_evidence) is None
 
 
+def saved_evidence_policy(saved):
+    if "evidence_policy" in saved or "_evidence_policy" in saved:
+        return saved.get("evidence_policy", saved.get("_evidence_policy"))
+    # These markers were introduced after default-omitted tests became supporting evidence.
+    return EVIDENCE_POLICY if any(key in saved for key in (
+        "assessment_attribution", "_assessment_attribution", "source_tool_policy",
+    )) else None
+
+
+def supports_test_evidence(options):
+    policy = options.get("_evidence_policy", EVIDENCE_POLICY)
+    if policy not in {None, EVIDENCE_POLICY}:
+        raise ValueError("The saved evidence policy is unsupported.")
+    return policy == EVIDENCE_POLICY
+
+
 def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, rules=None):
     rules = rules or load_rules(repo, env, options.get("_settings_sha", base_sha), options, stopped)
-    allowed = {path for path in paths if allowed_path(path, options, rules, supporting_evidence=True)}
+    supporting = supports_test_evidence(options)
+    allowed = {path for path in paths if allowed_path(path, options, rules, supporting_evidence=supporting)}
     if not allowed:
         return allowed
     # Trusted rules come from the current base; PR rename scope comes from its merge base.
@@ -235,7 +253,7 @@ def allowed_context(repo, env, base_sha, head_sha, paths, options, stopped, *, r
     if not re.fullmatch(r"[a-f0-9]{40}", merge_base):
         raise ValueError("Supporting context requires the exact PR merge base.")
     for path, old_path, _status in _changes(repo, env, merge_base, head_sha, stopped):
-        if old_path and not all(allowed_path(value, options, rules, supporting_evidence=True)
+        if old_path and not all(allowed_path(value, options, rules, supporting_evidence=supporting)
                                 for value in (path, old_path)):
             allowed.difference_update((path, old_path))
     return allowed

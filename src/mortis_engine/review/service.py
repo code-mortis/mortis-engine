@@ -39,9 +39,10 @@ def credentials_for_history(history, get_credentials):
 
 
 @contextmanager
-def _inputs(history, repository, mode, base, head, resume):
+def _inputs(history, repository, mode, base, head, resume, overrides):
     if resume is None:
-        with snapshots.snapshot(repository, mode=mode, base=base, head=head, object_cache=history.objects) as snap:
+        with snapshots.snapshot(repository, mode=mode, base=base, head=head, object_cache=history.objects,
+                                overrides=overrides) as snap:
             yield snap, None
         return
     row = history.row(resume, "review")
@@ -91,11 +92,18 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
     with History(repository) as history:
         if resume and history.row(resume, "review")["report"] is not None:
             return history.report(resume)
-        with _inputs(history, repository, mode, base, head, resume) as (snap, saved):
+        with _inputs(history, repository, mode, base, head, resume, overrides) as (snap, saved):
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
             full_tree_source_policy = saved.get("full_tree_source_policy") if saved else planning.FULL_TREE_SOURCE_POLICY
             source_tool_policy = saved.get("source_tool_policy", "bounded-reads/v2") if saved else engine.SOURCE_TOOL_POLICY
             attribution = saved.get("assessment_attribution") if saved else assessment.ATTRIBUTION_VERSION
+            options["_evidence_policy"] = planning.saved_evidence_policy(saved) if saved else planning.EVIDENCE_POLICY
+            planning.supports_test_evidence(options)
+            if saved and "evidence_policy" not in saved:
+                options["_unmarked_verification_policy"] = True
+            options["_discovery_result_policy"] = saved.get("discovery_result_policy") if saved else engine.DISCOVERY_RESULT_POLICY
+            if options["_discovery_result_policy"] not in {None, engine.DISCOVERY_RESULT_POLICY}:
+                raise ValueError("The saved discovery result policy is unsupported.")
             if attribution not in {None, assessment.ATTRIBUTION_VERSION}:
                 raise ValueError("The saved assessment attribution version is unsupported.")
             options["_assessment_attribution"] = attribution
@@ -135,7 +143,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
                     "triage_versions": decisions, "assessment_runs": assessment_runs,
                     "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution,
-                    "source_tool_policy": source_tool_policy})
+                    "source_tool_policy": source_tool_policy, "evidence_policy": options["_evidence_policy"],
+                    "discovery_result_policy": options["_discovery_result_policy"]})
             options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:

@@ -66,9 +66,12 @@ def _related_paths(repo, env, context, options, base_sha, head_sha):
 async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=None, pinned_context=None):
     options = run.config["settings"]
     if pinned_context is None and candidate_id and getattr(session, "history", None):
-        saved = session.history.assessment_inputs(session.run_id).get(candidate_id)
+        saved = session.history.assessment_input(session.run_id, candidate_id)
         if saved:
             pinned_context = saved["context"]
+            options = {**options, "_evidence_policy": planning.saved_evidence_policy(saved["options"])}
+            run = SimpleNamespace(base_sha=run.base_sha, head_sha=run.head_sha,
+                                  config={**run.config, "settings": options})
     if pinned_context is None:
         context = assessment.build_context(repo, env, env, run, snapshot, previous, lambda: False)
         context["review_sensitivity"] = options.get("review_sensitivity")
@@ -112,14 +115,56 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
     raise AssertionError("Bounded assessment did not produce a result")
 
 
-async def _verify_one(repo, env, original, original_sha, head_sha, options, session):
+def _verification_context(repo, env, original, original_sha, head_sha, options):
     context = verification.build_context(repo, env, env, original, original_sha, head_sha, options,
                                          lambda: False, base_sha=options.get("base_sha", head_sha))
     _related_paths(repo, env, context, options, options.get("base_sha", head_sha), head_sha)
+    instructions = verification.INSTRUCTIONS
+    if not planning.supports_test_evidence(options):
+        instructions = instructions.replace(verification.TEST_EVIDENCE_INSTRUCTIONS, "")
+    return context, instructions
+
+
+def _restore_verification_policy(repo, env, report, head_sha, options, session):
+    if not options.get("_unmarked_verification_policy"):
+        return {}
+    found_saved = False
+    for original in report.get("findings", []):
+        identity = original.get("id") or planning.fingerprint(original)
+        key = f"{identity}:{head_sha}:0"
+        cached = getattr(session, "records", {}).get(("verification", key))
+        if not cached:
+            continue
+        found_saved = True
+        original_sha = original.get("source_sha") or report["head_sha"]
+        # Older standalone plans have no marker; only the actual request proves the policy.
+        default = options.get("_evidence_policy")
+        for selected_policy in (default, None if default == planning.EVIDENCE_POLICY else planning.EVIDENCE_POLICY):
+            selected = {**options, "_evidence_policy": selected_policy}
+            try:
+                context, instructions = _verification_context(repo, env, original, original_sha, head_sha, selected)
+                supplied, schema, _ = evidence.prepare(review_context.sanitize(context, session.credentials),
+                                                        verification.output_schema())
+                request = session.request("verification", key,
+                    instructions=instructions + evidence.SELECTION_INSTRUCTIONS,
+                    context=supplied, schema=schema, effort=options.get("effort", "medium"),
+                    max_output_tokens=options.get("max_output_tokens"))
+            except (ValueError, OSError):
+                continue
+            if planning.fingerprint(request.model_dump()) == cached[0]:
+                options["_evidence_policy"] = selected_policy
+                return {identity: (context, instructions)}
+    if found_saved:
+        raise ValueError("The saved verification task has different immutable inputs.")
+    return {}
+
+
+async def _verify_one(repo, env, original, original_sha, head_sha, options, session, *, prepared=None):
     identity = original.get("id") or planning.fingerprint(original)
+    context, instructions = prepared or _verification_context(repo, env, original, original_sha, head_sha, options)
     for round in range(3):
         result = await _ask(session, "verification", f"{identity}:{head_sha}:{round}", context,
-                            verification.INSTRUCTIONS, verification.output_schema(), verification.validate_response, options)
+                            instructions, verification.output_schema(), verification.validate_response, options)
         requested = result.pop("required_sources", [])
         if not requested:
             return result
@@ -135,13 +180,30 @@ async def _verify_one(repo, env, original, original_sha, head_sha, options, sess
 
 async def verify(repo, env, original_report, current_sha, options, session):
     """Verify each retained finding without changing the original report or finding status."""
-    rows = []
+    options = dict(options)
+    rows, prepared, policy_error = [], {}, None
+    try:
+        prepared = _restore_verification_policy(repo, env, original_report, current_sha, options, session)
+    except ValueError as exc:
+        policy_error = exc
     for snapshot in original_report.get("findings", []):
         original_sha = snapshot.get("source_sha") or original_report["head_sha"]
         row = {"finding_id": snapshot.get("id"), "snapshot": copy.deepcopy(snapshot),
                "original_sha": original_sha, "head_sha": current_sha}
         try:
-            result = await _verify_one(repo, env, snapshot, original_sha, current_sha, options, session)
+            if policy_error:
+                raise policy_error
+            identity = snapshot.get("id") or planning.fingerprint(snapshot)
+            selected = dict(options)
+            if identity not in prepared:
+                prepared.clear()
+                key = f"{identity}:{current_sha}:0"
+                if (options.get("_unmarked_verification_policy")
+                        and ("verification", key) in getattr(session, "records", {})):
+                    prepared = _restore_verification_policy(repo, env,
+                        {"head_sha": original_report["head_sha"], "findings": [snapshot]}, current_sha, selected, session)
+            result = await _verify_one(repo, env, snapshot, original_sha, current_sha, selected, session,
+                                       prepared=prepared.pop(identity, None))
             row.update(status="completed", verdict=result["verdict"], result=result)
         except (ValueError, TimeoutError, InferenceError) as exc:
             row.update(status="failed", verdict="uncertain", result=None,

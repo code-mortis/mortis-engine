@@ -59,7 +59,31 @@ def test_experiment_discovers_caller_and_cannot_pass_live_quality_acceptance(tmp
     assert comparison["discovery_recall_delta"] == 0.5
     assert comparison["quality_accepted"] is False
     assert comparison["checks"]["quality_evidence"] is False
-    assert all(value for key, value in comparison["checks"].items() if key not in {"quality_evidence", "coverage"})
+    assert comparison["checks"]["confirmed_gain"]
+    assert not comparison["checks"]["known_usage"]  # Baseline consumption is unknown.
+    assert not comparison["checks"]["token_limit"] and not comparison["checks"]["cost_limit"]
+
+
+@pytest.mark.parametrize(("old_changes", "new_changes", "failed"), [
+    ({}, {}, set()),
+    ({}, {"confirmed_true": 1}, {"confirmed_gain"}),
+    ({}, {"total_tokens": 10_000}, {"token_limit"}),
+    ({}, {"total_cost_usd": 100}, {"cost_limit"}),
+    ({"unknown_usage_requests": 1, "total_tokens": None}, {}, {"known_usage", "token_limit"}),
+    ({}, {"total_cost_usd": None}, {"cost_limit"}),
+    ({"total_cost_usd": 0}, {}, {"cost_limit"}),
+])
+def test_acceptance_requires_new_confirmations_within_measured_limits(old_changes, new_changes, failed):
+    common = {"discovery_recall": 0.5, "confirmed_true": 1, "confirmed_precision": 1,
+              "incomplete_cases": 0, "duplicate_confirmations": 0, "unknown_usage_requests": 0,
+              "total_tokens": 100, "total_cost_usd": 1.25}
+    baseline = {"input_manifest": "same holdout", "quality_evidence": True, "metrics": {**common, **old_changes}}
+    experiment = {**baseline, "metrics": {**common, "confirmed_true": 2, "discovery_recall": 1,
+                                          "total_tokens": 200, "total_cost_usd": 2.50, **new_changes}}
+    criteria = evaluation.read(evaluation.ROOT / "acceptance.json")
+    result = evaluation.compare(baseline, experiment, criteria)
+    assert {key for key, value in result["checks"].items() if not value} == failed
+    assert result["quality_accepted"] is (not failed)
 
 
 def test_metrics_keep_duplicates_incomplete_coverage_and_unknown_usage():
@@ -82,6 +106,12 @@ def test_metrics_keep_duplicates_incomplete_coverage_and_unknown_usage():
     assert metrics["selected_files"] == 2 and metrics["completed_files"] == 1
     assert metrics["known_tokens"] == 20 and metrics["unknown_usage_requests"] == 1
     assert metrics["total_tokens"] is None
+
+
+def test_billed_spend_at_fractional_ceiling_and_missing_criteria():
+    assert evaluation.within_ratio(0.70, 1.05, 1.5)
+    assert not evaluation.within_ratio(0.70, 1.051, 1.5)
+    assert not evaluation.within_ratio(1, 1, None)
 
 
 def test_no_confirmations_has_unavailable_precision_and_wrong_corpus_is_rejected():

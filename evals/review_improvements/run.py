@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -212,19 +213,34 @@ def compare(baseline, experiment, criteria=None):
         raise ValueError("Comparisons require the same frozen cases and grader expectations")
     old, new = baseline["metrics"], experiment["metrics"]
     result = {"discovery_recall_delta": (new["discovery_recall"] - old["discovery_recall"]),
+              "confirmed_true_delta": new["confirmed_true"] - old["confirmed_true"],
               "confirmed_precision_delta": (new["confirmed_precision"] - old["confirmed_precision"])
               if old["confirmed_precision"] is not None and new["confirmed_precision"] is not None else None,
               "quality_accepted": False, "acceptance_requested": criteria is not None}
     if criteria is not None:
+        known_usage = all(metrics["unknown_usage_requests"] == 0 and metrics["total_tokens"] is not None
+                          for metrics in (old, new))
         checks = {"quality_evidence": all(row.get("quality_evidence") is True for row in (baseline, experiment)),
                   "recall_gain": result["discovery_recall_delta"] >= criteria["min_discovery_recall_gain"],
+                  "confirmed_gain": result["confirmed_true_delta"] > 0,
                   "precision": new["confirmed_precision"] is not None
                   and new["confirmed_precision"] >= criteria["min_confirmed_precision"],
                   "coverage": new["incomplete_cases"] <= criteria["max_incomplete_cases"],
                   "duplicates": new["duplicate_confirmations"] <= criteria["max_duplicate_confirmations"],
-                  "known_usage": new["unknown_usage_requests"] == 0}
+                  "known_usage": known_usage,
+                  "token_limit": known_usage and within_ratio(old["total_tokens"], new["total_tokens"],
+                                                              criteria.get("max_total_token_ratio")),
+                  "cost_limit": within_ratio(old.get("total_cost_usd"), new.get("total_cost_usd"),
+                                             criteria.get("max_cost_ratio"))}
         result.update(checks=checks, quality_accepted=all(checks.values()))
     return result
+
+
+def within_ratio(baseline, experiment, maximum):
+    if not all(type(value) in (float, int) for value in (baseline, experiment, maximum)):
+        return False
+    before, after, limit = (Decimal(str(value)) for value in (baseline, experiment, maximum))
+    return all(value.is_finite() and value >= 0 for value in (before, after, limit)) and after <= before * limit
 
 
 def replay_all(recording_path, *, second_pass=False):

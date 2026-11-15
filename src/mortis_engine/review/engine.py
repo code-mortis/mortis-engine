@@ -23,6 +23,7 @@ PROMPT_VERSION = "mortis-pr-prompt/v2"
 SCHEMA_VERSION = "mortis-pr-result/v1"
 SOURCE_TOOL_POLICY = "bounded-search/v3"
 SOURCE_CODE_POLICY = "selected-lines/v1"
+DISCOVERY_RESULT_POLICY = "discovery-results/v1"
 MAX_READ_BYTES = 64 * 1024
 MAX_REPAIR_DRAFT_BYTES = 256 * 1024
 MAX_SOURCE_BYTES = 20_000_000
@@ -312,7 +313,10 @@ def validate_result(data, batch, sources, credentials, stopped=lambda: False):
             raise ResultValidationError("existing_code_mismatch", [*field, "existing_code"],
                                         "Copy nonblank existing_code exactly from the supplied finding lines.")
         comment = finding.model_dump(exclude={"unit_key"})
-        comment.update(source_sha=unit.source_sha, inline_line=finding.end_line if finding.end_line in _diff_lines(unit.patch) else None)
+        source_inline = (unit.source_only and batch.options.get("_discovery_result_policy", DISCOVERY_RESULT_POLICY)
+                         == DISCOVERY_RESULT_POLICY)
+        comment.update(source_sha=unit.source_sha,
+                       inline_line=finding.end_line if source_inline or finding.end_line in _diff_lines(unit.patch) else None)
         comment["evidence"] = citations
         comments.append(comment)
     return context.sanitize({"kind": "final", "completed_units": value.completed_units, "comments": comments}, credentials, stopped)
@@ -488,6 +492,8 @@ def _recovery_batches(batch, request, sources, parent_key, *, recovery_policy="s
         payload = {**original, "task_key": key, "remaining_source_rounds": 0,
                    "assigned_units": [item for item in original["assigned_units"] if item["key"] == unit.key],
                    "context_units": [item for item in original["assigned_units"] if item["key"] != unit.key]}
+        if batch.options.get("_discovery_result_policy", DISCOVERY_RESULT_POLICY) == DISCOVERY_RESULT_POLICY:
+            payload["context_units"] = original.get("context_units", []) + payload["context_units"]
         messages = [Message(role="user", content=json.dumps(payload, ensure_ascii=False))]
         for message in request.messages[1:]:
             context_payload = json.loads(message.content)

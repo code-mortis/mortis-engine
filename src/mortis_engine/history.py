@@ -168,6 +168,11 @@ class History:
             if row[0] != encoded:
                 raise ValueError("The saved candidate has different immutable assessment inputs.")
 
+    def assessment_input(self, run_id, candidate_id):
+        row = self.db.execute("SELECT input FROM assessment_inputs WHERE run=? AND candidate=?",
+                              (run_id, candidate_id)).fetchone()
+        return json.loads(row["input"]) if row is not None else None
+
     def assessment_inputs(self, run_id):
         return {row["candidate"]: json.loads(row["input"]) for row in self.db.execute(
             "SELECT candidate, input FROM assessment_inputs WHERE run=? ORDER BY rowid", (run_id,))}

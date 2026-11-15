@@ -46,8 +46,9 @@ confirm c03 only after normal assessment reads its unchanged dependency, and add
 no duplicate candidates. These numbers test pipeline wiring, not model quality.
 The acceptance command must exit 1: offline artifacts have
 `quality_evidence=false`, and consumption remains unknown in c05. Prospective live
-acceptance still requires the unchanged quality, precision, coverage, duplicate
-and usage gates plus an independent frozen holdout and human adjudication.
+acceptance requires additional confirmed true defects and checks precision, coverage,
+duplicates, total tokens and measured spend on an independent frozen holdout with
+human adjudication. The default token and spend ceilings are each twice the baseline.
 
 Dedicated regressions: `tests/review/test_second_discovery.py` and
 `tests/evals/test_second_discovery.py`. Live-provider quality, cost and latency

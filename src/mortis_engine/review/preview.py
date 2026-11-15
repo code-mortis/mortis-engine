@@ -31,7 +31,7 @@ def preview_local(repository, *, mode="worktree", base=None, head="HEAD", effort
     that connection. Batch counts exclude provider-envelope splitting and follow-ups.
     """
     maximum = unit_byte_limit(prompt_token_ceiling)
-    with snapshots.snapshot(repository, mode=mode, base=base, head=head) as snap:
+    with snapshots.snapshot(repository, mode=mode, base=base, head=head, overrides=overrides) as snap:
         options = settings.load(snap.repo, snap.env, snap.settings_sha)
         options.update(effort=effort or options["effort"], review_mode=snap.mode, _settings_sha=snap.settings_sha)
         settings.apply_overrides(options, overrides)
