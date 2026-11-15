@@ -18,6 +18,7 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
     async def run():
         outcomes = {}
         active_batches = {}
+        discovery_pass = 1
         options = prepared[0].options if prepared else {}
         budget = options.get("token_budget")
         seconds = options.get("timeout_seconds")
@@ -35,7 +36,7 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                     outcomes[unit.key] = {"status": "failed", "error": code}
 
         def report_progress():
-            progress({"phase": "analysis", "completed_units": sum(
+            progress({"phase": "analysis", **({"discovery_pass": 2} if discovery_pass == 2 else {}), "completed_units": sum(
                 value["status"] == "completed" for value in outcomes.values()),
                 "selected_units": len(plan.units),
                 "possible_findings": sum(len(value.get("comments", [])) for value in outcomes.values()
@@ -131,9 +132,9 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                     repair=feedback is not None, validation=feedback or candidate_diagnostics, candidate_draft=candidate_draft)
                 request = request.model_copy(update={"session_id": session_id})
 
-        async with gateway.http_client() as client:
+        async def run_batches(batches, client):
             queue = asyncio.Queue()
-            for batch in prepared:
+            for batch in batches:
                 queue.put_nowait(batch)
 
             async def worker():
@@ -159,15 +160,55 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                         report_progress()
                         queue.task_done()
 
-            workers = [asyncio.create_task(worker()) for _ in range(min(options.get("concurrency", 2), len(prepared)))]
+            workers = [asyncio.create_task(worker()) for _ in range(min(options.get("concurrency", 2), len(batches)))]
             try:
                 await asyncio.gather(*workers)
             finally:
                 for task in workers:
                     task.cancel()
                 await asyncio.gather(*workers, return_exceptions=True)
+
+        second_pass = None
+        async with gateway.http_client() as client:
+            await run_batches(prepared, client)
+            if options.get("second_pass") and not plan.limit_reason:
+                first_outcomes = outcomes
+                second_batches = engine.second_pass_batches(prepared, first_outcomes)
+                outcomes, discovery_pass = {}, 2
+                await run_batches(second_batches, client)
+                second_pass = {"status": "completed" if second_batches else "skipped", "units": [],
+                               "added_candidates": 0}
+                for batch in second_batches:
+                    for unit in batch.units:
+                        outcome = outcomes.get(unit.key, {"status": "failed", "error": "incomplete_analysis"})
+                        second_pass["units"].append({"key": unit.key, "path": unit.path,
+                            **{key: value for key, value in outcome.items() if key != "comments"}})
+                        if outcome["status"] != "completed":
+                            second_pass["status"] = "partial"
+                            continue
+                        existing = first_outcomes[unit.key]["comments"]
+                        def identity(comment):
+                            return fingerprint({key: comment.get(key) for key in (
+                                "path", "source_sha", "start_line", "end_line", "content", "trigger", "consequence")})
+                        seen = {identity(comment) for comment in existing}
+                        for comment in outcome.get("comments", []):
+                            candidate = identity(comment)
+                            if candidate not in seen:
+                                existing.append(comment)
+                                seen.add(candidate)
+                                second_pass["added_candidates"] += 1
+                outcomes = first_outcomes
         usage = active.usage("analysis")
         status, report, comments = engine._report(plan, prepared, outcomes, tokens=usage["total_tokens"])
+        if second_pass is not None:
+            report["second_pass"] = second_pass
+            failures = [unit for unit in second_pass["units"] if unit["status"] != "completed"]
+            report["errors"].extend({"path": unit["path"], "message": "second_pass_" + unit["error"]}
+                                    for unit in failures)
+            if failures:
+                if status == "completed":
+                    status = report["manifest"]["terminal_state"] = "partial"
+                report["summary"]["budget_exceeded"] |= any(unit["error"] == "budget" for unit in failures)
         report["usage"] = usage["requests"]
         report["summary"]["reserved_tokens"] = usage["reserved_tokens"]
         return status, report, comments

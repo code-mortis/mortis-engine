@@ -1,0 +1,108 @@
+{
+  "kind": "scripted_mock_not_provider_recording",
+  "discovery": {
+    "c01": [
+      0
+    ],
+    "c02": [
+      1
+    ],
+    "c03": [],
+    "c04": [
+      3
+    ],
+    "c05": []
+  },
+  "responses": [
+    {
+      "case": "c01",
+      "path": "app.py",
+      "line": 3,
+      "content": "Zero rate crashes price calculation",
+      "trigger": "price(1)",
+      "consequence": "Division raises ZeroDivisionError",
+      "verdict": "confirmed",
+      "explanation": "The changed rate is zero and price divides by it.",
+      "evidence": [
+        [
+          "app.py",
+          2
+        ],
+        [
+          "app.py",
+          3
+        ]
+      ]
+    },
+    {
+      "case": "c02",
+      "path": "app.py",
+      "line": 4,
+      "content": "Zero input crashes inverse",
+      "trigger": "inverse(0)",
+      "consequence": "Division raises ZeroDivisionError",
+      "verdict": "rejected",
+      "explanation": "The division existed before the unrelated LABEL change; the change adds no new trigger.",
+      "evidence": [
+        [
+          "app.py",
+          4
+        ]
+      ]
+    },
+    {
+      "case": "c03",
+      "path": "app.py",
+      "line": 2,
+      "content": "Changed caller activates division by zero",
+      "trigger": "Import app after changing inverse argument to zero",
+      "consequence": "Import raises ZeroDivisionError",
+      "verdict": "confirmed",
+      "explanation": "The changed caller now passes zero into the unchanged division.",
+      "evidence": [
+        [
+          "app.py",
+          2
+        ],
+        [
+          "maths.py",
+          2
+        ]
+      ]
+    },
+    {
+      "case": "c04",
+      "path": "app.py",
+      "line": 3,
+      "content": "Zero input bypasses inverse guard",
+      "trigger": "inverse(0)",
+      "consequence": "Alleged division by zero",
+      "verdict": "rejected",
+      "explanation": "The guard returns zero; the test asserts exactly this behavior. This replay does not claim to have executed it.",
+      "evidence": [
+        [
+          "app.py",
+          3
+        ],
+        [
+          "test_app.py",
+          5
+        ]
+      ]
+    }
+  ],
+  "unknown_usage_cases": [
+    "c05"
+  ],
+  "second_discovery": {
+    "c01": [
+      0
+    ],
+    "c02": [],
+    "c03": [
+      2
+    ],
+    "c04": [],
+    "c05": []
+  }
+}

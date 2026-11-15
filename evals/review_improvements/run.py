@@ -79,7 +79,9 @@ class Replay:
         rows = [row for row in self.recording["responses"] if row["case"] == self.case_id]
         if stage == "analysis":
             findings = []
-            for index in self.recording["discovery"][self.case_id]:
+            discovery = (self.recording.get("second_discovery", {}) if context.get("discovery_pass") == 2
+                         else self.recording["discovery"])
+            for index in discovery.get(self.case_id, []):
                 row = self.recording["responses"][index]
                 if row["case"] != self.case_id:
                     raise ValueError("Replay response belongs to another case")
@@ -113,7 +115,7 @@ class Replay:
         return Response(output=value, usage=Usage(total_tokens=tokens))
 
 
-def review_case(repo, case, recording):
+def review_case(repo, case, recording, *, second_pass=False):
     from mortis_engine import gateway
     from mortis_engine.review import engine, planning, settings, source, workflows
     from mortis_engine.workflow import Session
@@ -124,6 +126,8 @@ def review_case(repo, case, recording):
     with source.local_repository(repo) as (isolated, env), patch.object(gateway, "send", replay.send):
         options = settings.load(isolated, env, case["base_sha"])
         options.update(concurrency=1, auto_resolve=False)
+        if second_pass:
+            options["second_pass"] = True
         plan = planning.plan_review(isolated, env, case["base_sha"], case["head_sha"], case["base_sha"],
                                     options, lambda: False)
         session = Session(connection, {})
@@ -223,7 +227,7 @@ def compare(baseline, experiment, criteria=None):
     return result
 
 
-def replay_all(recording_path):
+def replay_all(recording_path, *, second_pass=False):
     import mortis_engine.review.engine as engine
 
     manifest, cases = verify_inputs()
@@ -238,10 +242,11 @@ def replay_all(recording_path):
             for case in cases:
                 repo = root / case["id"]
                 materialize(repo, case)
-                results.append(review_case(repo, case, recording))
+                results.append(review_case(repo, case, recording, second_pass=second_pass))
     # Expected labels are loaded only after every review request has completed.
     metrics = score(results, read(ROOT / "expected.json"))
     return {"schema_version": "mortis.review-eval/v1", "evidence_kind": "offline_scripted_replay",
+            "second_pass": second_pass,
             "quality_evidence": False, "engine_revision": revision,
             "engine_dirty": bool(git(engine_root, "status", "--porcelain", "--", "src")),
             "recording_sha256": hashlib.sha256(Path(recording_path).read_bytes()).hexdigest(),
@@ -253,6 +258,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     replay = commands.add_parser("replay")
     replay.add_argument("--recording", type=Path, default=ROOT / "fixtures/replay.json")
+    replay.add_argument("--second-pass", action="store_true")
     replay.add_argument("--output", type=Path, required=True)
     comparison = commands.add_parser("compare")
     comparison.add_argument("--baseline", type=Path, required=True)
@@ -260,7 +266,7 @@ def main():
     comparison.add_argument("--acceptance", type=Path)
     args = parser.parse_args()
     if args.command == "replay":
-        result = replay_all(args.recording)
+        result = replay_all(args.recording, second_pass=args.second_pass)
         with args.output.open("x") as stream:
             json.dump(result, stream, indent=2, sort_keys=True)
             stream.write("\n")
