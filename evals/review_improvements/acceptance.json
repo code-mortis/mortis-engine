@@ -1,0 +1,6 @@
+{
+  "min_discovery_recall_gain": 0.1,
+  "min_confirmed_precision": 1.0,
+  "max_incomplete_cases": 0,
+  "max_duplicate_confirmations": 0
+}

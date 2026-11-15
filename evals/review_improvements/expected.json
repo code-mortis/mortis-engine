@@ -1,0 +1,36 @@
+{
+  "c01": {
+    "kind": "introduced_bug",
+    "defects": [
+      {
+        "id": "zero-rate",
+        "path": "app.py",
+        "start_line": 2,
+        "end_line": 3
+      }
+    ]
+  },
+  "c02": {
+    "kind": "preexisting_unrelated",
+    "defects": []
+  },
+  "c03": {
+    "kind": "changed_caller_unchanged_bug",
+    "defects": [
+      {
+        "id": "zero-caller",
+        "path": "app.py",
+        "start_line": 2,
+        "end_line": 2
+      }
+    ]
+  },
+  "c04": {
+    "kind": "candidate_refuted_by_test",
+    "defects": []
+  },
+  "c05": {
+    "kind": "clean_change",
+    "defects": []
+  }
+}
