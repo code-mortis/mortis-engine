@@ -39,7 +39,7 @@ def clean_text(value: str, secrets: tuple[str, ...] = ()) -> str:
     for secret in secrets:
         if secret:
             value = value.replace(secret, "[redacted]")
-    value = re.sub(r"(?i)(bearer\s+)[\w.\-]+", r"\1[redacted]", value)
+    value = re.sub(r"(?i)(bearer\s+)[\w.~+/=\-]+", r"\1[redacted]", value)
     value = re.sub(r"cm_pat_[A-Za-z0-9_-]{43}", "[redacted]", value)
     value = re.sub(
         r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b", "[redacted]", value
