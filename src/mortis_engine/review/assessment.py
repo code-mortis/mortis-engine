@@ -11,6 +11,8 @@ from .errors import ReviewStopped
 from .planning import fingerprint
 from .workflow_contracts import AssessmentResult
 
+ATTRIBUTION_VERSION = "merge-base/v1"
+
 INSTRUCTIONS = (
     "Adjudicate only the supplied proposed finding; do not search for additional findings. "
     "The proposal is an allegation to test, not an established requirement. "
@@ -64,11 +66,32 @@ INSTRUCTIONS = (
     "Return exactly the requested assessment schema. Do not resolve, reopen, or invent finding IDs."
 )
 
+ATTRIBUTION_INSTRUCTIONS = (
+    "For this change review, distinguish a defect introduced or activated by the change from a "
+    "pre-existing defect. A logging-only or formatting edit does not introduce an unchanged failure. "
+    "A changed caller or contract can activate a failure on an unchanged source line; do not require "
+    "the cited failing line itself to be changed. Trace the changed cause or trigger. "
+    "When current source and diffs are insufficient to establish attribution, return uncertain and "
+    "request the necessary merge-base files in required_base_paths, using their paths at that revision. "
+    "attribution.renames maps merge-base paths to current paths. Requested base source is supplied as "
+    "sources.original at original_sha, the pinned merge base; sources.current is at head_sha. "
+    "Cite original and current evidence where needed to explain the comparison. "
+    "An absent file or unavailable base source is not proof of an introduced defect. "
+    "If attribution cannot be established within the supplied evidence and bounded requests, remain uncertain. "
+    "Use empty required_base_paths when comparison is already sufficient. "
+)
+
 class AssessmentResponse(AssessmentResult):
     required_paths: list[str] = Field(default_factory=list, max_length=10)
 
+class AttributionResponse(AssessmentResponse):
+    required_base_paths: list[str] = Field(default_factory=list, max_length=10)
+
+def response_model(context):
+    return AttributionResponse if context and context.get("attribution", {}).get("version") == 1 else AssessmentResponse
+
 def output_schema(context=None):
-    schema = AssessmentResponse.model_json_schema()
+    schema = response_model(context).model_json_schema()
     schema["required"] = list(schema["properties"])
     if context is not None:
         ids = sorted({item["id"] for item in context["history"]})
@@ -82,7 +105,7 @@ def output_schema(context=None):
 
 def validate_response(value, context):
     try:
-        response = AssessmentResponse.model_validate(value, strict=True).model_dump()
+        response = response_model(context).model_validate(value, strict=True).model_dump()
     except ValidationError as exc:
         problems = exc.errors(include_input=False, include_url=False)
         if any(not problem["loc"] or problem["loc"][0] not in {"finding_id", "evidence"} for problem in problems):
@@ -99,13 +122,17 @@ def validate_response(value, context):
                                  for key in ("revision", "path", "start_line", "end_line") if key in evidence[location[1]]})
         raise verification.ResultValidationError("Assessment citation or finding ID has an invalid format. " + json.dumps(feedback), feedback) from exc
     paths = response.pop("required_paths")
-    for path in paths:
+    base_paths = response.pop("required_base_paths", [])
+    if len(paths) + len(base_paths) > 10:
+        raise ValueError("An assessment may request at most 10 source files per pass.")
+    for path in [*paths, *base_paths]:
         if not path or len(path) > 2000:
             raise ValueError("Requested evidence paths must contain 1 to 2000 characters.")
         git_source.repository_path(path)
-    if paths and response["verdict"] != "uncertain":
+    if (paths or base_paths) and response["verdict"] != "uncertain":
         raise ValueError("An assessment requiring more evidence must remain uncertain.")
-    return {**validate_result(response, context), "required_paths": list(dict.fromkeys(paths))}
+    return {**validate_result(response, context), "required_paths": list(dict.fromkeys(paths)),
+            **({"required_base_paths": list(dict.fromkeys(base_paths))} if response_model(context) is AttributionResponse else {})}
 
 def related_history(repo, env, fetch_env, head, snapshot, previous, stopped, renamed=None):
     if renamed is None:
@@ -173,6 +200,14 @@ def build_context(repo, env, fetch_env, run, snapshot, previous, stopped):
     selected = verification.filter_context(repo, env, dict.fromkeys(filter(None, paths), "# context\n"),
                                            run.config["settings"], stopped, **scope)
     merge_base = git_source.git(repo, env, "merge-base", run.base_sha, head, stopped=stopped).strip()
+    if (source_sha == head and run.config["settings"].get("review_mode") != "all"
+        and run.config["settings"].get("_assessment_attribution", ATTRIBUTION_VERSION) == ATTRIBUTION_VERSION):
+        from mortis_engine.review import planning
+
+        context["original_sha"] = merge_base
+        context["attribution"] = {"version": 1, "merge_base_sha": merge_base,
+            "renames": {old: path for path, old, status in planning._changes(repo, env, merge_base, head, stopped)
+                        if old and status.startswith("R")}}
     selected &= verification.review_paths(repo, env, merge_base, head, selected,
                                     run.config["settings"], stopped, supporting_evidence=True)
     context["changed_paths"] = sorted(selected)
@@ -226,7 +261,10 @@ def expand_context(repo, env, run, context, paths, stopped):
     excluded = requested - allowed
     if excluded:
         context["excluded_paths"] = sorted(set(context.get("excluded_paths", [])) | excluded)
-    if len(allowed | context["sources"].get("current", {}).keys()) > 100:
+    count = len(allowed | context["sources"].get("current", {}).keys())
+    if context.get("attribution"):
+        count += sum(len(sources) for revision, sources in context["sources"].items() if revision != "current")
+    if count > 100:
         raise ValueError("Assessment exceeds its 100-source-file evidence limit.")
     for path in sorted(allowed):
         source = verification.read_requested_source(repo, env, run.head_sha, path, run.config["settings"], stopped,
@@ -234,6 +272,7 @@ def expand_context(repo, env, run, context, paths, stopped):
         context["sources"].setdefault("current", {})[path] = source
         context["diff"] += git_source.git(repo, env, "diff", "--no-ext-diff", "--no-textconv", "--unified=5",
                                    f"{run.base_sha}...{run.head_sha}", "--", path, stopped=stopped)
+        check_context_size(context, run.config["settings"])
     check_context_size(context, run.config["settings"])
     if excluded:
         raise verification.ResultValidationError("Necessary assessment evidence is excluded or unsupported by the review scope: "
@@ -241,6 +280,38 @@ def expand_context(repo, env, run, context, paths, stopped):
     if repeated:
         raise verification.ResultValidationError("Some requested files are already supplied.",
             review_context.evidence_feedback(repeated, "required_paths"))
+
+def expand_base_context(repo, env, run, context, paths, stopped):
+    """Load inert merge-base evidence through the same policy as current evidence."""
+    if response_model(context) is not AttributionResponse:
+        raise ValueError("This saved assessment does not support merge-base evidence requests.")
+    for path in paths:
+        git_source.repository_path(path)
+    supplied = context["sources"].get("original", {})
+    repeated = set(paths) & supplied.keys()
+    requested = set(paths) - supplied.keys()
+    if not requested:
+        raise verification.ResultValidationError("The AI requested merge-base files it had already received.",
+            review_context.evidence_feedback(paths, "required_base_paths"))
+    scope = {"base_sha": run.base_sha, "head_sha": run.head_sha}
+    allowed = verification.filter_context(repo, env, dict.fromkeys(requested, "# context\n"),
+                                          run.config["settings"], stopped, **scope)
+    allowed -= set(context.get("excluded_paths", []))
+    excluded = requested - allowed
+    if len(allowed) + sum(len(sources) for sources in context["sources"].values()) > 100:
+        raise ValueError("Assessment exceeds its 100-source-file evidence limit.")
+    for path in sorted(allowed):
+        source = verification.read_requested_source(repo, env, context["original_sha"], path,
+            run.config["settings"], stopped, revision="original", field="required_base_paths", **scope)
+        context["sources"].setdefault("original", {})[path] = source
+        check_context_size(context, run.config["settings"])
+    if excluded:
+        context["excluded_paths"] = sorted(set(context.get("excluded_paths", [])) | excluded)
+        raise verification.ResultValidationError("Necessary merge-base evidence is excluded or unsupported by the review scope: "
+            + ", ".join(sorted(excluded)), review_context.unavailable_evidence_feedback(excluded, "required_base_paths"))
+    if repeated:
+        raise verification.ResultValidationError("Some requested merge-base files are already supplied.",
+            review_context.evidence_feedback(repeated, "required_base_paths"))
 
 def validate_result(value, context):
     result = AssessmentResult.model_validate(value, strict=True).model_dump()
