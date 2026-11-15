@@ -52,6 +52,106 @@ class EmptySession:
         return kwargs["validate"]({"findings": [], "required_paths": []})
 
 
+@pytest.mark.parametrize("findings", [[None], [False], ["finding"], [[]], {}, "findings"])
+def test_history_findings_rejects_malformed_record_containers(findings):
+    with pytest.raises(ValueError, match="history"):
+        service.history_findings({"schema_version": "mortis.security/v1", "findings": findings})
+
+
+@pytest.mark.parametrize("previous", [True, ["report"], "report", False, {}])
+def test_scan_rejects_invalid_previous_before_snapshot(repository, previous):
+    session, progress = EmptySession(), []
+    with pytest.raises(ValueError, match="history"):
+        asyncio.run(service.scan(repository, session=session, scanner=scan_result,
+                                 previous=previous, progress=progress.append))
+    assert session.calls == [] and progress == []
+
+
+@pytest.mark.parametrize("update", [
+    {"id": None}, {"id": ""}, {"id": []}, {"fingerprint": None}, {"fingerprint": ""},
+    {"fingerprint": {}}, {"path": None}, {"title": None}, {"severity": []}, {"kind": None},
+    {"source_sha": None}, {"evidence": None}, {"evidence": [None]},
+    {"evidence": [{"path": []}]}, {"evidence": [{"path": "a.py", "quote": []}]},
+    {"locations": None}, {"ai_analysis": None}, {"sources": None}, {"version": "1"},
+    {"state": []}, {"rotation": []},
+    {"state": "false_positive", "fix_verification": None},
+    {"state": "false_positive", "fix_verification": []},
+    {"state": "false_positive", "fix_verification": "fixed"},
+    {"kind": "secret", "rule_id": "sample"},
+    {"kind": "dependency", "rule_id": "CVE-fixture"}, {"kind": "infrastructure"},
+])
+def test_scan_rejects_malformed_previous_finding_before_dispatch(repository, update):
+    finding = {"id": "old", "fingerprint": "legacy", "path": "a.py", "title": "Retained issue",
+               "severity": "high", "kind": "code", "source_sha": "a" * 40, "evidence": []}
+    session, progress = EmptySession(), []
+    with pytest.raises(ValueError, match="history"):
+        asyncio.run(service.scan(repository, session=session, scanner=scan_result,
+            previous={"schema_version": "mortis.security/v1", "findings": [{**finding, **update}]},
+            progress=progress.append))
+    assert session.calls == [] and progress == []
+
+
+def test_scan_rejects_previous_finding_missing_identity(repository):
+    with pytest.raises(ValueError, match="history"):
+        asyncio.run(service.scan(repository, session=EmptySession(), scanner=scan_result,
+            previous={"schema_version": "mortis.security/v1", "findings": [{}]}))
+
+
+def test_secret_rules_preserves_sparse_non_secret_history_and_nested_evidence():
+    rule = {"kind": "secret", "rule_id": "sample", "match_bytes": 8, "identity": "a" * 64}
+    report = {"schema_version": "mortis.security/v1", "findings": [{}, {"id": None, "path": "legacy.py"},
+        {"kind": "code", "evidence": []}, {"evidence": rule}, rule]}
+    expected = {key: rule[key] for key in ("rule_id", "match_bytes", "identity")}
+    assert service.secret_rules(report) == [expected, expected]
+    copied = service.history_findings(report)
+    copied[3]["evidence"]["rule_id"] = "changed"
+    assert report["findings"][3]["evidence"]["rule_id"] == "sample"
+
+
+@pytest.mark.parametrize("update", [{"rule_id": None}, {"match_bytes": None}, {"match_bytes": 0},
+                                    {"match_bytes": True}, {"identity": None}, {"identity": "bad"}])
+def test_secret_rules_rejects_invalid_redaction_metadata(update):
+    rule = {"kind": "secret", "rule_id": "sample", "match_bytes": 8, "identity": "a" * 64, **update}
+    with pytest.raises(ValueError, match="secret"):
+        service.secret_rules({"schema_version": "mortis.security/v1", "findings": [rule]})
+
+
+def test_secret_rules_rejects_missing_redaction_metadata():
+    with pytest.raises(ValueError, match="secret"):
+        service.secret_rules({"schema_version": "mortis.security/v1", "findings": [{"kind": "secret"}]})
+
+
+def test_scan_accepts_nested_legacy_evidence_without_mutating_history(repository):
+    finding = {"id": "old", "fingerprint": "legacy", "path": "a.py", "title": "Retained issue",
+        "severity": "high", "state": "false_positive", "fix_verification": {"verdict": "uncertain"},
+        "evidence": {"kind": "code", "path": "a.py",
+            "source_sha": git(repository, "rev-parse", "HEAD"), "evidence": []}}
+    previous = {"schema_version": "mortis.security/v1", "findings": [finding]}
+    report = asyncio.run(service.scan(repository, session=EmptySession(), scanner=scan_result, previous=previous))
+    assert report["status"] == "completed" and report["findings"] == [finding]
+    assert previous["findings"] == [finding]
+
+
+def test_scan_reuses_emitted_scanner_findings_without_changing_saved_report(repository):
+    def normalized_scanner(item, timeout, stopped):
+        return engine.normalize_trivy(item, {"Results": [
+            {"Target": str(item.files / ".env"), "Class": "secret", "Secrets": [{
+                "StartLine": 1, "EndLine": 1, "Offset": 6, "Match": "TOKEN=********", "RuleID": "test-token",
+                "Title": "Test token", "Severity": "HIGH"}]},
+            {"Target": str(item.files / "a.py"), "Vulnerabilities": [{"PkgName": "package",
+                "VulnerabilityID": "CVE-fixture", "InstalledVersion": "1.0", "Severity": "HIGH"}],
+             "Misconfigurations": [{"ID": "test-config", "Title": "Configuration issue", "Severity": "LOW"}]}]})
+
+    initial = asyncio.run(service.scan(repository, session=EmptySession(), scanner=normalized_scanner))
+    saved = json.dumps(initial, sort_keys=True)
+    repeated = asyncio.run(service.scan(repository, session=EmptySession(), scanner=normalized_scanner, previous=initial))
+    assert repeated["status"] == "completed"
+    assert {row["kind"] for row in repeated["findings"]} == {"secret", "dependency", "infrastructure"}
+    assert {row["id"] for row in repeated["findings"]} == {row["id"] for row in initial["findings"]}
+    assert all(row["version"] == 2 for row in repeated["findings"])
+    assert json.dumps(initial, sort_keys=True) == saved
+
+
 def test_scan_pins_local_commit_and_excludes_instructions_from_ai(repository):
     session = EmptySession()
     report = asyncio.run(service.scan(repository, session=session, scanner=scan_result))

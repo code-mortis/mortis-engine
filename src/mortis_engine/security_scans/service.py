@@ -169,7 +169,8 @@ def history_findings(previous):
     if not isinstance(previous, dict) or previous.get("schema_version") != "mortis.security/v1":
         raise ValueError("Previous security history must be a Mortis security report.")
     findings = previous.get("findings", [])
-    if not isinstance(findings, list) or len(findings) > 10000:
+    if (not isinstance(findings, list) or len(findings) > 10000
+            or any(not isinstance(finding, dict) for finding in findings)):
         raise ValueError("Previous security finding history is invalid or exceeds 10000 records.")
     return json.loads(json.dumps(findings))
 
@@ -179,6 +180,10 @@ def secret_rules(report):
     for finding in history_findings(report):
         evidence = finding["evidence"] if isinstance(finding.get("evidence"), dict) else finding
         if evidence.get("kind") == "secret":
+            name, size, identity = evidence.get("rule_id"), evidence.get("match_bytes"), evidence.get("identity")
+            if (not isinstance(name, str) or type(size) is not int or size <= 0
+                    or not isinstance(identity, str) or not re.fullmatch(r"[a-f0-9]{64}", identity)):
+                raise ValueError("Historical secret metadata is invalid; source cannot be safely redacted.")
             rules.append({key: evidence[key] for key in ("rule_id", "match_bytes", "identity")})
     return rules
 
@@ -195,9 +200,44 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
 
     policy = file_policy.policy(options)
     repository_name = str(Path(repository).expanduser().resolve())
+    previous_findings = history_findings(previous)
     if previous and previous.get("repository", repository_name) != repository_name:
         raise ValueError("Security history belongs to a different local repository.")
-    previous_findings = history_findings(previous)
+    for old in previous_findings:
+        if any(not isinstance(old.get(key), str) or not old[key].strip()
+               for key in ("id", "fingerprint", "path", "title", "severity")):
+            raise ValueError("Previous security finding history contains invalid identity or report fields.")
+        evidence = finding_evidence(old)
+        kind = evidence.get("kind")
+        if (not isinstance(kind, str) or kind not in {"code", "secret", "dependency", "infrastructure"}
+                or not isinstance(evidence.get("source_sha"), str) or not evidence["source_sha"]):
+            raise ValueError("Previous security finding history contains invalid source evidence.")
+        engine.relative_path(old["path"])
+        engine.relative_path(evidence.get("path"))
+        if (not isinstance(old.get("state", "open"), str)
+                or type(old.get("version", 0)) is not int or old.get("version", 0) < 0
+                or old.get("rotation") is not None and not isinstance(old["rotation"], dict)
+                or not isinstance(old.get("fix_verification", {}), dict)
+                or not isinstance(evidence.get("sources", []), list)
+                or any(not isinstance(value, str) for value in evidence.get("sources", []))):
+            raise ValueError("Previous security finding history contains invalid finding state.")
+        analysis = evidence.get("ai_analysis", {})
+        if not isinstance(analysis, dict):
+            raise ValueError("Previous security finding history contains invalid AI evidence.")
+        for citations in (evidence.get("evidence", []), evidence.get("locations", []), analysis.get("evidence", [])):
+            if (not isinstance(citations, list) or any(not isinstance(citation, dict)
+                    or not isinstance(citation.get("path"), str)
+                    or not isinstance(citation.get("quote", ""), str) for citation in citations)):
+                raise ValueError("Previous security finding history contains invalid citations.")
+            for citation in citations:
+                engine.relative_path(citation["path"])
+        required = ({"secret": ("rule_id", "identity"), "dependency": ("rule_id", "package", "installed_version"),
+                     "infrastructure": ("rule_id",)}).get(kind, ())
+        if (any(not isinstance(evidence.get(key), str) for key in required)
+                or kind == "secret" and (type(evidence.get("match_offset")) is not int or evidence["match_offset"] < 0)
+                or kind == "dependency" and not isinstance(evidence.get("fixed_version", ""), str)):
+            raise ValueError("Previous security finding history contains incomplete scanner evidence.")
+    previous_rules = secret_rules(previous)
     stages = {name: {"status": "pending"} for name in ("snapshot", "trivy", "analysis", "assessment", "verification", "report")}
     findings, assessments, verifications, problems = [], [], [], []
     candidate_rows = []
@@ -205,7 +245,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
     progress({"phase": "snapshot"})
     with source.local_repository(repository, object_cache=getattr(getattr(session, "history", None), "objects", None)) as (repo, env), tempfile.TemporaryDirectory(prefix="mortis-security-") as temporary:
         sha = source.resolve_commit(repo, env, ref)
-        item = engine.Snapshot(Path(temporary), sha, env, stopped, git=repo, key=identity_key(create=not (previous and secret_rules(previous))))
+        item = engine.Snapshot(Path(temporary), sha, env, stopped, git=repo, key=identity_key(create=not previous_rules))
         item.deadline = deadline
         item.repository = Path(repository).expanduser().resolve()
         for candidate in (item.repository, *item.repository.parents):
@@ -243,7 +283,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         problems.extend(result["problems"])
         stages["trivy"] = {"status": "partial" if result["problems"] else "completed", "metadata": result.get("metadata", {})}
         # Restore retained secret identities before preparing any model context.
-        item.secret_rules.extend(secret_rules(previous) if previous else [])
+        item.secret_rules.extend(previous_rules)
         previous_ids = {old["id"]: old for old in previous_findings}
         by_fingerprint = {old.get("fingerprint"): old for old in previous_findings}
         for finding in result["findings"]:

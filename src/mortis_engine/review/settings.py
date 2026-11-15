@@ -60,7 +60,7 @@ class RepoSettings(RunLimits):
         for entry in value.get("rules", []):
             if (not isinstance(entry, dict)
                     or set(entry) - {"path", "rule", "merge_system_rule"}):
-                raise ValueError("rules.rules entries require path, rule and merge_system_rule fields.")
+                raise ValueError("rules.rules entries support only path, rule and merge_system_rule fields.")
         return planning._rule_layer(value)
 
     @field_validator("exclusions")
@@ -128,9 +128,9 @@ def load_scan(repo, env, sha):
     review, scan = _tables(repo, env, sha)
     shared = RepoSettings.model_validate(review)
     scan = dict(scan)
-    model = scan.pop("model", "") or shared.model
+    model = scan.pop("model", "")
     if not isinstance(model, str) or len(model) > 150:
         raise ValueError("Scan model must be a model ID of at most 150 characters.")
     return {**ScanOptions.model_validate({"language": shared.language, "exclusions": shared.exclusions,
                                          "max_output_tokens": shared.max_output_tokens,
-                                         **scan}).model_dump(), "model": model.strip()}
+                                         **scan}).model_dump(), "model": (model or shared.model).strip()}

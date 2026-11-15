@@ -159,6 +159,23 @@ def test_truncated_tool_arguments_keep_output_limit_and_usage_diagnostics():
     assert caught.value.usage.total_tokens == 12 and caught.value.request_id == "request-fixture"
 
 
+def test_chat_null_tool_calls_preserves_structured_output_and_usage():
+    payload = result("openai")
+    payload["choices"][0]["message"]["tool_calls"] = None
+    response = llm_http.decode_response("openai", payload, request(output_schema=SCHEMA))
+    assert response.tool_calls == [] and response.output == {"ok": True}
+    assert response.usage.total_tokens == 12 and response.request_id == "request-fixture"
+
+
+@pytest.mark.parametrize("tool_calls", [False, 0, "", {}, [None], [{"type": "function"}]])
+def test_chat_non_null_malformed_tool_calls_are_rejected(tool_calls):
+    payload = result("openai")
+    payload["choices"][0]["message"]["tool_calls"] = tool_calls
+    with pytest.raises(llm_http.InferenceError) as caught:
+        llm_http.decode_response("openai", payload, request())
+    assert caught.value.code == "malformed_response" and caught.value.usage.total_tokens == 12
+
+
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 def test_refusal_and_missing_usage(protocol):
     payload = result(protocol, usage=False)
@@ -232,7 +249,8 @@ def test_anthropic_unlimited_output_explains_required_api_limit():
 
 
 @pytest.mark.parametrize("protocol,key", [("openai", "tools.0.function.strict"),
-                                           ("openai-responses", "tools.0.strict")])
+                                           ("openai-responses", "tools.0.strict"),
+                                           ("anthropic", "tools.0.strict")])
 def test_existing_tool_strict_options_and_reasoning_defaults(protocol, key):
     task = request(tools=[Tool(name="evidence", parameters=SCHEMA)])
     saved = connection(protocol, extra_body={key: False, "reasoning.effort": "high", "service_tier": "flex"})
@@ -245,6 +263,21 @@ def test_existing_tool_strict_options_and_reasoning_defaults(protocol, key):
     if protocol == "openai-responses":
         with pytest.raises(ValueError, match="explicitly selected"):
             llm_http.encode_request(protocol, saved, request(tools=task.tools, effort="low"))
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("key", ["tools.0.strict", "tools.0.function.strict"])
+def test_tool_strict_options_cannot_create_missing_tools(protocol, key):
+    with pytest.raises(ValueError):
+        llm_http.encode_request(protocol, connection(protocol, extra_body={key: False}), request())
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+@pytest.mark.parametrize("key,value", [("tools.1.strict", False), ("tools.0.strict", 0)])
+def test_tool_strict_options_require_existing_index_and_boolean(protocol, key, value):
+    task = request(tools=[Tool(name="evidence", parameters=SCHEMA)])
+    with pytest.raises(ValueError):
+        llm_http.encode_request(protocol, connection(protocol, extra_body={key: value}), task)
 
 
 def test_anthropic_effort_default_and_thinking_budget():

@@ -151,6 +151,28 @@ def test_invalid_rule_lists_fail_before_merging(repo, config):
         settings.load(isolated, env, base)
 
 
+@pytest.mark.parametrize("entry", [{}, {"path": "*.py"}, {"path": "*.py", "rule": "Check authorization"},
+                                   {"path": "*.py", "merge_system_rule": True}])
+def test_rule_entries_preserve_supported_defaults(entry):
+    rules = settings.RepoSettings(rules={"rules": [entry]}).rules
+    assert rules == {"rules": [{"path": "", "rule": "", "merge_system_rule": False, **entry}],
+                     "include": [], "exclude": []}
+
+
+@pytest.mark.parametrize("model", [0, False, None, [], {}, 1, "x" * 151])
+def test_scan_model_rejects_invalid_values_before_shared_fallback(monkeypatch, model):
+    monkeypatch.setattr(settings, "_tables", lambda *args: ({"model": "shared-model"}, {"model": model}))
+    with pytest.raises(ValueError, match="Scan model"):
+        settings.load_scan(None, None, None)
+
+
+@pytest.mark.parametrize("scan,expected", [({}, "shared-model"), ({"model": ""}, "shared-model"),
+                                          ({"model": " scan-model "}, "scan-model")])
+def test_scan_model_preserves_shared_fallback_and_explicit_override(monkeypatch, scan, expected):
+    monkeypatch.setattr(settings, "_tables", lambda *args: ({"model": "shared-model"}, scan))
+    assert settings.load_scan(None, None, None)["model"] == expected
+
+
 def test_safe_path_ignores_relative_git_executable(repo, monkeypatch):
     import os
     import shutil
