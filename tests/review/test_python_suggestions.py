@@ -139,8 +139,8 @@ def test_initial_assessment_strips_only_invalid_suggestion(repo, suggestion, sup
     assert [stage for stage, _ in session.calls] == ["assessment", "summary"]
 
 
-def test_saved_targeted_retry_uses_pinned_source_and_retains_origin(repo, tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+def test_saved_targeted_retry_uses_pinned_source_and_retains_origin(repo, tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("suggestion-state")))
     base = commit(repo, {"app.py": "def inverse(value):\n    return value\n"})
     head = commit(repo, {"app.py": SOURCE})
     snapshot = {**candidate(head), "suggestion_code": "    return ("}
