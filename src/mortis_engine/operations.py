@@ -20,6 +20,7 @@ from .workflow import Session
 def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=None,
         finding_run=None, resume=None, effort=None, rotations=(), concurrency=None, progress=lambda value: None,
         overrides=None):
+    invocation_started = time.monotonic()
     if kind not in {"scan", "verify", "background", "summary"}:
         raise ValueError("Choose a supported local workflow.")
     if concurrency is not None and kind != "scan":
@@ -108,6 +109,7 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                     apply_decisions(history, result, "scan", history.row(run_id)["scope"], decisions)
                     result["grade"] = security.grade_for(row["severity"] for row in result.get("findings", [])
                         if row.get("state", "open") in {"open", "accepted_risk"}) if result["status"] == "completed" else None
+                    result["elapsed_seconds"] = time.monotonic() - invocation_started
                 history.finish(run_id, result)
                 return result
 

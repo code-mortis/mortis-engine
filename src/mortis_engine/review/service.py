@@ -65,6 +65,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                  effort=None, graph=False, resume=None, profile=None, on_plan=None, progress=lambda value: None,
                  concurrency=None, overrides=None):
     """Review local inputs with the saved connection and independent workflow budgets."""
+    invocation_started = time.monotonic()
     started = time.time()
     if resume and (concurrency is not None or overrides):
         raise ValueError("--resume uses the inputs and options of the saved run.")
@@ -166,5 +167,6 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 result["usage"] = session.usage()
                 result["usage"]["budget_exceeded"] |= raw["summary"]["budget_exceeded"]
                 result = context.sanitize(result, credentials)
+                result["elapsed_seconds"] = time.monotonic() - invocation_started
                 history.finish(run_id, result)
                 return result

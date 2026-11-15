@@ -15,6 +15,8 @@ from mortis_engine import config
 from mortis_engine.history import History
 from mortis_engine.review import review_local, settings
 
+from .reports import destinations, output_options, write_outputs
+
 LIMIT_FLAGS = ("max_output_tokens", "token_budget", "timeout_seconds", "max_files", "assessment_token_budget",
                "verification_token_budget", "summary_token_budget", "summary_timeout_seconds")
 GRAPH_LIMIT_FLAGS = ("max_files", "max_file_bytes", "max_source_bytes")
@@ -155,6 +157,7 @@ def render(result):
 
 
 def run(args):
+    outputs = destinations(args.output)
     overrides = limit_overrides(args)
     settings.apply_overrides({}, overrides)
     graph_limits = {key: getattr(args, "graph_" + key) for key in GRAPH_LIMIT_FLAGS
@@ -181,6 +184,7 @@ def run(args):
                                   connection=config.connection(name, profile), get_credentials=lambda: config.credentials(profile),
                                   on_plan=announce, profile=name, effort=args.effort, graph=args.graph, resume=args.resume,
                                   progress=progress, concurrency=args.concurrency, overrides=overrides)
+        write_outputs(result, outputs)
         print(json.dumps(result, indent=2) if args.format == "json" else render(result))
     finally:
         print(f"Elapsed: {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)
@@ -231,4 +235,5 @@ def add_parser(commands):
                             help=f"Override graph {field} for this run (requires --graph; positive integer)")
     execution_options(parser)
     options(parser)
+    output_options(parser)
     parser.set_defaults(run=run)

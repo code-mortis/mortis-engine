@@ -92,6 +92,48 @@ Mortis assesses candidates before reporting confirmed findings and generates a s
 
 The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed only when all assigned units pass validation. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Progress goes to stderr. Exit status 0 indicates completed analysis or no eligible changes, 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
 
+## Save and export reports
+
+Use `--output` once or several times to save a review or security scan. The filename
+extension selects Markdown (`.md` or `.markdown`) or structured JSON (`.json`):
+
+```sh
+mortis review --all --progress --output review.md --output review.json
+mortis scan --ref HEAD --progress --output scan.md --output scan.json
+```
+
+The terminal still shows the normal report; `--format json` continues to control stdout.
+Progress and elapsed time stay on stderr. Both files describe the same analysis and
+do not require extra AI calls. Partial reports are saved too, with their incomplete
+coverage and errors preserved; review and scan exit codes retain their usual meaning.
+
+Markdown includes the summary and any generated groups/diagram, findings and evidence,
+supported suggestions or remediation, coverage, errors, model, token usage and duration.
+JSON contains the complete versioned result. New review/scan results save
+`elapsed_seconds`, measuring the analysis invocation, including preparation and follow-up
+stages but excluding export. For resumed runs it measures that invocation. Older saved
+reports remain unchanged and show unavailable timing rather than an estimated duration.
+
+Export an existing saved result without a connection or another analysis:
+
+```sh
+mortis report --run RUN_ID --output reports/review.md --output reports/review.json
+```
+
+Use `--repo` when selecting a different local repository. The export uses the original
+saved review or scan report; later retries and triage remain available through
+`mortis findings`. Successful export returns exit code 0 even if the saved analysis was
+partial; its original status remains in the report.
+
+Output files are private to the current user. Missing parent directories are created
+when saving. Existing files, symlinks, duplicate destinations and unsupported extensions
+are rejected, so reports cannot overwrite source or prior output. Choose new filenames
+when saving another report. A write failure reports the saved run ID so you can export
+it again without repeating analysis.
+
+When saving inside the repository, add the output directory to `.gitignore` if you
+want future working-tree reviews to exclude those generated reports.
+
 ## Saved results and follow-up commands
 
 ```sh
