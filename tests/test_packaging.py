@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -32,3 +33,23 @@ def test_source_distribution_rejects_private_generated_and_unsafe_paths(name):
 def test_wheel_rejects_nonruntime_files():
     with pytest.raises(AssertionError):
         packaging.check_names({"tests/test_cli.py"}, wheel=True)
+
+
+@pytest.mark.parametrize("extra", [None, ".gitignore", "old.whl", "README.txt", ".unexpected"])
+def test_distribution_inventory_allows_only_archives_and_uv_gitignore(tmp_path, extra):
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
+    directory = tmp_path / "dist"
+    directory.mkdir()
+    for name in ("mortis_engine-0.1.0-py3-none-any.whl", "mortis_engine-0.1.0.tar.gz"):
+        (directory / name).touch()
+    if extra:
+        (directory / extra).write_text("*")
+    with patch.object(packaging.zipfile, "ZipFile", side_effect=RuntimeError("archive validation reached")) as archive:
+        if extra in {None, ".gitignore"}:
+            with pytest.raises(RuntimeError, match="archive validation reached"):
+                packaging.check_dist(directory, tmp_path)
+            archive.assert_called_once()
+        else:
+            with pytest.raises(AssertionError, match="Expected exactly one wheel"):
+                packaging.check_dist(directory, tmp_path)
+            archive.assert_not_called()

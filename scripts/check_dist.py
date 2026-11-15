@@ -37,7 +37,11 @@ def check_names(names, *, wheel):
 def check_dist(directory, root):
     version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
     wheel, sdist = directory / f"mortis_engine-{version}-py3-none-any.whl", directory / f"mortis_engine-{version}.tar.gz"
-    assert set(directory.iterdir()) == {wheel, sdist}, "Expected exactly one wheel and one source distribution"
+    # uv build creates .gitignore alongside the distributions.
+    artifacts = {path for path in directory.iterdir() if not (path.name == ".gitignore" and path.is_file())}
+    assert artifacts == {wheel, sdist}, (
+        f"Expected exactly one wheel and one source distribution; found: {sorted(path.name for path in artifacts)}"
+    )
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         check_names(names, wheel=True)

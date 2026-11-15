@@ -16,8 +16,8 @@ uv build
 uv run --locked python scripts/check_dist.py
 ```
 
-Start with an empty `dist/` directory; the archive check rejects stale or extra
-artifacts. It verifies archive paths, private/generated-file exclusions, required
+Start with an empty `dist/` directory; the archive check allows uv's generated
+`.gitignore` but rejects stale or extra artifacts. It verifies archive paths, private/generated-file exclusions, required
 runtime/parser assets, license, version metadata, and source/test/evaluation files.
 The source archive deliberately retains the frozen evaluation baseline and fixtures
 used by tests. Neither archive includes local agent settings or GitHub configuration.
