@@ -1,0 +1,155 @@
+"""Opt-in discovery shares accounting while keeping prior validated coverage."""
+
+import json
+import time
+
+import pytest
+from pydantic import ValidationError
+
+from mortis_engine import gateway
+from mortis_engine.history import History
+from mortis_engine.llm_http import InferenceError
+from mortis_engine.review import engine
+from mortis_engine.review.settings import RepoSettings
+from mortis_engine.workflow import Session
+
+from .git_helpers import commit
+from .test_execution import CONNECTION, OPTIONS, draft_finding, final, plan
+
+
+def test_default_and_legacy_requests_are_unchanged_and_opt_in_is_strict(monkeypatch):
+    value = plan()
+    before, = engine.prepare_batches(value, CONNECTION, OPTIONS, {})
+    after, = engine.prepare_batches(value, CONNECTION, {**OPTIONS, "second_pass": False}, {})
+    assert before.request == after.request
+    assert RepoSettings().second_pass is False
+    with pytest.raises(ValidationError):
+        RepoSettings(second_pass="true")
+    calls = []
+
+    async def send(connection, credentials, request, **kwargs):
+        calls.append(request)
+        return final(request)
+
+    monkeypatch.setattr(gateway, "send", send)
+    status, raw, _ = engine.run(None, {}, value, CONNECTION, OPTIONS, {})
+    assert status == "completed" and len(calls) == 1 and "second_pass" not in raw
+
+
+def test_second_discovery_is_separate_skips_exact_repeats_and_reuses_saved_tasks(repo, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(repo.parent / (repo.name + "-state")))
+    commit(repo, {"app.py": "value = 0\n"})
+    calls = []
+
+    async def send(connection, credentials, request, **kwargs):
+        payload = json.loads(request.messages[0].content)
+        calls.append(request)
+        response = final(request)
+        response.output["findings"] = [draft_finding(request)]
+        if payload.get("discovery_pass") == 2:
+            assert len(payload["previous_candidates"]) == 1
+            assert "untrusted" in request.instructions and "additional candidates" in request.instructions
+            response.output["findings"].append(draft_finding(request, content="Different defect"))
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    options = {**OPTIONS, "second_pass": True}
+    with History(repo) as history:
+        run_id = history.begin("review", "fixture", {})
+        session = Session(CONNECTION, {}, history=history, run_id=run_id)
+        first = engine.run(None, {}, plan(), CONNECTION, options, {}, session=session)
+        assert len(history.attempts(run_id)) == 2
+    with History(repo) as history:
+        restored = Session(CONNECTION, {}, history=history, run_id=run_id)
+        resumed = engine.run(None, {}, plan(), CONNECTION, options, {}, session=restored)
+    assert len(calls) == 2 and first == resumed
+    assert calls[0].session_id != calls[1].session_id
+    assert json.loads(calls[1].messages[0].content)["task_key"].endswith(":discovery:2")
+    status, raw, candidates = first
+    assert status == "completed" and len(candidates) == 2
+    assert raw["second_pass"]["added_candidates"] == 1
+    assert raw["second_pass"]["status"] == "completed"
+    assert raw["summary"]["total_tokens"] == 20
+    assert {row["stage"] for row in raw["usage"]} == {"analysis"}
+
+
+@pytest.mark.parametrize("reason", ["budget", "usage_unknown", "deadline", "cancelled"])
+def test_second_pass_cannot_reset_budget_unknown_usage_or_deadline(monkeypatch, reason):
+    calls, stopped = [], [False]
+    options = {**OPTIONS, "second_pass": True}
+    batch, = engine.prepare_batches(plan(), CONNECTION, options, {})
+    budget = gateway.reservation(CONNECTION, batch.request) + batch.request.max_output_tokens
+    if reason == "budget":
+        options["token_budget"] = budget
+
+    async def send(connection, credentials, request, **kwargs):
+        calls.append(request)
+        response = final(request, tokens=None if reason == "usage_unknown" else budget if reason == "budget" else 10)
+        response.output["findings"] = [draft_finding(request)]
+        if reason == "deadline":
+            monkeypatch.setattr(time, "monotonic", lambda: started + 3)
+        if reason == "cancelled":
+            stopped[0] = True
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    session = Session(CONNECTION, {})
+    started = time.monotonic()
+    status, raw, candidates = engine.run(None, {}, plan(), CONNECTION, options, {}, session=session,
+        deadline=started + 2 if reason == "deadline" else None, stopped=lambda: stopped[0])
+    assert status == "partial" and len(calls) == len(candidates) == 1
+    assert raw["manifest"]["coverage"]["completed"]
+    assert raw["second_pass"]["status"] == "partial"
+    assert raw["errors"][0]["message"] == "second_pass_" + reason
+    assert len(session.records) == 1
+    if reason == "usage_unknown":
+        assert raw["summary"]["total_tokens"] is None
+        assert raw["summary"]["reserved_tokens"] > 16384
+        assert next(iter(session.records.values()))[1]["consumption_unknown"] is True
+
+
+def test_second_pass_keeps_independent_repair_rounds_and_first_partial_coverage(monkeypatch):
+    calls = []
+
+    async def send(connection, credentials, request, **kwargs):
+        payload = json.loads(request.messages[0].content)
+        calls.append(request)
+        if payload["assigned_units"][0]["path"] == "app1.py":
+            raise InferenceError("auth", "Fixture failure", consumption_unknown=False)
+        response = final(request)
+        second = payload.get("discovery_pass") == 2
+        if second and len(request.messages) == 1:
+            response.output["completed_units"] = []
+        if second and len(request.messages) == 2:
+            response.output["findings"] = [draft_finding(request)]
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    status, raw, candidates = engine.run(None, {}, plan(2), CONNECTION, {**OPTIONS, "second_pass": True}, {})
+    assert status == "partial" and len(candidates) == 1 and len(calls) == 4
+    assert len(raw["manifest"]["coverage"]["completed"]) == len(raw["manifest"]["coverage"]["failed"]) == 1
+    assert raw["second_pass"]["status"] == "completed"
+    assert {unit["path"] for unit in raw["second_pass"]["units"]} == {"app0.py"}
+    assert "validation_diagnostics" in json.loads(calls[-1].messages[-1].content)
+
+
+def test_second_pass_unknown_dispatch_is_not_replayed_on_resume(monkeypatch):
+    calls = []
+
+    async def send(connection, credentials, request, **kwargs):
+        calls.append(request)
+        if len(calls) == 2:
+            raise InferenceError("interrupted", "Unknown dispatch", consumption_unknown=True)
+        response = final(request)
+        response.output["findings"] = [draft_finding(request)]
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    session = Session(CONNECTION, {})
+    options = {**OPTIONS, "second_pass": True}
+    first = engine.run(None, {}, plan(), CONNECTION, options, {}, session=session)
+    resumed = engine.run(None, {}, plan(), CONNECTION, options, {}, session=session)
+    assert first == resumed and len(calls) == 2
+    assert first[0] == "partial" and len(first[2]) == 1
+    assert first[1]["summary"]["total_tokens"] is None
+    assert session.usage()["reserved_tokens"] > 16384
