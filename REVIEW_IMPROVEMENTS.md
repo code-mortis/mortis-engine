@@ -49,5 +49,54 @@ with scripted provider responses. They do not measure live model quality.
 The experiment's prospective acceptance gate remains closed: offline quality is
 unproven, unknown usage remains unknown and incomplete coverage is not waived.
 
-Full integrated pytest, Ruff, packaging, installed-wheel CLI checks and final
-replays are the remaining verification step at this commit.
+## Final integrated checks
+
+The exclusive verification runner checked clean integration source
+`b86c2ac377e6bb5392d7bbd3cd366aebc941e8bf`. Later changes only record these results.
+All commands used isolated temporary XDG configuration/state and the integration
+source path, with no live provider calls or personal credentials.
+
+| Check | Result |
+| --- | --- |
+| `python -m pytest -q` | 866 passed, 1 skipped in 87.89 seconds. Optional native parser test skipped because `tree_sitter` is absent. |
+| `ruff check .` | Passed. |
+| `uv build --offline --no-build-isolation --python <existing-venv>/bin/python --out-dir /private/tmp/mortis-final-dist` | Tooling failure: installed uv panicked in macOS `system-configuration` with `Attempted to create a NULL object`. |
+| `python -m hatchling build --directory /private/tmp/mortis-final-dist` | Configured project backend built both wheel and sdist offline using cached build dependencies. |
+| Installed wheel | Offline installation, import provenance, CLI help, review help and JSON preview passed. Preview explicitly forbade profile, credential, provider and History access; no state/config writes occurred. |
+| Normal and second-pass offline replays | Both completed on clean integrated source; expected acceptance comparison exit 1. |
+| Git checks | Clean original checkout; original branch and `main` still point to `35fbc999`. Integration diff whitespace check passed. |
+
+The shared interpreter was `/Users/carlosmontecinos/Projects/mortis/mortis-engine/.venv/bin/python`;
+`PYTHONPATH` selected this integration worktree's `src` for source checks. The
+installed-wheel smoke imported from its isolated installation instead.
+
+### Recorded replay results
+
+`evals/review_improvements/integrated-results.json` records input hashes, engine
+revision, artifact hashes, metrics and per-case outcomes. The original frozen
+baseline remains unchanged. Full local request/response artifacts are
+`/private/tmp/mortis-final-eval-normal.json` and `/private/tmp/mortis-final-eval-second.json`;
+the evaluator commands in `SECOND_PASS.md` reproduce them without providers.
+
+| Metric | Frozen baseline | Integrated normal | Integrated second pass |
+| --- | ---: | ---: | ---: |
+| Expected defects discovered | 1/2 | 1/2 | 2/2 |
+| Confirmed true / false | 1 / 0 | 1 / 0 | 2 / 0 |
+| Candidate / confirmation duplicates | 0 / 0 | 0 / 0 | 0 / 0 |
+| Incomplete cases | 1 | 0 | 1 |
+| Known tokens | 130 | 120 | 180 |
+| Requests with unknown usage | 2 | 2 | 2 |
+| Total consumption | Unknown | Unknown | Unknown |
+
+Integrated normal replay now reads the supporting test and rejects c04. The second
+pass discovers c03 through its scripted response and normal assessment, while c05's
+unknown consumption prevents another dispatch and remains incomplete. These are
+pipeline measurements, not estimates of model recall, precision, cost or latency.
+Default enablement is not accepted; `second_pass` remains false by default.
+
+Full check logs are `/private/tmp/mortis-final-pytest.log`,
+`/private/tmp/mortis-final-ruff.log`, `/private/tmp/mortis-final-build.log`,
+`/private/tmp/mortis-final-hatch.log`, `/private/tmp/mortis-final-wheel-smoke.log`
+and `/private/tmp/mortis-final-eval-compare.log`. There were no pushes, PRs or
+real-provider evaluations. Literal navigation does not resolve aliases or
+homonyms, and Python syntax validation does not establish runtime correctness.

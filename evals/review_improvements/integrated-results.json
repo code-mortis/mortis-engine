@@ -1,0 +1,213 @@
+{
+  "acceptance": {
+    "accepted": false,
+    "reason": "Scripted offline evidence does not establish live quality; incomplete coverage and unknown consumption remain."
+  },
+  "runs": {
+    "normal": {
+      "case_outcomes": [
+        {
+          "candidates": 1,
+          "findings": 1,
+          "id": "c01",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 1,
+          "findings": 0,
+          "id": "c02",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 0,
+          "findings": 0,
+          "id": "c03",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 1,
+          "findings": 0,
+          "id": "c04",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 0,
+          "findings": 0,
+          "id": "c05",
+          "status": "completed",
+          "workflow_status": "completed"
+        }
+      ],
+      "engine_dirty": false,
+      "engine_revision": "b86c2ac377e6bb5392d7bbd3cd366aebc941e8bf",
+      "evidence_kind": "offline_scripted_replay",
+      "input_manifest": {
+        "case_pairs": [
+          {
+            "base_sha": "3f53c680e7a09d45827400cce752b764740ceb41",
+            "head_sha": "52d3675dbcf311cf64b10c97f3b03367f675a5b9",
+            "id": "c01"
+          },
+          {
+            "base_sha": "623b9861929d2194da55dada2b7eda164e0a923a",
+            "head_sha": "0e8be75c8f717617413102959c669a92fc3a282f",
+            "id": "c02"
+          },
+          {
+            "base_sha": "4fd52a8c7f4400ab3995c775b4d4845390a3acae",
+            "head_sha": "708292477e51d230f128df832d9b453c4f874ad3",
+            "id": "c03"
+          },
+          {
+            "base_sha": "2ac1263fd96ec13c27636aa7f1d585e7d0a0f4ef",
+            "head_sha": "718e602df7057264d9110f40e72acef253d25c9f",
+            "id": "c04"
+          },
+          {
+            "base_sha": "21b13a45d5c7d2b59fb66d55b6438bb676b1cc2e",
+            "head_sha": "a3b8d682ebaa4c6431fac556053d447ca9573066",
+            "id": "c05"
+          }
+        ],
+        "engine_revision": "35fbc999dd7fd4bf42251b22c04059dfdbc51c22",
+        "evidence_kind": "offline_scripted_replay",
+        "inputs_sha256": {
+          "expected.json": "c6548922fc162980de1a1f393cebeaa631494be94a3a114a1d32a9dddf4989d8",
+          "fixtures/cases.json": "2eb237b703958a01ba3e1d795bdd8a227a13e17173762c1a392b54af9ca56913",
+          "fixtures/replay.json": "19580324b56129d1365a41c4461214f6e6311a42553761a6470a3c0febc3c831"
+        },
+        "quality_evidence": false,
+        "schema_version": "mortis.review-eval-baseline/v1"
+      },
+      "metrics": {
+        "completed_files": 5,
+        "confirmed_false": 0,
+        "confirmed_precision": 1.0,
+        "confirmed_true": 1,
+        "discovered_defects": 1,
+        "discovery_recall": 0.5,
+        "duplicate_candidates": 0,
+        "duplicate_confirmations": 0,
+        "expected_defects": 2,
+        "incomplete_cases": 0,
+        "known_tokens": 120,
+        "raw_candidates": 3,
+        "selected_files": 5,
+        "total_tokens": null,
+        "unknown_usage_requests": 2
+      },
+      "quality_evidence": false,
+      "raw_artifact_sha256": "dad9ee3e3d3a0f4beeb4073b33e0cb6b667913ad5ffc694bb6fcf5b0adb160b9",
+      "recording_sha256": "19580324b56129d1365a41c4461214f6e6311a42553761a6470a3c0febc3c831",
+      "schema_version": "mortis.review-eval/v1",
+      "second_pass": false
+    },
+    "second": {
+      "case_outcomes": [
+        {
+          "candidates": 1,
+          "findings": 1,
+          "id": "c01",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 1,
+          "findings": 0,
+          "id": "c02",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 1,
+          "findings": 1,
+          "id": "c03",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 1,
+          "findings": 0,
+          "id": "c04",
+          "status": "completed",
+          "workflow_status": "completed"
+        },
+        {
+          "candidates": 0,
+          "findings": 0,
+          "id": "c05",
+          "status": "partial",
+          "workflow_status": "completed"
+        }
+      ],
+      "engine_dirty": false,
+      "engine_revision": "b86c2ac377e6bb5392d7bbd3cd366aebc941e8bf",
+      "evidence_kind": "offline_scripted_replay",
+      "input_manifest": {
+        "case_pairs": [
+          {
+            "base_sha": "3f53c680e7a09d45827400cce752b764740ceb41",
+            "head_sha": "52d3675dbcf311cf64b10c97f3b03367f675a5b9",
+            "id": "c01"
+          },
+          {
+            "base_sha": "623b9861929d2194da55dada2b7eda164e0a923a",
+            "head_sha": "0e8be75c8f717617413102959c669a92fc3a282f",
+            "id": "c02"
+          },
+          {
+            "base_sha": "4fd52a8c7f4400ab3995c775b4d4845390a3acae",
+            "head_sha": "708292477e51d230f128df832d9b453c4f874ad3",
+            "id": "c03"
+          },
+          {
+            "base_sha": "2ac1263fd96ec13c27636aa7f1d585e7d0a0f4ef",
+            "head_sha": "718e602df7057264d9110f40e72acef253d25c9f",
+            "id": "c04"
+          },
+          {
+            "base_sha": "21b13a45d5c7d2b59fb66d55b6438bb676b1cc2e",
+            "head_sha": "a3b8d682ebaa4c6431fac556053d447ca9573066",
+            "id": "c05"
+          }
+        ],
+        "engine_revision": "35fbc999dd7fd4bf42251b22c04059dfdbc51c22",
+        "evidence_kind": "offline_scripted_replay",
+        "inputs_sha256": {
+          "expected.json": "c6548922fc162980de1a1f393cebeaa631494be94a3a114a1d32a9dddf4989d8",
+          "fixtures/cases.json": "2eb237b703958a01ba3e1d795bdd8a227a13e17173762c1a392b54af9ca56913",
+          "fixtures/replay.json": "19580324b56129d1365a41c4461214f6e6311a42553761a6470a3c0febc3c831"
+        },
+        "quality_evidence": false,
+        "schema_version": "mortis.review-eval-baseline/v1"
+      },
+      "metrics": {
+        "completed_files": 5,
+        "confirmed_false": 0,
+        "confirmed_precision": 1.0,
+        "confirmed_true": 2,
+        "discovered_defects": 2,
+        "discovery_recall": 1.0,
+        "duplicate_candidates": 0,
+        "duplicate_confirmations": 0,
+        "expected_defects": 2,
+        "incomplete_cases": 1,
+        "known_tokens": 180,
+        "raw_candidates": 4,
+        "selected_files": 5,
+        "total_tokens": null,
+        "unknown_usage_requests": 2
+      },
+      "quality_evidence": false,
+      "raw_artifact_sha256": "0d1a59a3736bdddcb00a5ab21b5e713eb07bf03fff6aa27e63bd361e8335000c",
+      "recording_sha256": "b2c264cc3c00be20baf2c38a024f3deeadc1cb488264a71fbcbf8cec624772b5",
+      "schema_version": "mortis.review-eval/v1",
+      "second_pass": true
+    }
+  },
+  "schema_version": "mortis.review-evaluation-summary/v1"
+}
