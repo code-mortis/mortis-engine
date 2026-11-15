@@ -129,6 +129,30 @@ def test_unknown_original_usage_and_changed_connection_block_before_credentials(
                                     get_credentials=lambda: pytest.fail("credentials read"))
 
 
+@pytest.mark.parametrize("failure", ["redaction", "identifier", "credentials"])
+def test_retry_preflight_failure_does_not_create_child_run(local, monkeypatch, failure):
+    repo, _, _ = local
+    parent = failed_review(local, monkeypatch)
+    with History(repo) as history:
+        original = dict(history.row(parent))
+    monkeypatch.setattr(gateway, "send", lambda *args, **kwargs: pytest.fail("Dispatched withheld retry"))
+
+    def get_credentials():
+        if failure == "credentials":
+            raise ValueError("Fixture credentials unavailable")
+        return {"api_key": "app.py" if failure == "identifier" else "return 1 / value"}
+
+    error = {"redaction": "safe redaction", "identifier": "structural identifier", "credentials": "credentials unavailable"}
+    for _ in range(2):
+        with pytest.raises(ValueError, match=error[failure]):
+            operations.retry_assessment(repo, run_id=parent, candidate_id="candidate-fixture",
+                                        connection=CONNECTION, get_credentials=get_credentials)
+        with History(repo) as history:
+            assert assessments._children(history, parent, "candidate-fixture") == []
+            assert dict(history.row(parent)) == original
+        assert operations.list_assessments(repo, run_id=parent)["candidates"][0]["retry_eligible"]
+
+
 def test_unknown_retry_lineage_cannot_be_bypassed_by_a_new_child(local, monkeypatch):
     repo, _, _ = local
     parent = failed_review(local, monkeypatch)

@@ -303,12 +303,12 @@ def retry_assessment(repository, *, run_id=None, candidate_id=None, resume=None,
                     from .security_scans.scanner import identity_key
                     if engine.secure_digest("assessment-redaction-key", identity_key(create=False)) != value["redaction"]["key_check"]:
                         raise ValueError("The original security redaction key changed; retry was withheld.")
-                child_id = resume or history.begin("assessment", origin["scope"], {
-                    "parent_run_id": run_id, "candidate_id": candidate_id, "profile": profile,
-                    "input": planning.fingerprint(value)})
                 credentials = credentials_for_history(history, get_credentials)
                 if review_context.sanitize(value["context"], credentials) != value["context"]:
                     raise ValueError("The original evidence no longer matches safe redaction; retry was withheld.")
+                child_id = resume or history.begin("assessment", origin["scope"], {
+                    "parent_run_id": run_id, "candidate_id": candidate_id, "profile": profile,
+                    "input": planning.fingerprint(value)})
                 timeout = value["options"].get("timeout_seconds")
                 deadline = time.monotonic() + timeout if timeout else None
                 session = Session(connection, credentials, history=history, run_id=child_id,
