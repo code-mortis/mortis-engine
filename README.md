@@ -20,22 +20,15 @@ for code graph context; neither executable is bundled in the Python package.
 
 ## Use with Codex or Claude Code
 
-The portable [Mortis Engine skill](skills/mortis-engine-use/SKILL.md) teaches coding
+The portable [Mortis Engine skill](src/mortis_engine/skills/mortis-engine-use/SKILL.md) teaches coding
 agents to preview review scope, run reviews and security scans, inspect saved
 results, and handle verification, retries and finding decisions.
 Install the CLI above; the skill supplies instructions, not the engine executable.
 Reviews and scans also need a [saved AI connection](#connect-with-environment-variables).
 Scope previews need no connection or provider calls.
 
-Clone this repository, or use an existing checkout:
-
-```sh
-git clone https://github.com/code-mortis/mortis-engine.git
-cd mortis-engine
-```
-
-Copy the entire skill directory, including its references, into your agent's
-personal skills directory. The commands below use a POSIX shell.
+The skill and its references are bundled with the Python package. Install them
+for either agent using the CLI; no repository checkout is needed.
 
 ### Codex
 
@@ -43,8 +36,7 @@ Install for your user account using Codex's
 [personal skills directory](https://developers.openai.com/codex/skills/):
 
 ```sh
-mkdir -p "$HOME/.agents/skills"
-cp -R skills/mortis-engine-use "$HOME/.agents/skills/"
+mortis skill install codex
 ```
 
 ### Claude Code
@@ -53,12 +45,25 @@ Install for your user account using Claude Code's
 [personal skills directory](https://code.claude.com/docs/en/skills):
 
 ```sh
-mkdir -p "$HOME/.claude/skills"
-cp -R skills/mortis-engine-use "$HOME/.claude/skills/"
+mortis skill install claude-code
 ```
 
 You can install in both locations; they use the same portable skill files.
-To update, copy the skill directory again from an updated checkout.
+Codex receives the skill in `~/.agents/skills/mortis-engine-use`; Claude Code
+receives it in `~/.claude/skills/mortis-engine-use`. Installation is local and
+does not load a connection or call a provider. Existing installations are
+preserved unless you pass `--force`.
+
+After upgrading Mortis, replace an installed skill with the bundled version:
+
+```sh
+mortis skill install codex --force
+mortis skill install claude-code --force
+```
+
+Replacement copies the new skill before removing the previous installation.
+For an existing skill symlink, `--force` replaces the link with a local copy
+and leaves the linked directory untouched.
 
 ### Use the skill
 

@@ -3,11 +3,14 @@
 import importlib.metadata
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 def main():
     import mortis_engine
+    from mortis_engine import cli
     from mortis_engine.code_graph import build
 
     version, checkout = sys.argv[1:]
@@ -21,7 +24,15 @@ def main():
     assert "--tag" in subprocess.check_output([sys.executable, "-m", build.__name__, "--help"], text=True)
     for name in ("Dockerfile", "requirements.txt", "contracts.py", "extract.py", "syntax.py"):
         assert (Path(build.__file__).parent / name).read_bytes(), name
-    print(f"Installed Mortis {version}: CLI and parser assets OK ({package})")
+    with tempfile.TemporaryDirectory(prefix="mortis-skill-smoke-") as directory:
+        personal = Path(directory)
+        with patch.object(Path, "home", return_value=personal):
+            for agent, folder in (("codex", ".agents"), ("claude-code", ".claude")):
+                assert cli.main(["skill", "install", agent]) == 0
+                target = personal / folder / "skills/mortis-engine-use"
+                for name in ("SKILL.md", "references/configuration.md", "references/python.md"):
+                    assert (target / name).read_bytes() == (package.parent / "skills/mortis-engine-use" / name).read_bytes()
+    print(f"Installed Mortis {version}: CLI, parser assets and skill installers OK ({package})")
 
 
 if __name__ == "__main__":

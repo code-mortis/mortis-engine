@@ -13,10 +13,19 @@ SPEC.loader.exec_module(packaging)
 
 def test_distribution_paths_retain_parser_build_assets():
     for wheel, prefix in ((True, "mortis_engine/"), (False, "src/mortis_engine/")):
-        names = {prefix + name for name in (*packaging.PARSER_ASSETS, "__init__.py")}
+        names = {prefix + name for name in (*packaging.PARSER_ASSETS, *packaging.SKILL_ASSETS, "__init__.py")}
         packaging.check_names(names, wheel=wheel)
         names.remove(prefix + "code_graph/Dockerfile")
         with pytest.raises(AssertionError, match="Missing parser build assets"):
+            packaging.check_names(names, wheel=wheel)
+
+
+@pytest.mark.parametrize("missing", sorted(packaging.SKILL_ASSETS))
+def test_distribution_paths_require_complete_skill(missing):
+    for wheel, prefix in ((True, "mortis_engine/"), (False, "src/mortis_engine/")):
+        names = {prefix + name for name in (*packaging.PARSER_ASSETS, *packaging.SKILL_ASSETS, "__init__.py")}
+        names.remove(prefix + missing)
+        with pytest.raises(AssertionError, match="Missing coding-agent skill assets"):
             packaging.check_names(names, wheel=wheel)
 
 

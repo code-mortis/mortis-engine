@@ -8,6 +8,8 @@ from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 
 PARSER_ASSETS = {"code_graph/Dockerfile", "code_graph/requirements.txt"}
+SKILL_ASSETS = {"skills/mortis-engine-use/" + name for name in (
+    "SKILL.md", "references/configuration.md", "references/python.md")}
 FORBIDDEN = {".git", ".github", ".codex", ".local", ".venv", ".aws", ".pytest_cache", ".ruff_cache",
              ".coverage", "__pycache__", "dist", "reports", "PLAN.md", "REVIEW_IMPROVEMENTS.md"}
 PRIVATE_SUFFIXES = {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key", ".p12", ".pfx"}
@@ -31,6 +33,7 @@ def check_names(names, *, wheel):
             assert path.parts[0] in SDIST_ROOTS, f"Unexpected source archive content: {name}"
     prefix = "mortis_engine/" if wheel else "src/mortis_engine/"
     assert {prefix + asset for asset in PARSER_ASSETS} <= names, "Missing parser build assets"
+    assert {prefix + asset for asset in SKILL_ASSETS} <= names, "Missing coding-agent skill assets"
     assert prefix + "__init__.py" in names, "Missing runtime package"
 
 
@@ -48,6 +51,8 @@ def check_dist(directory, root):
         metadata = BytesParser().parsebytes(archive.read(f"mortis_engine-{version}.dist-info/METADATA"))
         assert metadata["Name"] == "mortis-engine" and metadata["Version"] == version
         assert archive.read(f"mortis_engine-{version}.dist-info/licenses/LICENSE") == (root / "LICENSE").read_bytes()
+        for asset in SKILL_ASSETS:
+            assert archive.read("mortis_engine/" + asset) == (root / "src/mortis_engine" / asset).read_bytes(), asset
     with tarfile.open(sdist) as archive:
         members = archive.getmembers()
         prefix = f"mortis_engine-{version}/"
