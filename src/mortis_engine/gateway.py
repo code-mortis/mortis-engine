@@ -19,8 +19,12 @@ def http_client():
 
 def reservation(connection, request):
     protocol = connection["protocol"]
-    body = llm_http.encode_request("anthropic" if protocol == "anthropic-bedrock" else protocol,
-                                   connection, request)
+    if protocol == "anthropic-bedrock":
+        from .llm_bedrock import encode_converse
+
+        body = encode_converse(connection, request)
+    else:
+        body = llm_http.encode_request(protocol, connection, request)
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
     if len(encoded) > llm_http.MAX_REQUEST_BYTES:
         raise ValueError("Inference request exceeds the byte limit")
@@ -32,7 +36,7 @@ def reservation(connection, request):
     return tokens
 
 
-async def send(connection, credentials, request, *, client, stopped=lambda: False, timeout=None):
+async def send(connection, credentials, request, *, client, stopped=lambda: False, timeout=llm_http.DEFAULT_TIMEOUT):
     """Single attempt, exact connection/model, no implicit protocol or provider fallback."""
     if connection.get("kind") != "api":
         raise ValueError("Inference requires a shared API connection")

@@ -21,8 +21,6 @@ def scope_ref(repo, env, ref):
 
 
 def effective_connection(connection, options):
-    if options.get("max_output_tokens") == 0 and connection["protocol"] in {"anthropic", "anthropic-bedrock"}:
-        raise ValueError("Anthropic and Bedrock require a positive max_output_tokens value; their APIs cannot omit the output limit.")
     return {**connection, "model": options.get("model") or connection["model"],
             "options": {"timeout_sec": 300, **connection.get("options", {})}}
 

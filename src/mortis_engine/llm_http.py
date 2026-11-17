@@ -8,7 +8,7 @@ import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 from jsonschema import Draft202012Validator
@@ -22,6 +22,7 @@ MAX_REQUEST_BYTES = 32_000_000
 PROTECTED = {
     "model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream",
     "api_key", "max_tokens", "max_completion_tokens", "max_output_tokens", "response_format",
+    "inferenceConfig", "additionalModelRequestFields", "toolConfig", "outputConfig",
     "store", "previous_response_id", "conversation", "background", "authorization", "extra_headers", "include",
 }
 
@@ -129,7 +130,8 @@ def _extra_body(body, extra):
     if isinstance(thinking, dict) and thinking.get("type") == "enabled" and isinstance(body.get("tool_choice"), dict) and body["tool_choice"].get("type") in {"any", "tool"}:
         raise ValueError("Manual extended thinking requires automatic tool choice")
     if isinstance(thinking, dict) and "budget_tokens" in thinking and (
-        type(thinking["budget_tokens"]) is not int or not 0 < thinking["budget_tokens"] < body.get("max_tokens", 0)
+        type(thinking["budget_tokens"]) is not int or thinking["budget_tokens"] <= 0
+        or (body.get("max_tokens") and thinking["budget_tokens"] >= body["max_tokens"])
     ):
         raise ValueError("Thinking token budget must fit within the explicit output budget")
     return body
@@ -137,7 +139,7 @@ def _extra_body(body, extra):
 
 def encode_request(protocol: str, connection: dict, request: Request) -> dict:
     model = connection.get("model")
-    if not isinstance(model, str) or not model or len(model) > 150 or any(ord(c) < 32 for c in model):
+    if not isinstance(model, str) or not model or len(model) > (2048 if connection.get("protocol") == "anthropic-bedrock" else 150) or any(ord(c) < 32 for c in model):
         raise ValueError("Inference requires the exact explicitly selected model")
     for tool in request.tools:
         _schema(tool.parameters)
@@ -224,8 +226,6 @@ def encode_request(protocol: str, connection: dict, request: Request) -> dict:
         if not request.max_output_tokens:
             body.pop("max_output_tokens")
     elif protocol == "anthropic":
-        if not request.max_output_tokens:
-            raise ValueError("Anthropic and Bedrock require a positive max_output_tokens value; their APIs cannot omit the output limit.")
         messages = []
         for message in request.messages:
             if message.role == "tool":
@@ -244,7 +244,9 @@ def encode_request(protocol: str, connection: dict, request: Request) -> dict:
                 messages[-1]["content"].extend(blocks)
             else:
                 messages.append({"role": role, "content": blocks})
-        body.update(messages=messages, max_tokens=request.max_output_tokens)
+        body.update(messages=messages)
+        if request.max_output_tokens:
+            body["max_tokens"] = request.max_output_tokens
         if request.instructions:
             body["system"] = request.instructions
         if request.tools:
@@ -475,21 +477,24 @@ async def _drain(task):
     return result
 
 
+DEFAULT_TIMEOUT = object()
+
+
 async def _bounded(awaitable, stopped, timeout):
     if stopped():
         if hasattr(awaitable, "close"):
             awaitable.close()
         raise InferenceError("cancelled", "Inference was cancelled before dispatch.", consumption_unknown=False)
     task = asyncio.create_task(awaitable)
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout is not None else None
     try:
         while True:
             if stopped():
                 raise InferenceError("cancelled", "Inference was cancelled.")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
                 raise InferenceError("timeout", "The inference request exceeded its deadline.")
-            done, _ = await asyncio.wait({task}, timeout=min(0.1, remaining))
+            done, _ = await asyncio.wait({task}, timeout=min(0.1, remaining) if remaining is not None else 0.1)
             if done:
                 return task.result()
     finally:
@@ -500,9 +505,9 @@ async def _bounded(awaitable, stopped, timeout):
 
 
 async def post_json(client: httpx.AsyncClient, url: str, headers, body: dict | bytes,
-                    *, stopped=lambda: False, timeout: float = 120, retry_codes=None):
+                    *, stopped=lambda: False, timeout: float | None = 120, retry_codes=None, method="POST"):
     """Use exact bytes for signed requests; return (decoded object, safe request ID)."""
-    if not math.isfinite(timeout) or timeout <= 0:
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
         raise InferenceError("timeout", "The inference deadline expired before dispatch.", consumption_unknown=False)
     content = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
     if len(content) > MAX_REQUEST_BYTES:
@@ -510,7 +515,7 @@ async def post_json(client: httpx.AsyncClient, url: str, headers, body: dict | b
 
     async def perform():
         try:
-            wire = client.build_request("POST", url, headers=headers, content=content, timeout=timeout)
+            wire = client.build_request(method, url, headers=headers, content=content, timeout=timeout)
             # Provider cookies are not credentials and must not cross task/run boundaries.
             if "cookie" not in httpx.Headers(headers):
                 wire.headers.pop("cookie", None)
@@ -587,16 +592,15 @@ def request_headers(protocol, options, credentials):
 
 
 async def send(connection: dict, credentials: dict, request: Request, *, client: httpx.AsyncClient,
-               stopped=lambda: False, timeout=None) -> Response:
+               stopped=lambda: False, timeout=DEFAULT_TIMEOUT) -> Response:
     if connection.get("kind", "api") != "api":
         raise ValueError("Inference requires a shared API connection")
     protocol = connection.get("protocol")
     body = encode_request(protocol, connection, request)
     options = connection.get("options", {})
-    durations = [float(options.get("timeout_sec", 120)), float(timeout) if timeout is not None else 900]
-    if any(not math.isfinite(value) or value <= 0 for value in durations):
+    duration = float(options.get("timeout_sec", 120)) if timeout is DEFAULT_TIMEOUT else timeout
+    if duration is not None and (not math.isfinite(duration) or duration <= 0):
         raise InferenceError("timeout", "The inference deadline expired before dispatch.", consumption_unknown=False)
-    duration = min(durations)
     started = time.monotonic()
     try:
         base = await _bounded(asyncio.to_thread(safe_endpoint, connection.get("base_url", "")), stopped, duration)
@@ -607,10 +611,25 @@ async def send(connection: dict, credentials: dict, request: Request, *, client:
     if protocol == "anthropic" and not base.endswith("/v1"):
         base += "/v1"
     headers = request_headers(protocol, options, credentials)
+    if protocol == "anthropic" and not request.max_output_tokens:
+        # Messages requires a positive allowance; discover it only when none was supplied.
+        try:
+            model, identity = await post_json(client, base + "/models/" + quote(connection["model"], safe=""),
+                headers, b"", method="GET", stopped=stopped,
+                timeout=duration - (time.monotonic() - started) if duration is not None else None,
+                retry_codes=options.get("retry_codes"))
+            capacity = model.get("max_tokens")
+            if type(capacity) is not int or capacity <= 0:
+                raise InferenceError("model_capacity", "The selected Anthropic endpoint did not report the model's output capacity.",
+                                     request_id=identity, consumption_unknown=False)
+            body = encode_request(protocol, connection, request.model_copy(update={"max_output_tokens": capacity}))
+        except InferenceError as exc:
+            exc.consumption_unknown = False
+            raise
     endpoint = urlsplit(base)
     if endpoint.hostname == "opencode.ai" and endpoint.path.rstrip("/") == "/zen/go/v1":
         headers["User-Agent"] = "code-mortis/0.1.0"
         headers["x-opencode-session"] = request.session_id
     data, identity = await post_json(client, base + suffix, headers, body, stopped=stopped,
-                                     timeout=duration - (time.monotonic() - started), retry_codes=options.get("retry_codes"))
+                                     timeout=duration - (time.monotonic() - started) if duration is not None else None, retry_codes=options.get("retry_codes"))
     return decode_response(protocol, data, request, identity)
