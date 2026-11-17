@@ -16,7 +16,7 @@ from mortis_engine.security import digest
 
 from .engine import normalize_trivy
 
-VERSION = "0.76.0"
+VERSION = "0.76.2"
 
 
 def state_directory():

@@ -10,6 +10,8 @@ from review.git_helpers import commit, git
 from mortis_engine import code_graph
 from mortis_engine.code_graph import build, transport
 from mortis_engine.code_graph.contracts import (
+    APP_EXTRACTOR_VERSION,
+    EXTRACTOR_VERSION,
     CodeGraphRequest,
     CodeGraphResult,
     blob_sha,
@@ -40,13 +42,13 @@ def parsed(request):
     return CodeGraphResult(**request.model_dump(exclude={"files"}), files=files, imports=imports)
 
 
-def request_fixture():
+def request_fixture(*, extra_files=()):
     body = b'import { value } from "./dep.js";\nconsole.log(value);\n'
     dependency = b"export const value = 1;\n"
     return CodeGraphRequest(repository_id=1, commit_sha="a" * 40, policy_digest="b" * 64, files=[
         {"path": path, "blob_sha": blob_sha(value), "size_bytes": len(value),
          "content_base64": base64.b64encode(value).decode()}
-        for path, value in (("app.js", body), ("dep.js", dependency))])
+        for path, value in (("app.js", body), ("dep.js", dependency), *extra_files)])
 
 
 def test_validator_checks_exact_snapshot_manifest_and_import_evidence():
@@ -67,7 +69,11 @@ def test_validator_checks_exact_snapshot_manifest_and_import_evidence():
         validate_result(request, tampered)
 
 
-def test_enrichment_uses_same_revision_bounded_one_hop_imports(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("configuration", "version"), [
+    (True, EXTRACTOR_VERSION),
+    ({"image": transport.APP_IMAGE}, APP_EXTRACTOR_VERSION),
+])
+def test_enrichment_uses_same_revision_bounded_one_hop_imports(tmp_path, monkeypatch, configuration, version):
     git(tmp_path, "init", "-qb", "main")
     commit(tmp_path, {"app.js": 'import { value } from "./dep.js";\nconsole.log(value);\n',
                       "dep.js": "export const value = 1;\n", "README.md": "text\n"})
@@ -80,7 +86,7 @@ def test_enrichment_uses_same_revision_bounded_one_hop_imports(tmp_path, monkeyp
     monkeypatch.setattr(transport, "extract", extract)
     with snapshots.snapshot(tmp_path, mode="all") as value:
         options = settings.load(value.repo, value.env, value.settings_sha)
-        options["_graph"] = True
+        options["_graph"] = configuration
         plan = planning.plan_review(value.repo, value.env, value.base_sha, value.head_sha,
                                     value.merge_base, options, lambda: False)
         graph, diagnostics = code_graph.enrich(value.repo, value.env, plan, options, {})
@@ -88,6 +94,7 @@ def test_enrichment_uses_same_revision_bounded_one_hop_imports(tmp_path, monkeyp
         assert graph["app.js"]["commit_sha"] == value.head_sha
         assert graph["dep.js"]["sources"][0]["path"] == "app.js"
         assert diagnostics["status"] == "ready"
+        assert diagnostics["extractor_version"] == seen[0].extractor_version == version
         assert seen[0].commit_sha == value.head_sha
         assert next(item for item in seen[0].files if item.path == "README.md").content_base64 is None
 
@@ -207,10 +214,15 @@ def test_builder_copies_only_bundled_parser_files(monkeypatch):
 def test_native_extractor_retains_real_source_contract():
     pytest.importorskip("tree_sitter")
     from mortis_engine.code_graph.extract import extract
-    request = request_fixture()
+    php = b"<?php function helper() { return 1; } helper();\n"
+    request = request_fixture(extra_files=(("app.php", php),))
     result = validate_result(request, extract(request))
     assert result.imports[0].target_path == "dep.js"
     assert result.files[0].unresolved_calls == 1
+    assert any(symbol.file_path == "app.php" and symbol.name == "helper" for symbol in result.symbols)
+    assert next(item for item in result.files if item.path == "app.php").unresolved_calls == 1
+    with pytest.raises(ValueError, match="different parser version"):
+        extract(request.model_copy(update={"extractor_version": APP_EXTRACTOR_VERSION}))
 
 
 @pytest.mark.parametrize("failure", ["missing_args", "extra_args", "missing_request", "unreadable_request"])

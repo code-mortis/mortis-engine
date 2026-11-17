@@ -65,7 +65,7 @@ mortis scan --repo /path/to/repo --ref HEAD --connection work --format json --pr
 ```
 
 Choose the requested workflow; these examples are alternatives. A scan uses a
-committed revision, requires Trivy 0.76.0 on PATH, refreshes its advisory database,
+committed revision, requires Trivy 0.76.2 on PATH, refreshes its advisory database,
 and uses AI for semantic analysis, assessment and verification. Supported npm CVE
 verification can also query GitHub's public advisory database. It is not an
 offline command or a scan of uncommitted edits.

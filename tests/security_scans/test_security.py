@@ -553,7 +553,7 @@ def test_scanner_ignores_repository_config_and_denies_network(repository, monkey
     def run(args, root, env, timeout, stopped):
         calls.append((args, env))
         if args[-1] == "--version":
-            return 0, "Version: 0.76.0", ""
+            return 0, f"Version: {scanner.VERSION}", ""
         if "--download-db-only" in args:
             cache = Path(args[args.index("--cache-dir") + 1])
             (cache / "db").mkdir()

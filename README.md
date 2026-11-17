@@ -298,7 +298,7 @@ mortis scan --concurrency 8 --effort high --progress
 
 `--progress` shows the same compact live view as reviews, including snapshot preparation, Trivy checks, active AI file analyses, assessment and verification. File counts include only validated analysis results. Every scan prints elapsed time to stderr, with or without progress, including failed or interrupted attempts. JSON reports remain on stdout.
 
-The scan requires Trivy 0.76.0 on PATH. Trivy refreshes its advisory database, then checks dependencies, configuration and secrets against an isolated local snapshot. Semantic analysis, candidate assessment and verification use the selected AI profile. Repository source is excluded from the Trivy update request. For a supported npm CVE without an established fixed version, verification can look up the CVE ID in GitHub's public advisory database. A partial scan keeps its coverage and findings and reports an unavailable grade.
+The scan requires Trivy 0.76.2 on PATH. Trivy refreshes its advisory database, then checks dependencies, configuration and secrets against an isolated local snapshot. Semantic analysis, candidate assessment and verification use the selected AI profile. Repository source is excluded from the Trivy update request. For a supported npm CVE without an established fixed version, verification can look up the CVE ID in GitHub's public advisory database. A partial scan keeps its coverage and findings and reports an unavailable grade.
 
 An optional `[scan]` table in `mortis.toml` accepts `model`, `effort`, `concurrency`, `language`, `exclusions`, `timeout_seconds`, `token_budget`, `max_output_tokens`, `assessment_token_budget` and `verification_token_budget`. The scan output limit inherits `[review].max_output_tokens` unless overridden in `[scan]`. Scan defaults use high effort and four concurrent file requests. `mortis config show` displays effective review and scan settings. After rotating or revoking a reported secret, pass `--acknowledge-rotation FINDING_ID` on the next scan of that scope so Mortis can verify removal. Use the ID printed with the original finding.
 
@@ -309,7 +309,7 @@ mortis graph build
 mortis review --base main --graph
 ```
 
-Docker builds a separate parser image with the pinned grammars. During review the parser receives bounded file contents at one revision. It runs without network or host mounts. A review records unavailable graph context and can continue using its normal source evidence.
+Docker builds a separate parser image with the pinned grammars. When an update changes the parser, rerun `mortis graph build` before using `--graph`. During review the parser receives bounded file contents at one revision. It runs without network or host mounts. A review records unavailable graph context and can continue using its normal source evidence.
 
 Set extraction limits in the trusted committed configuration:
 

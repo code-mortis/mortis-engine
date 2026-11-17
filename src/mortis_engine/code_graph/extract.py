@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from tree_sitter import Language, Parser
 
 from mortis_engine.code_graph.contracts import (
+    EXTRACTOR_VERSION,
     MAX_FACTS,
     MAX_REQUEST_BYTES,
     MAX_RESULT_BYTES,
@@ -146,6 +147,8 @@ def parse_diagnostic(root, language=None):
 
 
 def extract(request: CodeGraphRequest) -> CodeGraphResult:
+    if request.extractor_version != EXTRACTOR_VERSION:
+        raise ValueError("The request requires a different parser version")
     parsers, files, symbols, imports = {}, [], [], []
     for item in request.files:
         metadata = dict(path=item.path, blob_sha=item.blob_sha, size_bytes=item.size_bytes)
