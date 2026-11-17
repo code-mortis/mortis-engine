@@ -18,6 +18,63 @@ use `uv tool install --editable .`.
 Trivy is required for security scans and Docker is optional
 for code graph context; neither executable is bundled in the Python package.
 
+## Use with Codex or Claude Code
+
+The portable [Mortis Engine skill](skills/mortis-engine-use/SKILL.md) teaches coding
+agents to preview review scope, run reviews and security scans, inspect saved
+results, and handle verification, retries and finding decisions.
+Install the CLI above; the skill supplies instructions, not the engine executable.
+Reviews and scans also need a [saved AI connection](#connect-with-environment-variables).
+Scope previews need no connection or provider calls.
+
+Clone this repository, or use an existing checkout:
+
+```sh
+git clone https://github.com/code-mortis/mortis-engine.git
+cd mortis-engine
+```
+
+Copy the entire skill directory, including its references, into your agent's
+personal skills directory. The commands below use a POSIX shell.
+
+### Codex
+
+Install for your user account using Codex's
+[personal skills directory](https://developers.openai.com/codex/skills/):
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+cp -R skills/mortis-engine-use "$HOME/.agents/skills/"
+```
+
+### Claude Code
+
+Install for your user account using Claude Code's
+[personal skills directory](https://code.claude.com/docs/en/skills):
+
+```sh
+mkdir -p "$HOME/.claude/skills"
+cp -R skills/mortis-engine-use "$HOME/.claude/skills/"
+```
+
+You can install in both locations; they use the same portable skill files.
+To update, copy the skill directory again from an updated checkout.
+
+### Use the skill
+
+Open a new agent session in the repository you want to analyze and enter one of
+these prompts in the agent's chat:
+
+| Agent | Example prompt |
+| --- | --- |
+| Codex | `$mortis-engine-use Preview my current working-tree review scope without calling a provider.` |
+| Claude Code | `/mortis-engine-use Preview my current working-tree review scope without calling a provider.` |
+
+For analysis, ask the agent to review your local changes or scan a committed
+revision with Mortis. Name the saved connection if you have several, and request
+the findings, coverage and saved run ID. Reviews and scans send eligible source
+to that connection and may consume provider tokens.
+
 ## Choose what to review
 
 | Command | Source |
