@@ -14,13 +14,17 @@ current owning modules and affected callers before changing their documentation.
 | Security scanning and ratings | `security_scans/`, scanner requirements, scan contracts/tests, README and site scan examples; distinguish Trivy results, AI assessment, retained findings and incomplete grading |
 | Code graph extraction | `code_graph/` extractor version, parser image/requirements and contracts/tests, graph limits and docs; keep parser isolation and old snapshot identities intact |
 | Packaging and skill installation | `src/mortis_engine/cli/skills.py`, canonical usage skill and all references, `skills/mortis-engine-use/` compatibility links, `scripts/check_dist.py`, packaging/installer tests and `tests/smoke_test.py` |
-| Release process and CI | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `scripts/release_check.py`, `tests/test_release.py`, `docs/releasing.md`, README development checks and this development skill |
+| Release process and CI | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.github/dependabot.yml`, `scripts/release_check.py`, `tests/test_release.py`, `docs/releasing.md`, README development checks and this development skill |
 | Any user-facing change | `CHANGELOG.md`, affected README/site sections, relevant repository docs and every affected maintained skill |
 
 Module paths without `src/mortis_engine/` in the table refer to that package.
 Development skills under root `skills/` and their `.agents/skills/` and
 `.claude/skills/` aliases stay outside the packaged skill data. Do not copy these
 development instructions into the customer-facing usage skill.
+
+When the uv minimum changes, check `[tool.uv].required-version` against the
+versions available to CI and Dependabot. A newer CI pin alone does not require
+raising the minimum; verify lockfile compatibility before doing so.
 
 ## Documentation site
 

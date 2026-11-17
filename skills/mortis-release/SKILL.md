@@ -25,12 +25,13 @@ for engine users.
 3. Inspect local tags, history, the diff from the preceding release to HEAD, and
    staged, unstaged and untracked changes. Do not equate the highest tag with the
    last published release without checking its provenance. Use available hosted
-   release/CI information when needed; label anything unverified. Do not fetch,
-   switch branches, reset work or create tags just to obtain a comparison.
+   release/CI information when needed; label anything unverified. Do not switch
+   branches, reset work or create tags just to obtain a comparison.
 4. Locate `../mortis-site`, or use the maintainer's supplied site checkout.
    Read its guidance, `README.md`, `package.json` and current docs before editing.
-   If unavailable or not writable, continue engine preparation and report site
-   synchronization as pending; do not claim the release is ready with that gap.
+   If unavailable or not writable, locate an accessible checkout or request the
+   needed filesystem access while continuing engine preparation. Report site
+   synchronization as pending until completed; do not claim readiness with that gap.
 5. Read [the public-surface map](references/public-surface-map.md). Build the
    release notes from changed implementation, callers, tests and actual CLI help,
    including changes already committed since the preceding release. A commit
