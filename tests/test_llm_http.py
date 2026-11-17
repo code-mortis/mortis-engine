@@ -608,8 +608,8 @@ def test_dns_preflight_timeout_is_known_not_consumed(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("allowance,expected", [(0, 128000), (5000, 5000), (5000000, 128000)])
-def test_anthropic_uses_model_capacity_without_a_hidden_completion_cap(monkeypatch, allowance, expected):
+@pytest.mark.parametrize("allowance,expected", [(0, 128000), (5000, 5000), (5000000, 5000000)])
+def test_anthropic_discovers_capacity_only_without_an_explicit_limit(monkeypatch, allowance, expected):
     monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
     seen = []
 
@@ -620,6 +620,8 @@ def test_anthropic_uses_model_capacity_without_a_hidden_completion_cap(monkeypat
         assert all(value is None for value in wire.extensions["timeout"].values())
         if wire.method == "GET":
             assert wire.url.path == "/v1/models/exact-custom-model"
+            if allowance:
+                return httpx.Response(404)
             return httpx.Response(200, json={"id": "resolved-selected-alias", "max_tokens": 128000})
         assert wire.url.path == "/v1/messages"
         assert json.loads(wire.content)["max_tokens"] == expected
@@ -632,7 +634,7 @@ def test_anthropic_uses_model_capacity_without_a_hidden_completion_cap(monkeypat
                                       request(max_output_tokens=allowance), client=client, timeout=None)
             assert response.usage.total_tokens == 12
     asyncio.run(run())
-    assert len(seen) == 2
+    assert len(seen) == (1 if allowance else 2)
 
 
 @pytest.mark.parametrize("capacity", [None, 0, -1, True, "128000"])

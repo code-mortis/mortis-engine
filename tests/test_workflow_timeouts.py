@@ -35,7 +35,7 @@ def test_explicit_operation_timeout_reaches_transport(monkeypatch, protocol, tim
 
     asyncio.run(run())
     if timeout is None:
-        assert observed == [None] * (2 if protocol == "anthropic" else 1)
+        assert observed == [None]
     else:
         expected = 5 if timeout == "omitted" else timeout
         assert expected - 1 < observed[0] <= expected

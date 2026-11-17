@@ -611,8 +611,8 @@ async def send(connection: dict, credentials: dict, request: Request, *, client:
     if protocol == "anthropic" and not base.endswith("/v1"):
         base += "/v1"
     headers = request_headers(protocol, options, credentials)
-    if protocol == "anthropic":
-        # Messages requires a positive allowance; use the selected model's published capacity.
+    if protocol == "anthropic" and not request.max_output_tokens:
+        # Messages requires a positive allowance; discover it only when none was supplied.
         try:
             model, identity = await post_json(client, base + "/models/" + quote(connection["model"], safe=""),
                 headers, b"", method="GET", stopped=stopped,
@@ -622,8 +622,7 @@ async def send(connection: dict, credentials: dict, request: Request, *, client:
             if type(capacity) is not int or capacity <= 0:
                 raise InferenceError("model_capacity", "The selected Anthropic endpoint did not report the model's output capacity.",
                                      request_id=identity, consumption_unknown=False)
-            allowance = min(request.max_output_tokens, capacity) if request.max_output_tokens else capacity
-            body = encode_request(protocol, connection, request.model_copy(update={"max_output_tokens": allowance}))
+            body = encode_request(protocol, connection, request.model_copy(update={"max_output_tokens": capacity}))
         except InferenceError as exc:
             exc.consumption_unknown = False
             raise
