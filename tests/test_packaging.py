@@ -13,7 +13,8 @@ SPEC.loader.exec_module(packaging)
 
 def test_distribution_paths_retain_parser_build_assets():
     for wheel, prefix in ((True, "mortis_engine/"), (False, "src/mortis_engine/")):
-        names = {prefix + name for name in (*packaging.PARSER_ASSETS, *packaging.SKILL_ASSETS, "__init__.py")}
+        names = {prefix + name for name in (*packaging.PARSER_ASSETS, "__init__.py")}
+        names.update(packaging.SKILL_PREFIX[wheel] + name for name in packaging.SKILL_ASSETS)
         packaging.check_names(names, wheel=wheel)
         names.remove(prefix + "code_graph/Dockerfile")
         with pytest.raises(AssertionError, match="Missing parser build assets"):
@@ -23,10 +24,29 @@ def test_distribution_paths_retain_parser_build_assets():
 @pytest.mark.parametrize("missing", sorted(packaging.SKILL_ASSETS))
 def test_distribution_paths_require_complete_skill(missing):
     for wheel, prefix in ((True, "mortis_engine/"), (False, "src/mortis_engine/")):
-        names = {prefix + name for name in (*packaging.PARSER_ASSETS, *packaging.SKILL_ASSETS, "__init__.py")}
-        names.remove(prefix + missing)
+        names = {prefix + name for name in (*packaging.PARSER_ASSETS, "__init__.py")}
+        names.update(packaging.SKILL_PREFIX[wheel] + name for name in packaging.SKILL_ASSETS)
+        names.remove(packaging.SKILL_PREFIX[wheel] + missing)
         with pytest.raises(AssertionError, match="Missing coding-agent skill assets"):
             packaging.check_names(names, wheel=wheel)
+
+
+@pytest.mark.parametrize("wheel", [False, True])
+def test_distribution_rejects_development_release_skill(wheel):
+    prefix = "mortis_engine/" if wheel else "src/mortis_engine/"
+    names = {prefix + name for name in (*packaging.PARSER_ASSETS, "__init__.py")}
+    names.update(packaging.SKILL_PREFIX[wheel] + name for name in packaging.SKILL_ASSETS)
+    names.add(("mortis_engine/" if wheel else ".agents/skills/") + "mortis-release/SKILL.md")
+    with pytest.raises(AssertionError, match="Private/generated archive content"):
+        packaging.check_names(names, wheel=wheel)
+
+
+def test_source_distribution_allows_only_the_usage_skill_under_agents():
+    names = {"src/mortis_engine/" + name for name in (*packaging.PARSER_ASSETS, "__init__.py")}
+    names.update(packaging.SKILL_PREFIX[False] + name for name in packaging.SKILL_ASSETS)
+    names.add(".agents/skills/unrelated/SKILL.md")
+    with pytest.raises(AssertionError, match="Unexpected agent source"):
+        packaging.check_names(names, wheel=False)
 
 
 @pytest.mark.parametrize("name", [".codex/config.toml", ".github/workflows/ci.yml", ".local/report.json",

@@ -52,8 +52,12 @@ exclude = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/mortis_engine"]
 
+[tool.hatch.build.targets.wheel.force-include]
+".agents/skills/mortis-engine-use" = "mortis_engine/_skill"
+
 [tool.hatch.build.targets.sdist]
 include = [
+  "/.agents/skills/mortis-engine-use",
   "/src/mortis_engine",
   "/tests",
   "/evals/review_improvements",

@@ -20,7 +20,7 @@ for code graph context; neither executable is bundled in the Python package.
 
 ## Use with Codex or Claude Code
 
-The portable [Mortis Engine skill](src/mortis_engine/skills/mortis-engine-use/SKILL.md) teaches coding
+The portable [Mortis Engine skill](.agents/skills/mortis-engine-use/SKILL.md) teaches coding
 agents to preview review scope, run reviews and security scans, inspect saved
 results, and handle verification, retries and finding decisions.
 Install the CLI above; the skill supplies instructions, not the engine executable.
@@ -440,11 +440,13 @@ mortis connect aws \
 
 Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
 
-The project-local [release preparation skill](skills/mortis-release/SKILL.md)
+The project-local [release preparation skill](.agents/skills/mortis-release/SKILL.md)
 synchronizes versions, changelog, repository and site documentation, and maintained
-skills before a release. Invoke `$mortis-release` in Codex or `/mortis-release` in
-Claude Code from this checkout. It prepares and validates changes; publication
-remains a separate maintainer action.
+skills before a release. Invoke `$mortis-release` in Codex. In other agents, ask
+them to follow `.agents/skills/mortis-release/SKILL.md` from this checkout.
+Both skill sources live in `.agents/skills/`; only `mortis-engine-use` is bundled
+with the Python package. Release preparation validates changes; publication remains
+a separate maintainer action.
 
 GitHub Actions runs the test suite on Python 3.13, 3.14 and 3.15 for pushes to `main`
 (including merges), pull requests targeting `main` and manual dispatches.

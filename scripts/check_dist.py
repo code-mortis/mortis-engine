@@ -8,15 +8,15 @@ from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 
 PARSER_ASSETS = {"code_graph/Dockerfile", "code_graph/requirements.txt"}
-SKILL_ASSETS = {"skills/mortis-engine-use/" + name for name in (
-    "SKILL.md", "references/configuration.md", "references/python.md")}
-FORBIDDEN = {".git", ".github", ".codex", ".local", ".venv", ".aws", ".pytest_cache", ".ruff_cache",
-             ".coverage", "__pycache__", "dist", "reports", "PLAN.md", "REVIEW_IMPROVEMENTS.md"}
+SKILL_ASSETS = {"SKILL.md", "references/configuration.md", "references/python.md"}
+SKILL_PREFIX = {True: "mortis_engine/_skill/", False: ".agents/skills/mortis-engine-use/"}
+FORBIDDEN = {".git", ".github", ".codex", ".claude", ".local", ".venv", ".aws", ".pytest_cache", ".ruff_cache",
+             ".coverage", "__pycache__", "dist", "reports", "PLAN.md", "REVIEW_IMPROVEMENTS.md", "mortis-release"}
 PRIVATE_SUFFIXES = {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key", ".p12", ".pfx"}
 SDIST_ROOTS = {
     "src", "tests", "evals", "docs", "scripts", "README.md", "LICENSE", "AGENTS.md",
     "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md", "uv.lock", "mortis.toml", "pyproject.toml",
-    "PKG-INFO", ".gitignore",
+    "PKG-INFO", ".gitignore", ".agents",
 }
 
 
@@ -31,9 +31,11 @@ def check_names(names, *, wheel):
             assert path.parts[0] == "mortis_engine" or path.parts[0].endswith(".dist-info"), name
         else:
             assert path.parts[0] in SDIST_ROOTS, f"Unexpected source archive content: {name}"
+            if path.parts[0] == ".agents":
+                assert path.is_relative_to(SKILL_PREFIX[False]), f"Unexpected agent source: {name}"
     prefix = "mortis_engine/" if wheel else "src/mortis_engine/"
     assert {prefix + asset for asset in PARSER_ASSETS} <= names, "Missing parser build assets"
-    assert {prefix + asset for asset in SKILL_ASSETS} <= names, "Missing coding-agent skill assets"
+    assert {SKILL_PREFIX[wheel] + asset for asset in SKILL_ASSETS} <= names, "Missing coding-agent skill assets"
     assert prefix + "__init__.py" in names, "Missing runtime package"
 
 
@@ -52,7 +54,7 @@ def check_dist(directory, root):
         assert metadata["Name"] == "mortis-engine" and metadata["Version"] == version
         assert archive.read(f"mortis_engine-{version}.dist-info/licenses/LICENSE") == (root / "LICENSE").read_bytes()
         for asset in SKILL_ASSETS:
-            assert archive.read("mortis_engine/" + asset) == (root / "src/mortis_engine" / asset).read_bytes(), asset
+            assert archive.read(SKILL_PREFIX[True] + asset) == (root / SKILL_PREFIX[False] / asset).read_bytes(), asset
     with tarfile.open(sdist) as archive:
         members = archive.getmembers()
         prefix = f"mortis_engine-{version}/"
@@ -63,7 +65,7 @@ def check_dist(directory, root):
                      "CHANGELOG.md", "uv.lock", "mortis.toml", "pyproject.toml", "tests/smoke_test.py",
                      "evals/review_improvements/run.py", "evals/review_improvements/baseline-result.json"):
             assert name in names, f"Missing source archive file: {name}"
-        for tree in ("src/mortis_engine", "tests", "evals/review_improvements", "docs", "scripts"):
+        for tree in ("src/mortis_engine", ".agents/skills/mortis-engine-use", "tests", "evals/review_improvements", "docs", "scripts"):
             for source in (root / tree).rglob("*"):
                 relative = source.relative_to(root).as_posix()
                 if (source.is_file() and not (set(source.parts) & FORBIDDEN)

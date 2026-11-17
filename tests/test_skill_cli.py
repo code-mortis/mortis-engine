@@ -7,7 +7,7 @@ import pytest
 from mortis_engine import cli, config, gateway
 from mortis_engine.cli import skills
 
-BUNDLE = Path(__file__).resolve().parents[1] / "src/mortis_engine/skills/mortis-engine-use"
+BUNDLE = Path(__file__).resolve().parents[1] / ".agents/skills/mortis-engine-use"
 
 
 @pytest.fixture(autouse=True)

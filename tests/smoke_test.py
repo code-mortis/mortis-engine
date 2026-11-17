@@ -31,7 +31,7 @@ def main():
                 assert cli.main(["skill", "install", agent]) == 0
                 target = personal / folder / "skills/mortis-engine-use"
                 for name in ("SKILL.md", "references/configuration.md", "references/python.md"):
-                    assert (target / name).read_bytes() == (package.parent / "skills/mortis-engine-use" / name).read_bytes()
+                    assert (target / name).read_bytes() == (package.parent / "_skill" / name).read_bytes()
     print(f"Installed Mortis {version}: CLI, parser assets and skill installers OK ({package})")
 
 

@@ -26,7 +26,10 @@ def run(args):
     prepared, previous = temporary / "new", temporary / "previous"
     installed = False
     try:
-        with as_file(files("mortis_engine").joinpath("skills", SKILL_NAME)) as source:
+        source = files("mortis_engine").joinpath("_skill")
+        if not source.is_dir():
+            source = Path(__file__).resolve().parents[3] / ".agents/skills" / SKILL_NAME
+        with as_file(source) as source:
             shutil.copytree(source, prepared)
         check_destination()
         if os.path.lexists(destination):
