@@ -25,31 +25,60 @@ def isolated_installation(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway, "send", forbidden)
     monkeypatch.setattr(gateway, "test_connection", forbidden)
     yield personal
-    assert not (tmp_path / "config").exists()
+    assert not (tmp_path / "config/mortis").exists()
     assert not (tmp_path / "state").exists()
 
 
-@pytest.mark.parametrize("agent,folder", [("codex", ".agents"), ("claude-code", ".claude")])
-def test_installs_complete_portable_skill(isolated_installation, agent, folder, capsys):
-    assert cli.main(["skill", "install", agent]) == 0
-    destination = isolated_installation / folder / "skills/mortis-engine-use"
+def test_installs_complete_portable_skill_without_creating_agent_directories(isolated_installation, capsys):
+    assert cli.main(["agent", "install"]) == 0
+    destination = isolated_installation / ".agents/skills/mortis-engine-use"
     contents = {path.relative_to(destination).as_posix(): path.read_bytes()
-                for path in destination.rglob("*") if path.is_file()}
+                for path in destination.rglob("*") if path.is_file() and path.name != ".mortis-managed"}
     assert set(contents) == {"SKILL.md", "references/configuration.md", "references/python.md"}
     assert contents == {name: (BUNDLE / name).read_bytes() for name in contents}
     assert str(destination) in capsys.readouterr().out
+    assert {path.name for path in isolated_installation.iterdir()} == {".agents"}
+
+
+def test_one_command_installs_and_updates_every_detected_agent(isolated_installation, tmp_path):
+    roots = [isolated_installation / folder for folder in (".claude", ".cursor", ".codex")]
+    roots.append(tmp_path / "config/opencode")
+    for root in roots:
+        root.mkdir(parents=True)
+    assert cli.main(["agent", "install"]) == 0
+    canonical = isolated_installation / ".agents/skills/mortis-engine-use"
+    (canonical / "SKILL.md").write_text("Older managed version\n")
+    assert cli.main(["agent", "install"]) == 0
+    for root in roots:
+        destination = root / "skills/mortis-engine-use"
+        assert (destination / "SKILL.md").read_bytes() == (BUNDLE / "SKILL.md").read_bytes()
+        if skills.os.name != "nt":
+            assert destination.is_symlink() and destination.resolve() == canonical.resolve()
+
+
+def test_legacy_opencode_and_shared_skill_parent(isolated_installation, tmp_path):
+    shared = isolated_installation / ".agents/skills"
+    shared.mkdir(parents=True)
+    (isolated_installation / ".opencode").mkdir()
+    codex = isolated_installation / ".codex"
+    codex.mkdir()
+    (codex / "skills").symlink_to(shared, target_is_directory=True)
+    assert cli.main(["agent", "install"]) == 0
+    canonical = shared / skills.SKILL_NAME
+    assert canonical.is_dir() and not canonical.is_symlink()
+    assert (tmp_path / "config/opencode/skills" / skills.SKILL_NAME / "SKILL.md").is_file()
 
 
 def test_existing_installation_requires_force_and_is_replaced(isolated_installation, capsys):
-    assert cli.main(["skill", "install", "codex"]) == 0
     destination = isolated_installation / ".agents/skills/mortis-engine-use"
+    destination.mkdir(parents=True)
     (destination / "SKILL.md").write_text("Local edits\n")
     (destination / "custom.md").write_text("Additional instructions\n")
-    assert cli.main(["skill", "install", "codex"]) == 1
+    assert cli.main(["agent", "install"]) == 1
     assert "--force" in capsys.readouterr().err
     assert (destination / "SKILL.md").read_text() == "Local edits\n"
     assert (destination / "custom.md").is_file()
-    assert cli.main(["skill", "install", "codex", "--force"]) == 0
+    assert cli.main(["agent", "install", "--force"]) == 0
     assert (destination / "SKILL.md").read_bytes() == (BUNDLE / "SKILL.md").read_bytes()
     assert not (destination / "custom.md").exists()
     assert not list(destination.parent.glob(".mortis-skill-*"))
@@ -64,10 +93,11 @@ def test_force_replaces_symlink_without_touching_target(isolated_installation, t
     destination = isolated_installation / ".claude/skills/mortis-engine-use"
     destination.parent.mkdir(parents=True)
     destination.symlink_to(original, target_is_directory=True)
-    assert cli.main(["skill", "install", "claude-code"]) == 1
+    assert cli.main(["agent", "install"]) == 1
     assert destination.is_symlink()
-    assert cli.main(["skill", "install", "claude-code", "--force"]) == 0
-    assert destination.is_dir() and not destination.is_symlink()
+    assert not (isolated_installation / ".agents").exists()
+    assert cli.main(["agent", "install", "--force"]) == 0
+    assert (destination / "SKILL.md").read_bytes() == (BUNDLE / "SKILL.md").read_bytes()
     if dangling:
         assert not original.exists()
     else:
@@ -78,7 +108,7 @@ def test_force_does_not_replace_a_regular_file(isolated_installation):
     destination = isolated_installation / ".agents/skills/mortis-engine-use"
     destination.parent.mkdir(parents=True)
     destination.write_text("Unrelated file\n")
-    assert cli.main(["skill", "install", "codex", "--force"]) == 1
+    assert cli.main(["agent", "install", "--force"]) == 1
     assert destination.read_text() == "Unrelated file\n"
 
 
@@ -93,7 +123,7 @@ def test_copy_failure_preserves_previous_installation(isolated_installation, mon
         raise OSError("Copy failed")
 
     monkeypatch.setattr(skills.shutil, "copytree", fail)
-    assert cli.main(["skill", "install", "codex", "--force"]) == 1
+    assert cli.main(["agent", "install", "--force"]) == 1
     if existing:
         assert (destination / "SKILL.md").read_text() == "Previous skill\n"
     else:
@@ -114,7 +144,7 @@ def test_publication_failure_retains_previous_skill(isolated_installation, monke
         return rename(path, target)
 
     monkeypatch.setattr(Path, "rename", fail)
-    assert cli.main(["skill", "install", "codex", "--force"]) == 1
+    assert cli.main(["agent", "install", "--force"]) == 1
     if restore_fails:
         backup, = destination.parent.glob(".mortis-skill-*/previous")
         assert (backup / "SKILL.md").read_text() == "Previous skill\n"
@@ -124,8 +154,8 @@ def test_publication_failure_retains_previous_skill(isolated_installation, monke
         assert not list(destination.parent.glob(".mortis-skill-*"))
 
 
-def test_unknown_agent_is_rejected_before_writing(isolated_installation):
+def test_agent_install_rejects_positional_arguments_before_writing(isolated_installation):
     with pytest.raises(SystemExit) as error:
-        cli.main(["skill", "install", "unsupported"])
+        cli.main(["agent", "install", "unsupported"])
     assert error.value.code == 2
     assert not isolated_installation.exists()
