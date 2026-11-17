@@ -233,7 +233,7 @@ def test_chat_budget_alias_is_deterministic(base_url, key):
     assert body[other] == 256 and key not in body
 
 
-@pytest.mark.parametrize("protocol", ["openai", "openai-responses"])
+@pytest.mark.parametrize("protocol", PROTOCOLS)
 def test_unlimited_output_omits_wire_cap_and_cannot_be_overridden(protocol):
     task = request(max_output_tokens=0)
     body = llm_http.encode_request(protocol, connection(protocol), task)
@@ -243,9 +243,6 @@ def test_unlimited_output_omits_wire_cap_and_cannot_be_overridden(protocol):
         llm_http.encode_request(protocol, connection(protocol, extra_body={key: 16384}), task)
 
 
-def test_anthropic_unlimited_output_explains_required_api_limit():
-    with pytest.raises(ValueError, match="require a positive max_output_tokens"):
-        llm_http.encode_request("anthropic", connection("anthropic"), request(max_output_tokens=0))
 
 
 @pytest.mark.parametrize("protocol,key", [("openai", "tools.0.function.strict"),
@@ -328,6 +325,14 @@ def test_forced_tools_cannot_return_plain_text(protocol):
         llm_http.decode_response(protocol, result(protocol), task)
 
 
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+def test_large_workflow_allowance_is_not_capped_by_transport(protocol):
+    task = request(max_output_tokens=5_000_000)
+    body = llm_http.encode_request(protocol, connection(protocol), task)
+    key = "max_output_tokens" if protocol == "openai-responses" else "max_tokens"
+    assert body[key] == 5_000_000
+
+
 def test_invalid_schema_and_tool_history_rejected():
     with pytest.raises(ValueError, match="local references"):
         llm_http.encode_request("openai", connection(), request(output_schema={"$ref": "https://other/schema"}))
@@ -342,6 +347,8 @@ def test_send_custom_auth_options_and_headers(monkeypatch, protocol):
     monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
     observed = []
     async def handler(wire):
+        if wire.method == "GET":
+            return httpx.Response(200, json={"id": "exact-custom-model", "max_tokens": 128000})
         observed.append(wire)
         return httpx.Response(200, json=result(protocol), headers={"x-request-id": "wire-request"})
     async def run():
@@ -484,6 +491,8 @@ def test_send_preserves_transport_retry_policy(monkeypatch, protocol, options, s
     monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
     calls = []
     async def handler(wire):
+        if wire.method == "GET":
+            return httpx.Response(200, json={"id": "exact-custom-model", "max_tokens": 128000})
         calls.append(wire)
         return httpx.Response(status, json={"error": {"code": provider_code}},
                               headers={"retry-after": "2", "x-request-id": "retry-fixture"})
@@ -596,4 +605,66 @@ def test_dns_preflight_timeout_is_known_not_consumed(monkeypatch):
                 await llm_http.send(connection(), {}, request(), client=client, timeout=0.005)
             assert caught.value.code == "timeout" and not caught.value.consumption_unknown
 
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("allowance,expected", [(0, 128000), (5000, 5000), (5000000, 128000)])
+def test_anthropic_uses_model_capacity_without_a_hidden_completion_cap(monkeypatch, allowance, expected):
+    monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
+    seen = []
+
+    def handler(wire):
+        seen.append(wire)
+        assert wire.headers["x-api-key"] == "selected-key"
+        assert "cookie" not in wire.headers
+        assert all(value is None for value in wire.extensions["timeout"].values())
+        if wire.method == "GET":
+            assert wire.url.path == "/v1/models/exact-custom-model"
+            return httpx.Response(200, json={"id": "resolved-selected-alias", "max_tokens": 128000})
+        assert wire.url.path == "/v1/messages"
+        assert json.loads(wire.content)["max_tokens"] == expected
+        assert json.loads(wire.content)["model"] == "exact-custom-model"
+        return httpx.Response(200, json=result("anthropic"))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), cookies={"ambient": "private"}) as client:
+            response = await llm.send(connection("anthropic"), {"api_key": "selected-key"},
+                                      request(max_output_tokens=allowance), client=client, timeout=None)
+            assert response.usage.total_tokens == 12
+    asyncio.run(run())
+    assert len(seen) == 2
+
+
+@pytest.mark.parametrize("capacity", [None, 0, -1, True, "128000"])
+def test_anthropic_missing_capacity_never_dispatches_or_invents_a_cap(monkeypatch, capacity):
+    monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
+    def handler(wire):
+        assert wire.method == "GET"
+        return httpx.Response(200, json={"max_tokens": capacity})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(InferenceError) as error:
+                await llm.send(connection("anthropic"), {}, request(max_output_tokens=0), client=client, timeout=None)
+            assert error.value.code == "model_capacity" and not error.value.consumption_unknown
+    from mortis_engine.llm_http import InferenceError
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "cancelled", "redirect", "unauthorized"])
+def test_anthropic_metadata_failure_has_no_inference_consumption(monkeypatch, failure):
+    monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
+    stopped = [False]
+    async def handler(wire):
+        assert wire.method == "GET" and wire.url.host == "provider.example"
+        if failure in {"timeout", "cancelled"}:
+            stopped[0] = failure == "cancelled"
+            await asyncio.sleep(1)
+        return httpx.Response(302 if failure == "redirect" else 401, headers={"location": "https://other.example"})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
+            with pytest.raises(llm_http.InferenceError) as error:
+                await llm.send(connection("anthropic"), {"api_key": "private-key"}, request(max_output_tokens=0),
+                               client=client, stopped=lambda: stopped[0], timeout=0.02 if failure == "timeout" else None)
+            assert not error.value.consumption_unknown
+            assert "private-key" not in str(error.value)
     asyncio.run(run())

@@ -1,4 +1,4 @@
-"""Bedrock InvokeModel over pooled async HTTP; AWS credentials stay in the worker."""
+"""Bedrock Converse over pooled async HTTP; AWS credentials stay in the worker."""
 
 import asyncio
 import json
@@ -18,8 +18,11 @@ from botocore.exceptions import BotoCoreError
 from botocore.regions import EndpointResolver
 
 from .llm_http import (
+    DEFAULT_TIMEOUT,
     InferenceError,
     _bounded,
+    _invalid,
+    _usage,
     decode_response,
     encode_request,
     post_json,
@@ -49,7 +52,7 @@ def _prepare(connection, credentials, body):
     model = connection["model"]
     if not isinstance(model, str) or not model or len(model) > 2048 or model in {".", ".."} or any(ord(char) < 32 for char in model):
         raise ValueError("Invalid Bedrock model identifier")
-    url = f"{base}/model/{quote(model, safe='')}/invoke"
+    url = f"{base}/model/{quote(model, safe='')}/converse"
     headers = httpx.Headers({"Content-Type": "application/json", "Accept": "application/json"})
     headers.update(credentials.get("extra_headers", {}))
     key = credentials.get("api_key") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
@@ -77,22 +80,117 @@ def _prepare(connection, credentials, body):
     return url, headers
 
 
+def encode_converse(connection, request):
+    source = encode_request("anthropic", connection, request)
+    source.pop("model")
+    source.pop("stream")
+    messages = source.pop("messages")
+    for message in messages:
+        converted = []
+        for block in message["content"]:
+            kind = block["type"]
+            if kind == "text":
+                converted.append({"text": block["text"]})
+            elif kind == "tool_use":
+                converted.append({"toolUse": {"toolUseId": block["id"], "name": block["name"], "input": block["input"]}})
+            elif kind == "tool_result":
+                converted.append({"toolResult": {"toolUseId": block["tool_use_id"], "content": [{"text": block["content"]}]}})
+            elif kind == "thinking":
+                reasoning = {"text": block["thinking"]}
+                if "signature" in block:
+                    reasoning["signature"] = block["signature"]
+                converted.append({"reasoningContent": {"reasoningText": reasoning}})
+            elif kind == "redacted_thinking":
+                converted.append({"reasoningContent": {"redactedContent": block["data"]}})
+            else:
+                raise ValueError("Unsupported Bedrock replay block")
+        message["content"] = converted
+    body = {"messages": messages}
+    if "system" in source:
+        body["system"] = [{"text": source.pop("system")}]
+    config = {target: source.pop(key) for key, target in {
+        "max_tokens": "maxTokens", "temperature": "temperature", "top_p": "topP", "stop_sequences": "stopSequences",
+    }.items() if key in source}
+    if config:
+        body["inferenceConfig"] = config
+    if "tools" in source:
+        tools = []
+        for tool in source.pop("tools"):
+            spec = {"name": tool["name"], "inputSchema": {"json": tool["input_schema"]}}
+            if tool.get("description"):
+                spec["description"] = tool["description"]
+            if "strict" in tool:
+                spec["strict"] = tool["strict"]
+            tools.append({"toolSpec": spec})
+        choice = source.pop("tool_choice")
+        body["toolConfig"] = {"tools": tools, "toolChoice": {
+            choice["type"]: {"name": choice["name"]} if choice["type"] == "tool" else {}}}
+    output = source.get("output_config", {})
+    if "format" in output:
+        schema = output.pop("format")["schema"]
+        body["outputConfig"] = {"textFormat": {"type": "json_schema", "structure": {
+            "jsonSchema": {"name": "mortis_result", "schema": json.dumps(schema)}}}}
+        if not output:
+            source.pop("output_config")
+    if source:
+        body["additionalModelRequestFields"] = source
+    return body
+
+
+def decode_converse(data, request, identity):
+    raw = data.get("usage")
+    usage = {target: raw[key] for key, target in {
+        "inputTokens": "input_tokens", "outputTokens": "output_tokens", "totalTokens": "total_tokens",
+        "cacheReadInputTokens": "cache_read_input_tokens", "cacheWriteInputTokens": "cache_creation_input_tokens",
+    }.items() if key in raw} if isinstance(raw, dict) else {}
+    normalized = {"usage": usage, "stop_reason": data.get("stopReason"), "content": []}
+    try:
+        message = data["output"]["message"]
+        if message["role"] != "assistant" or not isinstance(message["content"], list):
+            raise ValueError()
+        for block in message["content"]:
+            if len(block) != 1:
+                raise ValueError()
+            if "text" in block:
+                value = {"type": "text", "text": block["text"]}
+            elif "toolUse" in block:
+                tool = block["toolUse"]
+                value = {"type": "tool_use", "id": tool["toolUseId"], "name": tool["name"], "input": tool["input"]}
+            elif "reasoningContent" in block:
+                reasoning = block["reasoningContent"]
+                if not isinstance(reasoning, dict) or len(reasoning) != 1:
+                    raise ValueError()
+                if "reasoningText" in reasoning:
+                    text = reasoning["reasoningText"]
+                    if not isinstance(text["text"], str) or ("signature" in text and not isinstance(text["signature"], str)):
+                        raise ValueError()
+                    value = {"type": "thinking", "thinking": text["text"]}
+                    if "signature" in text:
+                        value["signature"] = text["signature"]
+                else:
+                    if not isinstance(reasoning["redactedContent"], str):
+                        raise ValueError()
+                    value = {"type": "redacted_thinking", "data": reasoning["redactedContent"]}
+            else:
+                raise ValueError()
+            normalized["content"].append(value)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise _invalid(usage=_usage("anthropic", normalized), request_id=identity) from exc
+    return decode_response("anthropic", normalized, request, request_id=identity)
+
+
 async def send(connection: dict, credentials: dict, request: Request, *, client: httpx.AsyncClient,
-               stopped=lambda: False, timeout: float | None = None) -> Response:
+               stopped=lambda: False, timeout=DEFAULT_TIMEOUT) -> Response:
     if connection.get("kind", "api") != "api" or connection.get("protocol") != "anthropic-bedrock":
         raise ValueError("Bedrock inference requires a shared Bedrock connection")
     if stopped():
         raise InferenceError("cancelled", "Inference was cancelled before dispatch.", consumption_unknown=False)
     options = connection.get("options", {})
-    limits = (float(options.get("timeout_sec", 120)), float(timeout) if timeout is not None else 900)
-    if any(not math.isfinite(limit) or limit <= 0 for limit in limits):
+    timeout = float(options.get("timeout_sec", 120)) if timeout is DEFAULT_TIMEOUT else timeout
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
         raise InferenceError("timeout", "The Bedrock deadline expired before dispatch.", consumption_unknown=False)
-    timeout = min(limits)
-    deadline = time.monotonic() + timeout
-    body = encode_request("anthropic", connection, request)
-    body.pop("model", None)
-    body.pop("stream", None)
-    body["anthropic_version"] = "bedrock-2023-05-31"
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    body = encode_converse(connection, request)
     payload = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
     # Credential providers may perform I/O; only preparation runs in a thread, never inference.
     try:
@@ -104,9 +202,9 @@ async def send(connection: dict, credentials: dict, request: Request, *, client:
         raise InferenceError("authentication", "Could not prepare Bedrock authentication. Check the worker AWS credentials, profile, region and endpoint.", consumption_unknown=False) from exc
     if stopped():
         raise InferenceError("cancelled", "Inference was cancelled before dispatch.", consumption_unknown=False)
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    remaining = deadline - time.monotonic() if deadline is not None else None
+    if remaining is not None and remaining <= 0:
         raise InferenceError("timeout", "The Bedrock request deadline expired before dispatch.", consumption_unknown=False)
     data, identity = await post_json(client, url, headers, payload, stopped=stopped, timeout=remaining,
                                      retry_codes=options.get("retry_codes"))
-    return decode_response("anthropic", data, request, request_id=identity)
+    return decode_converse(data, request, identity)

@@ -25,6 +25,5 @@ def test_invalid_output_and_budget_values_fail_at_configuration_boundary(model, 
 
 
 @pytest.mark.parametrize("protocol", ["anthropic", "anthropic-bedrock"])
-def test_required_output_limits_are_explained_before_starting_a_run(protocol):
-    with pytest.raises(ValueError, match="require a positive max_output_tokens"):
-        effective_connection({"protocol": protocol}, {"max_output_tokens": 0})
+def test_unlimited_is_supported_for_anthropic_transports(protocol):
+    assert effective_connection({"protocol": protocol, "model": "selected-model"}, {"max_output_tokens": 0})["model"] == "selected-model"

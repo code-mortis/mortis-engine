@@ -29,6 +29,8 @@ def test_probe_preserves_configured_reasoning_and_output_budgets(monkeypatch, ex
     connection["options"]["extra_body"] = extra
 
     async def handler(wire):
+        if wire.method == "GET":
+            return httpx.Response(200, json={"id": "exact-model", "max_tokens": 128000})
         body = json.loads(wire.content)
         assert body["max_tokens"] == expected and body["thinking"]["budget_tokens"] == 4096
         calls.append(body)
@@ -89,6 +91,8 @@ def test_probe_accepts_auto_only_tools_and_replays_provider_state(monkeypatch, p
         return await original(connection, credentials, request, **kwargs)
 
     async def handler(wire):
+        if wire.method == "GET":
+            return httpx.Response(200, json={"id": "exact-model", "max_tokens": 128000})
         body = json.loads(wire.content)
         assert body["model"] == "exact-model"
         assert body["tool_choice"] == ({"type": "auto"} if protocol == "anthropic" else "auto")
@@ -127,6 +131,8 @@ def test_probe_rejects_reachability_text_and_unconfirmed_tool_result(monkeypatch
     monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
 
     async def handler(wire):
+        if wire.method == "GET":
+            return httpx.Response(200, json={"id": "exact-model", "max_tokens": 128000})
         calls.append(wire)
         turn = len(calls)
         wrong = incorrect if turn == (1 if incorrect == "no_tool" else 2) else None

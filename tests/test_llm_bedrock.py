@@ -40,13 +40,16 @@ def connection(**kwargs):
 
 
 def request(**kwargs):
-    return Request(messages=[Message(role="user", content="Check café")], max_output_tokens=64, **kwargs)
+    return Request(messages=[Message(role="user", content="Check café")], **{"max_output_tokens": 64, **kwargs})
 
 
 def response(**kwargs):
-    return {"id": "message-id", "type": "message", "role": "assistant", "model": "selected-model",
-            "content": [{"type": "text", "text": "Done"}], "stop_reason": "end_turn",
-            "usage": {"input_tokens": 7, "output_tokens": 2}, **kwargs}
+    blocks = kwargs.pop("content", [{"type": "text", "text": "Done"}])
+    content = [{"text": block["text"]} if block["type"] == "text" else {"toolUse": {
+        "toolUseId": block["id"], "name": block["name"], "input": block["input"]}} for block in blocks]
+    return {"output": {"message": {"role": "assistant", "content": content}},
+            "stopReason": kwargs.pop("stop_reason", "end_turn"),
+            "usage": {"inputTokens": 7, "outputTokens": 2, "totalTokens": 9}, **kwargs}
 
 
 def execute(handler, config=None, credentials=None, query=None, **kwargs):
@@ -66,18 +69,18 @@ def test_bearer_tools_schema_options_and_selected_model(monkeypatch):
     tool = Tool(name="read_source", parameters={"type": "object", "properties": {}})
     def handler(req):
         assert req.url.host == "bedrock-runtime.eu-west-1.amazonaws.com"
-        assert req.url.raw_path == b"/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/invoke"
+        assert req.url.raw_path == b"/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse"
         assert req.headers["authorization"] == "Bearer bedrock-key"
         assert req.headers["x-tenant"] == "tenant-secret"
         body = json.loads(req.content)
         assert "model" not in body and "stream" not in body
-        assert body["anthropic_version"] == "bedrock-2023-05-31"
-        assert body["max_tokens"] == 64
+        assert "anthropic_version" not in body
+        assert body["inferenceConfig"]["maxTokens"] == 64
         assert body["messages"][0]["content"]
-        assert body["temperature"] == 0.2
-        assert body["output_config"]["format"]["schema"] == schema
-        assert body["output_config"]["effort"] == "high"
-        assert body["tools"][0]["name"] == "read_source"
+        assert body["inferenceConfig"]["temperature"] == 0.2
+        assert json.loads(body["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["schema"]) == schema
+        assert body["additionalModelRequestFields"]["output_config"]["effort"] == "high"
+        assert body["toolConfig"]["tools"][0]["toolSpec"]["name"] == "read_source"
         return httpx.Response(200, json=response(content=[{"type": "text", "text": '{"ok":true}'}]),
                               headers={"x-amzn-requestid": "aws-request-id"})
     result = execute(handler, connection(options={"aws_region": "eu-west-1", "extra_body": {"temperature": 0.2}}),
@@ -144,9 +147,13 @@ def test_signed_arn_request_matches_sdk_without_network(monkeypatch):
     def handler(req):
         client = sdk.create_client("bedrock-runtime", region_name="us-east-1")
         try:
-            client.meta.events.register("before-send.bedrock-runtime.InvokeModel", before_send)
+            def same_bytes(request, **kwargs):
+                request.data = req.content
+                request.headers.add_header("Accept", "application/json")
+            client.meta.events.register("before-sign.bedrock-runtime.Converse", same_bytes)
+            client.meta.events.register("before-send.bedrock-runtime.Converse", before_send)
             with pytest.raises(Captured):
-                client.invoke_model(modelId=model, body=req.content, contentType="application/json", accept="application/json")
+                client.converse(modelId=model, **json.loads(req.content))
         finally:
             client.close()
         assert captured[0].url == str(req.url)
@@ -162,8 +169,8 @@ def test_partition_endpoints_and_arn_escaping(region, hostname):
     def handler(req):
         assert req.url.host == hostname
         assert b"%2Finference" not in req.url.raw_path
-        assert b"inference-profile%2Fus.anthropic.example%3A0/invoke" in req.url.raw_path
-        assert req.url.path.endswith("/invoke")
+        assert b"inference-profile%2Fus.anthropic.example%3A0/converse" in req.url.raw_path
+        assert req.url.path.endswith("/converse")
         return httpx.Response(200, json=response())
     execute(handler, connection(model=model, options={"aws_region": region}))
 
@@ -326,3 +333,49 @@ def test_custom_auth_header_cannot_change_routing_or_inject_headers(header):
     with pytest.raises(InferenceError) as failure:
         execute(lambda req: pytest.fail("Unsafe auth header dispatched"), connection(options={"auth_header": header}))
     assert not failure.value.consumption_unknown
+
+
+@pytest.mark.parametrize("allowance", [0, 5000, 5000000])
+def test_converse_uses_only_the_requested_allowance_and_preserves_thinking(allowance):
+    from mortis_engine.schemas import Message
+    calls = []
+    output_tokens = min(allowance, 20000) if allowance else 20000
+    tool = Tool(name="read_source", parameters={"type": "object"})
+    task = request(max_output_tokens=allowance, tools=[tool])
+    def handler(wire):
+        body = json.loads(wire.content)
+        calls.append(body)
+        assert body.get("inferenceConfig", {}).get("maxTokens", 0) == allowance
+        assert "max_tokens" not in body.get("additionalModelRequestFields", {})
+        if len(calls) == 1:
+            return httpx.Response(200, json={"stopReason": "tool_use", "usage": {
+                "inputTokens": 7, "outputTokens": output_tokens, "totalTokens": 117 + output_tokens,
+                "cacheReadInputTokens": 100, "cacheWriteInputTokens": 10}, "output": {"message": {
+                    "role": "assistant", "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "inspect", "signature": "opaque"}}},
+                        {"reasoningContent": {"redactedContent": "ZW5jcnlwdGVk"}},
+                        {"toolUse": {"toolUseId": "read-1", "name": "read_source", "input": {}}}]}}})
+        assert body["messages"][1]["content"][0]["reasoningContent"]["reasoningText"]["signature"] == "opaque"
+        assert body["messages"][1]["content"][1]["reasoningContent"]["redactedContent"] == "ZW5jcnlwdGVk"
+        assert body["messages"][2]["content"] == [{"toolResult": {"toolUseId": "read-1", "content": [{"text": "source"}]}}]
+        return httpx.Response(200, json=response())
+    first = execute(handler, query=task, timeout=None)
+    assert first.usage.total_tokens == 117 + output_tokens
+    task = task.model_copy(update={"messages": [*task.messages,
+        Message(role="assistant", content=first.content, tool_calls=first.tool_calls, provider_data=first.provider_data),
+        Message(role="tool", tool_call_id="read-1", content="source")]})
+    assert execute(handler, query=task, timeout=None).content == "Done"
+
+
+@pytest.mark.parametrize("extra", [{"inferenceConfig.maxTokens": 10}, {"additionalModelRequestFields": {"max_tokens": 10}}])
+def test_converse_cannot_hide_a_connection_output_override(extra):
+    with pytest.raises(ValueError, match="protected"):
+        bedrock.encode_converse(connection(options={"extra_body": extra}), request(max_output_tokens=0))
+
+
+def test_converse_accepts_optional_reasoning_signature():
+    data = response()
+    data["output"]["message"]["content"].insert(0, {"reasoningContent": {"reasoningText": {"text": "inspect"}}})
+    result = execute(lambda wire: httpx.Response(200, json=data), query=request(max_output_tokens=0))
+    assert result.content == "Done"
+    assert result.provider_data["anthropic_content"][0] == {"type": "thinking", "thinking": "inspect"}
