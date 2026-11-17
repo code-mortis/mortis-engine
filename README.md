@@ -440,6 +440,12 @@ mortis connect aws \
 
 Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
 
+The project-local [release preparation skill](skills/mortis-release/SKILL.md)
+synchronizes versions, changelog, repository and site documentation, and maintained
+skills before a release. Invoke `$mortis-release` in Codex or `/mortis-release` in
+Claude Code from this checkout. It prepares and validates changes; publication
+remains a separate maintainer action.
+
 GitHub Actions runs the test suite on Python 3.13, 3.14 and 3.15 for pushes to `main`
 (including merges), pull requests targeting `main` and manual dispatches.
 Python 3.15 checks Ruff, builds and checks the wheel/source distribution and
