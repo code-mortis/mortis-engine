@@ -8,8 +8,8 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from mortis_engine import __version__, llm_http
 from mortis_engine import gateway as llm
-from mortis_engine import llm_http
 from mortis_engine.schemas import Message, Request, Tool, ToolCall
 
 PROTOCOLS = ["openai", "openai-responses", "anthropic"]
@@ -379,7 +379,7 @@ def test_go_session_is_stable_and_cannot_be_overridden(monkeypatch):
                     "X-OpenCode-Session": "forged", "user-agent": "forged"}}, task, client=client)
     asyncio.run(run())
     assert all(headers["x-opencode-session"] == "stable-session" for headers in seen)
-    assert all(headers["user-agent"] == "code-mortis/0.1.0" for headers in seen)
+    assert all(headers["user-agent"] == f"code-mortis/{__version__}" for headers in seen)
 
 
 @pytest.mark.parametrize("status,code,unknown,retry", [(401, "authentication", False, False),

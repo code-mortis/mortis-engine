@@ -18,7 +18,7 @@ use `uv tool install --editable .`.
 Trivy is required for security scans and Docker is optional
 for code graph context; neither executable is bundled in the Python package.
 
-## Use with Codex or Claude Code
+## Use with coding agents
 
 The portable [Mortis Engine skill](.agents/skills/mortis-engine-use/SKILL.md) teaches coding
 agents to preview review scope, run reviews and security scans, inspect saved
@@ -27,43 +27,19 @@ Install the CLI above; the skill supplies instructions, not the engine executabl
 Reviews and scans also need a [saved AI connection](#connect-with-environment-variables).
 Scope previews need no connection or provider calls.
 
-The skill and its references are bundled with the Python package. Install them
-for either agent using the CLI; no repository checkout is needed.
-
-### Codex
-
-Install for your user account using Codex's
-[personal skills directory](https://developers.openai.com/codex/skills/):
+Mortis Engine 0.1.1 bundles the skill and its references. Install them for your
+user account with the CLI:
 
 ```sh
-mortis skill install codex
+mortis agent install
 ```
 
-### Claude Code
-
-Install for your user account using Claude Code's
-[personal skills directory](https://code.claude.com/docs/en/skills):
-
-```sh
-mortis skill install claude-code
-```
-
-You can install in both locations; they use the same portable skill files.
-Codex receives the skill in `~/.agents/skills/mortis-engine-use`; Claude Code
-receives it in `~/.claude/skills/mortis-engine-use`. Installation is local and
-does not load a connection or call a provider. Existing installations are
-preserved unless you pass `--force`.
-
-After upgrading Mortis, replace an installed skill with the bundled version:
-
-```sh
-mortis skill install codex --force
-mortis skill install claude-code --force
-```
-
-Replacement copies the new skill before removing the previous installation.
-For an existing skill symlink, `--force` replaces the link with a local copy
-and leaves the linked directory untouched.
+The command installs the skill under `~/.agents/skills/` and registers it in the
+detected Claude Code, Cursor, Codex and OpenCode skill directories. These
+registrations link to the canonical copy on macOS and Linux and use copies on
+Windows. Installation runs locally without a provider connection.
+Rerun the command after upgrading to refresh managed installations. Use
+`mortis agent install --force` to replace a manually installed copy or link.
 
 ### Use the skill
 
@@ -168,7 +144,11 @@ mortis summary --run RUN_ID --max-output-tokens 32768 --summary-token-budget 0
 
 Use `0` for unlimited total token budgets, overall timeouts and maximum files. It is normalized to no limit internally. Concurrency still requires 1–8. Provider request timeouts, transport size limits and provider account/model limits still apply.
 
-`max_output_tokens` controls each AI response, including reasoning, across analysis and follow-up stages. An explicit value is preserved during recovery. With `0`, Mortis omits the output cap for OpenAI Chat Completions and Responses protocols and lets the provider choose its default; this does not guarantee the model's maximum. If a total token budget is finite, Mortis instead bounds output by the remaining budget and serializes these requests so concurrent work cannot reserve the same tokens. A provider may reject a remaining budget above its model's output maximum; set a positive `max_output_tokens` in that case. [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create) and [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages-request-response.html) require an explicit maximum, so those connections need a positive value. Omitting the setting preserves the existing 16,384-token requests and recovery up to 32,768 tokens.
+`max_output_tokens` controls each AI response, including reasoning, across analysis and follow-up stages. An explicit positive value is preserved during recovery. Omitting the setting keeps the 16,384-token default and recovery up to 32,768 tokens.
+
+Set `max_output_tokens = 0` to let the provider determine the output allowance when the total token budget is unlimited. OpenAI Chat Completions, OpenAI Responses and Bedrock Converse use the provider's default. Anthropic Messages fetches the selected model's output capacity from the Models API and uses it for the request. If the endpoint cannot supply that capacity, use an explicit positive limit.
+
+With a finite token budget, Mortis derives an output cap from the remaining budget and serializes requests so they cannot reserve the same tokens. If the provider rejects the resulting cap, set a positive limit within the model's capacity.
 
 Review flags also include `--assessment-token-budget`, `--verification-token-budget`, `--summary-token-budget` and `--summary-timeout-seconds`. Scans support the assessment and verification budget flags. Standalone verification uses `--verification-token-budget`; background generation uses `--token-budget`. These commands support `--max-output-tokens` and their corresponding overall timeout flag. `--resume` restores the saved overrides and rejects new limit flags.
 
@@ -425,7 +405,7 @@ Use `--headers-env '{}'` to clear extra headers. A supplied `--options` object r
 | `aws_region` | Bedrock region |
 | `aws_profile` | AWS credential profile for Bedrock |
 
-Bedrock can use ambient AWS credentials or an API key supplied through the same environment or vault methods.
+Bedrock can use ambient AWS credentials or an API key supplied through the same environment or vault methods. Choose a model or inference profile that supports the [Converse API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html) and the tool and structured-output features in use. IAM credentials need `bedrock:InvokeModel` permission.
 
 ```sh
 mortis connect aws \

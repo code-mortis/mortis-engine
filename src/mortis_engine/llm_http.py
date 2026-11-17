@@ -14,6 +14,7 @@ import httpx
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
+from . import __version__
 from .schemas import Request, Response, ToolCall, Usage
 from .security import clean_text, digest, safe_endpoint
 
@@ -628,7 +629,7 @@ async def send(connection: dict, credentials: dict, request: Request, *, client:
             raise
     endpoint = urlsplit(base)
     if endpoint.hostname == "opencode.ai" and endpoint.path.rstrip("/") == "/zen/go/v1":
-        headers["User-Agent"] = "code-mortis/0.1.0"
+        headers["User-Agent"] = f"code-mortis/{__version__}"
         headers["x-opencode-session"] = request.session_id
     data, identity = await post_json(client, base + suffix, headers, body, stopped=stopped,
                                      timeout=duration - (time.monotonic() - started) if duration is not None else None, retry_codes=options.get("retry_codes"))

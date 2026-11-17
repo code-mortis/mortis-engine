@@ -39,15 +39,13 @@ done
 ```
 
 The smoke check confirms the installed package is outside the checkout, validates
-the CLI/library/metadata versions, and checks parser build assets without running
-Docker or calling a provider. Source-checkout tests alone do not establish that
-published packages install correctly.
+the CLI/library/metadata versions, checks parser build assets and exercises
+`mortis agent install` for detected coding agents with a temporary home.
 
 Update `pyproject.toml`, `src/mortis_engine/__init__.py` and any versioned
 installation examples together. Refresh `uv.lock` with `uv lock` when package
-metadata or dependencies change. Replace the Unreleased changelog entry with the
-actual version/date only when preparing that release; never claim a release that
-has not been published.
+metadata or dependencies change. Add the prepared version and date below
+`Unreleased`, leaving that heading available for future changes.
 
 ## Public repository preparation
 

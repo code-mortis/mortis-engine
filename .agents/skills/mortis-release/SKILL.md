@@ -116,7 +116,8 @@ regressions first when behavior changes, then the complete release checks.
 Install the wheel and source archive into separate temporary environments with
 the locked runtime dependencies, then run `tests/smoke_test.py` with each installed
 interpreter from outside the source checkout, as described in `docs/releasing.md`.
-Verify CLI/library/metadata versions, parser assets and both skill installers.
+Verify CLI/library/metadata versions, parser assets and `mortis agent install`
+for the detected agents.
 Do not use personal home directories to smoke-test installation. If dependencies
 were reused or any installation check was skipped, state that boundary explicitly.
 Check neither archive contains development skills, personal configuration,

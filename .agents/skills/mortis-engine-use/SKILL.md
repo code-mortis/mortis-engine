@@ -19,6 +19,11 @@ For an existing engine development checkout, use
 `uv run --locked --project /path/to/mortis-engine mortis ... --repo /path/to/target`.
 Keep the engine checkout and the repository being analyzed distinct.
 
+With Mortis Engine 0.1.1, run `mortis agent install` after installing or upgrading
+the CLI to refresh the bundled skill for detected coding agents. The command
+runs locally. Use `--force` only when the user wants to replace an unmanaged
+installation.
+
 Use `--repo /path/to/repo` on repository commands when outside the target. Resolve
 the user's intended scope before spending provider tokens:
 

@@ -21,7 +21,8 @@ mortis connect work --provider openai --model YOUR_MODEL --api-key-env MORTIS_AP
 
 Supported protocols are `openai`, `openai-responses`, `anthropic` and
 `anthropic-bedrock`. A custom destination uses `--provider custom`, an explicit
-`--protocol` and `--base-url`. Bedrock can use `--ambient-auth` with
+`--protocol` and `--base-url`. Bedrock uses Converse. Select a model or inference
+profile with the tool and structured-output support Mortis needs. Bedrock can use `--ambient-auth` with
 `--options '{"aws_region":"us-east-1","aws_profile":"work"}'` instead of a key.
 `--headers-env` maps header names to environment-variable names.
 
@@ -76,8 +77,11 @@ Provider request timeouts, transport bounds and model/account limits still apply
 `--max-output-tokens` caps each response including reasoning. With `0`, OpenAI
 protocols omit the output cap when the total budget is unlimited; with a finite
 budget, output is bounded by remaining tokens and requests are serialized.
-Anthropic and Bedrock require a positive output maximum. Provider output limits
-can still reject a request. Resume restores saved limits and rejects new ones.
+With an unlimited token budget, Bedrock Converse omits `maxTokens` and uses
+the service default. Anthropic Messages reads the selected model's output
+capacity from the Models API. Set a positive limit if the endpoint lacks that
+metadata or the provider rejects the derived cap. Resume restores saved limits
+and rejects new ones.
 
 `--second-pass` is an optional review experiment, disabled by default. Do not
 enable it or increase limits as an implicit recovery step.
