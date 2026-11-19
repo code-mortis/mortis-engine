@@ -4,7 +4,7 @@ import copy
 import json
 import time
 
-from mortis_engine.review import file_policy
+from mortis_engine.review import file_policy, planning
 
 from . import engine, payload, policy
 from .context import source_navigation
@@ -18,7 +18,7 @@ from .contracts import (
 )
 
 
-async def ask(item, session, task, context, key, options, *, prepared=False, pin=None):
+async def ask(item, session, task, context, key, options, *, prepared=False, pin=None, legacy_contexts=None):
     model, selected = {"analysis": (SecurityAnalysis, SecurityAnalysisSelection),
         "assessment": (SecurityAssessment, SecurityAssessmentSelection),
         "verification": (SecurityFix, SecurityFixSelection)}[task]
@@ -101,11 +101,23 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
         timeout = options.get("timeout_seconds")
         if getattr(item, "deadline", None) is not None:
             timeout = max(0.001, item.deadline - time.monotonic())
-        result = await session.ask("security_" + task, key + f":pass:{attempt}", instructions=instructions,
-            context=payload.compact_evidence(supplied), schema=schema, validate=validate, effort=options["effort"],
+        stage, task_key = "security_" + task, key + f":pass:{attempt}"
+        request_options = {"instructions": instructions, "schema": schema, "effort": options["effort"],
+                           "max_output_tokens": options.get("max_output_tokens")}
+        request_context = payload.compact_evidence(supplied)
+        cached = session.records.get((stage, task_key)) if legacy_contexts else None
+        if cached and planning.fingerprint(
+                session.request(stage, task_key, context=request_context, **request_options).model_dump()) != cached[0]:
+            for variant in legacy_contexts(supplied):
+                alternative = payload.compact_evidence(variant)
+                request = session.request(stage, task_key, context=alternative, **request_options)
+                if planning.fingerprint(request.model_dump()) == cached[0]:
+                    request_context = alternative
+                    break
+        result = await session.ask(stage, task_key, context=request_context, validate=validate, **request_options,
             token_budget=options.get({"analysis": "token_budget", "assessment": "assessment_token_budget",
                                       "verification": "verification_token_budget"}[task]),
-            timeout=timeout, max_output_tokens=options.get("max_output_tokens"))
+            timeout=timeout)
         requested = result["required_paths"]
         if not requested:
             if task == "assessment" and result["finding_id"] is not None:

@@ -15,6 +15,11 @@ from .review.context import sanitize
 from .schemas import Message, Request, Response, Usage
 
 
+class _BudgetReserved(Exception):
+    def __init__(self, settled):
+        self.settled = settled
+
+
 def schema_for_transport(schema):
     schema = copy.deepcopy(schema)
 
@@ -65,6 +70,7 @@ class Session:
         self.stage_deadlines = {}
         self.uncapped_lock = None
         self.uncapped_loop = None
+        self.budget_settlement = None
         self.client = None
         self.records = history.attempts(self.run_id) if history else {}
         for _, row, _ in self.records.values():
@@ -136,6 +142,17 @@ class Session:
                                  retryable=row.get("retryable", False), retry_after=row.get("retry_after"))
         if stopped() or time.monotonic() >= until:
             raise InferenceError("deadline", "The stage deadline has expired.", consumption_unknown=False)
+        while True:
+            try:
+                return await self._admit(stage, key, request, client, until, budget, stopped, accept, digest)
+            except _BudgetReserved as exc:
+                # Release connection capacity before waiting for the reservation to settle.
+                try:
+                    await llm_http._bounded(exc.settled.wait(), stopped, until - time.monotonic())
+                except InferenceError as stopped_wait:
+                    raise InferenceError(stopped_wait.code, str(stopped_wait), consumption_unknown=False) from stopped_wait
+
+    async def _admit(self, stage, key, request, client, until, budget, stopped, accept, digest):
         waiting = False
 
         def queued():
@@ -168,22 +185,33 @@ class Session:
                 stage.startswith("security_") and row["stage"].startswith("security_")]
         if any(row["consumption_unknown"] and row["status"] != "running" for row in rows):
             raise InferenceError("usage_unknown", "An earlier request has unknown token usage.", consumption_unknown=False)
-        if request.max_output_tokens == 0:
-            remaining = []
+
+        def remaining(charges):
+            limits = []
             if budget is not None:
-                remaining.append(budget - sum(self.charge(row) for row in rows if row["stage"] == stage))
+                limits.append(budget - sum(self.charge(row) for row in charges if row["stage"] == stage))
             if self.scan_budget is not None:
-                remaining.append(self.scan_budget - sum(self.charge(row) for row in rows))
-            if remaining:
-                # Include the output field and its integer digits in the conservative input reservation.
-                output = min(remaining) - gateway.reservation(self.connection, request.model_copy(update={"max_output_tokens": 1})) - 16
-                if output < 1:
-                    raise InferenceError("budget", "The token budget cannot admit this request.", consumption_unknown=False)
-                request = request.model_copy(update={"max_output_tokens": output})
-        amount = gateway.reservation(self.connection, request) + request.max_output_tokens
-        if (budget is not None and sum(self.charge(row) for row in rows if row["stage"] == stage) + amount > budget
-                or self.scan_budget is not None and sum(self.charge(row) for row in rows) + amount > self.scan_budget):
+                limits.append(self.scan_budget - sum(self.charge(row) for row in charges))
+            return min(limits, default=float("inf"))
+
+        def reject(amount):
+            if stage == "security_assessment" and amount <= remaining([row for row in rows if row["status"] != "running"]):
+                if self.budget_settlement is None:
+                    self.budget_settlement = asyncio.Event()
+                raise _BudgetReserved(self.budget_settlement)
             raise InferenceError("budget", "The token budget cannot admit this request.", consumption_unknown=False)
+
+        available = remaining(rows)
+        if request.max_output_tokens == 0 and (budget is not None or self.scan_budget is not None):
+            # Include the output field and its integer digits in the conservative input reservation.
+            overhead = gateway.reservation(self.connection, request.model_copy(update={"max_output_tokens": 1})) + 16
+            output = available - overhead
+            if output < 1:
+                reject(overhead + 1)
+            request = request.model_copy(update={"max_output_tokens": output})
+        amount = gateway.reservation(self.connection, request) + request.max_output_tokens
+        if amount > available:
+            reject(amount)
         # No awaits between admission, reservation and the durable dispatch marker.
         row = {"task_key": key, "stage": stage, "reserved_tokens": amount, "usage": {},
                "consumption_unknown": True, "status": "running"}
@@ -217,6 +245,9 @@ class Session:
             if self.history:
                 self.history.settle(self.run_id, row, result)
             self.records[stage, key] = (digest, row, encode(result) if result is not None else None)
+            if self.budget_settlement is not None:
+                self.budget_settlement.set()
+                self.budget_settlement = None
         return result
 
     async def analysis(self, key, request, **kwargs):

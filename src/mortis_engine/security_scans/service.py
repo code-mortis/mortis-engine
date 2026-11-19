@@ -13,12 +13,13 @@ from typing import Literal
 from pydantic import Field
 
 from mortis_engine.assessment_dispatch import dispatch, replay_order
+from mortis_engine.history import encode
 from mortis_engine.review import file_policy, source
 from mortis_engine.review.settings import RunLimits
 from mortis_engine.security import digest
 
 from . import advisories, engine
-from .contracts import SecurityAnalysis, SecurityAssessment
+from .contracts import SecurityAnalysis, SecurityAssessment, SecurityProposal
 from .inference import ask
 from .scanner import identity_key, trivy
 
@@ -147,6 +148,37 @@ def assessment_batch(candidates, history, item, concurrency, *, active_keys=None
     return chosen
 
 
+def _legacy_assessment_contexts(context, history_positions, completed):
+    # In an old invocation, results before its start came from SQLite in sorted key order.
+    proposal_at = completed.get("analysis:" + context["proposal"]["path"], float("inf"))
+    observations = []
+    cutoffs = {proposal_at}
+    for old, position in zip(context["history"], history_positions, strict=True):
+        if position is None:
+            observations.append((old, False, float("inf"), float("inf")))
+            continue
+        nested = old.get("kind") != "code" and "ai_analysis" in old
+        finding = old["ai_analysis"] if nested else old
+        analysis_at = completed.get("analysis:" + finding["path"], float("inf"))
+        assessment_at = completed.get(f"assessment:{position}", float("inf"))
+        cutoffs.update((analysis_at, assessment_at))
+        observations.append((old, nested, analysis_at, assessment_at))
+
+    for cutoff in sorted(cutoffs - {float("inf")}):
+        history = []
+        for old, nested, analysis_at, assessment_at in observations:
+            finding = old["ai_analysis"] if nested else old
+            if analysis_at <= cutoff:
+                proposal = {key: value for key, value in finding.items() if key in SecurityProposal.model_fields}
+                finding = {**json.loads(encode(proposal)),
+                           **{key: value for key, value in finding.items() if key not in proposal}}
+            if assessment_at <= cutoff:
+                finding = {**finding, "assessment": json.loads(encode(finding["assessment"]))}
+            history.append({**old, "ai_analysis": finding} if nested else finding)
+        proposal = json.loads(encode(context["proposal"])) if proposal_at <= cutoff else context["proposal"]
+        yield {**context, "proposal": proposal, "history": history}
+
+
 def observe(evidence, old=None):
     identity = old["id"] if old else evidence["fingerprint"][:32]
     state = old.get("state", "open") if old else "open"
@@ -196,6 +228,12 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                progress=lambda value: None, continuous=True):
     options = ScanOptions.model_validate(options or {}).model_dump()
     deadline = time.monotonic() + options["timeout_seconds"] if options["timeout_seconds"] else None
+    legacy_completed = {}
+    if not continuous:
+        legacy_completed = {key.rsplit(":pass:", 1)[0]: position
+                            for position, ((stage, key), (_, row, _)) in enumerate(
+                                getattr(session, "records", {}).items())
+                            if stage in {"security_analysis", "security_assessment"} and row["status"] == "completed"}
 
     def stopped():
         if deadline is not None and time.monotonic() >= deadline:
@@ -388,8 +426,13 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                                      f"assessment:{index}", repo, env, head_sha=sha, redaction=redaction,
                                      predecessors=predecessors)
 
+                def legacy_contexts(supplied):
+                    return _legacy_assessment_contexts(supplied, (
+                        finding_positions.get(old["id"]) for old in context["history"]), legacy_completed)
+
                 assessed, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options,
-                                        prepared=saved is not None, pin=pin if saved_history else None)
+                    prepared=saved is not None, pin=pin if saved_history else None,
+                    legacy_contexts=legacy_contexts if legacy_completed else None)
                 if not continuous:
                     assessed = SecurityAssessment.model_validate(assessed, strict=True).model_dump()
                 row.update(status="completed", result=assessed)

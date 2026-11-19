@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,10 @@ CONNECTION = {"kind": "api", "provider": "test", "protocol": "openai", "model": 
               "base_url": "https://example.com/v1", "options": {}}
 
 
+def request_context(request):
+    return json.JSONDecoder().raw_decode(request.messages[0].content.split("\n\n", 1)[1])[0]
+
+
 @pytest.fixture(params=["review", "scan"])
 def assessment_stage(request, local, monkeypatch):
     repo, _, _ = local
@@ -32,8 +37,7 @@ def assessment_stage(request, local, monkeypatch):
     kind = request.param
 
     def response(inference_request):
-        content = inference_request.messages[0].content
-        context, _ = json.JSONDecoder().raw_decode(content.split("\n\n", 1)[1])
+        context = request_context(inference_request)
 
         def cite(path):
             identity = next(key for key, row in context["citation_sources"].items() if row["path"] == path)
@@ -60,8 +64,8 @@ def assessment_stage(request, local, monkeypatch):
                 output.update(relationship="duplicate", history_explanation="Same fixture")
         return name, output
 
-    async def run(session, progress, *, budget=None, continuous=True, max_output=None):
-        options = {"concurrency": 4, "assessment_token_budget": budget, "max_output_tokens": max_output}
+    async def run(session, progress, *, budget=None, continuous=True, max_output=None, concurrency=4):
+        options = {"concurrency": concurrency, "assessment_token_budget": budget, "max_output_tokens": max_output}
         async with session:
             if kind == "scan":
                 return await security.scan(repo, ref=head, session=session, options=options, scanner=lambda *args: {
@@ -204,26 +208,23 @@ def test_assessment_dispatch_keeps_budget_reservations(assessment_stage, monkeyp
 
     async def exercise(session, budget):
         sent = []
-        first, failed = asyncio.Event(), asyncio.Event()
+        reserved = asyncio.Event()
         release = asyncio.Event()
 
         async def send(connection, credentials, request, **kwargs):
             name, output = response(request)
             if name is not None:
                 sent.append(name)
-                first.set()
+                if len(sent) == (2 if kind == "scan" else 1):
+                    reserved.set()
                 if kind == "scan" or name == "L":
                     await release.wait()
             return Response(output=output, usage=Usage(total_tokens=450 if name else 1))
 
-        def progress(event):
-            if event["phase"] == "assessment" and event["failed_candidates"] >= 2:
-                failed.set()
-
         monkeypatch.setattr(gateway, "send", send)
         async with asyncio.TaskGroup() as group:
-            running = group.create_task(run(session, progress, budget=budget, max_output=100))
-            await asyncio.wait_for((failed if kind == "scan" else first).wait(), 10)
+            running = group.create_task(run(session, lambda event: None, budget=budget, max_output=100))
+            await asyncio.wait_for(reserved.wait(), 10)
             stage = "security_assessment" if kind == "scan" else "assessment"
             assert session.usage(stage)["reserved_tokens"] == (1000 if kind == "scan" else 500)
             release.set()
@@ -240,6 +241,109 @@ def test_assessment_dispatch_keeps_budget_reservations(assessment_stage, monkeyp
             with history.claim(run_id):
                 session = Session(CONNECTION, {}, history=history, run_id=run_id, scan_budget=scan_budget)
                 asyncio.run(exercise(session, budget))
+
+
+@pytest.mark.parametrize("assessment_stage", ["scan"], indirect=True)
+@pytest.mark.parametrize(("budget", "scan_budget", "cancel"), [(1000, None, False), (None, 1007, False),
+                                                               (1000, None, True)])
+def test_scan_assessment_waits_for_temporary_reservation(assessment_stage, monkeypatch, budget, scan_budget, cancel):
+    repo, _, run, response = assessment_stage
+
+    async def exercise(session):
+        release_slow, checking_next = asyncio.Event(), asyncio.Event()
+        sent = []
+
+        def reservation(_connection, request):
+            candidate = request_context(request).get("proposal", {}).get("title")
+            if candidate == "C":
+                checking_next.set()
+            return {None: 0, "R": 50}.get(candidate, 700)
+
+        async def send(connection, credentials, request, **kwargs):
+            name, output = response(request)
+            if name is None:
+                output["findings"] = [row for row in output["findings"] if row["title"] in "LRC"]
+            else:
+                sent.append(name)
+                if name == "L":
+                    await release_slow.wait()
+            return Response(output=output, usage=Usage(total_tokens=10 if name else 1))
+
+        monkeypatch.setattr(gateway, "reservation", reservation)
+        monkeypatch.setattr(gateway, "send", send)
+        async with asyncio.TaskGroup() as group:
+            running = group.create_task(run(session, lambda event: None, budget=budget, max_output=100, concurrency=2))
+            await asyncio.wait_for(checking_next.wait(), 10)
+            assert session.active_requests == 1
+            assert sent == ["L", "R"]
+            if cancel:
+                running.cancel()
+            else:
+                release_slow.set()
+        ledger = session.usage("security_assessment")
+        if cancel:
+            assert running.cancelled() and session.active_requests == 0
+            assert sent == ["L", "R"] and ledger["reserved_tokens"] == 810
+            assert ledger["total_tokens"] is None and len(ledger["requests"]) == 2
+        else:
+            assert sent == ["L", "R", "C"] and ledger["total_tokens"] == 30
+            assert running.result()["status"] == "completed" and running.result()["grade"] == "D"
+
+    with History(repo) as history:
+        run_id = history.begin("scan", "main", {"triage_versions": {}})
+        with history.claim(run_id):
+            asyncio.run(exercise(Session(CONNECTION, {}, history=history, run_id=run_id, scan_budget=scan_budget)))
+
+
+@pytest.mark.parametrize("assessment_stage", ["scan"], indirect=True)
+def test_legacy_scan_replays_assessment_created_from_cached_analysis(assessment_stage, monkeypatch):
+    repo, _, run, response = assessment_stage
+    checked = []
+
+    class Pause(Exception):
+        pass
+
+    async def send(connection, credentials, request, **kwargs):
+        name, output = response(request)
+        if name == "D":
+            context = request_context(request)
+            assert list(context["proposal"]) == sorted(context["proposal"])
+            prior = context["history"][0]["assessment"]
+            assert list(prior) == sorted(prior)
+        checked.append(name)
+        return Response(output=output, usage=Usage(total_tokens=10))
+
+    def pause_after(count):
+        def progress(event):
+            if event["phase"] == "assessment" and event["assessed_candidates"] == count:
+                raise Pause
+        return progress
+
+    monkeypatch.setattr(gateway, "send", send)
+    with History(repo) as history:
+        run_id = history.begin("scan", "main", {"triage_versions": {}})
+        with history.claim(run_id):
+            def session():
+                return Session(CONNECTION, {}, history=history, run_id=run_id)
+
+            # Simulate the old scanner which rendered values from SQLite in their saved key order.
+            passthrough = SimpleNamespace(model_validate=lambda value, **kwargs: SimpleNamespace(model_dump=lambda: value))
+            with monkeypatch.context() as old:
+                old.setattr(security, "SecurityAnalysis", passthrough)
+                old.setattr(security, "SecurityAssessment", passthrough)
+                for assessed in (0, 4, 5):
+                    with pytest.raises(Pause):
+                        asyncio.run(run(session(), pause_after(assessed), continuous=False))
+            assert sorted(name for name in checked if name) == sorted("LRCXDI")
+            original_attempts = history.attempts(run_id)
+            original_inputs = history.assessment_inputs(run_id)
+
+            monkeypatch.setattr(gateway, "send", lambda *args, **kwargs: pytest.fail("Saved request was sent again"))
+            result = asyncio.run(run(session(), lambda event: None, continuous=False))
+            assert history.attempts(run_id) == original_attempts
+            assert history.assessment_inputs(run_id) == original_inputs
+    assert result["status"] == "completed"
+    assert len(result["findings"]) == 5 and all(row["status"] == "completed" for row in result["candidates"])
 
 
 def git(repo, *args):
