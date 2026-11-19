@@ -682,6 +682,11 @@ def test_history_selection_and_parallel_groups_follow_transitive_citation_anchor
     rows = [(0, proposal, []), (1, first, []), (2, unrelated, [])]
     assert [row[0] for row in service.assessment_batch(rows, [first, second], item, 3)] == [0, 2]
 
+    bridge = {"path": "new.py", "evidence": [{"path": "separate.py", "quote": "bridge"}]}
+    rows = [(0, proposal, []), (1, bridge, []), (2, unrelated, [])]
+    assert [row[0] for row in service.assessment_batch(rows, [], item, 3)] == [0, 2]
+    assert [row[0] for row in service.assessment_batch(rows, [], item, 3, active_keys=set())] == [0]
+
 
 def test_public_advisory_proof_is_constrained_and_network_failure_stays_uncertain(monkeypatch):
     from datetime import UTC, datetime, timedelta
