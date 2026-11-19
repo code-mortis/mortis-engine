@@ -86,8 +86,8 @@ def verification_stage(request, repo, monkeypatch, tmp_path):
     return repo, kind, run, response, rows, original, head
 
 
-@pytest.mark.parametrize("cancel", [False, True])
-def test_continuous_verification_order_cancellation_and_resume(verification_stage, monkeypatch, cancel):
+@pytest.mark.parametrize(("cancel", "budget"), [(False, None), (True, None), (False, 5000)])
+def test_continuous_verification_order_cancellation_and_resume(verification_stage, monkeypatch, cancel, budget):
     repo, kind, run, response, rows, original, _ = verification_stage
     original_copy = copy.deepcopy(original)
 
@@ -106,6 +106,9 @@ def test_continuous_verification_order_cancellation_and_resume(verification_stag
                 active.add(index)
                 peak = max(peak, len(active))
                 assert len(active) <= 4
+                if budget is not None:
+                    stage = "security_verification" if kind == "scan" else "verification"
+                    assert session.usage(stage)["reserved_tokens"] <= budget
                 started[index].set()
                 try:
                     await release[index].wait()
@@ -117,9 +120,11 @@ def test_continuous_verification_order_cancellation_and_resume(verification_stag
             return Response(output=output, usage=Usage(total_tokens=10))
 
         monkeypatch.setattr(gateway, "send", send)
+        monkeypatch.setattr(gateway, "reservation", lambda *args: 400)
         session = Session(CONNECTION, {}, history=history, run_id=run_id)
+        limits = {"verification_token_budget": budget, "max_output_tokens": 100} if budget else {}
         async with asyncio.TaskGroup() as group:
-            running = group.create_task(run(session))
+            running = group.create_task(run(session, **limits))
             async with asyncio.timeout(10):
                 for index in range(4):
                     await started[index].wait()
@@ -151,7 +156,7 @@ def test_continuous_verification_order_cancellation_and_resume(verification_stag
 
         monkeypatch.setattr(gateway, "send", lambda *a, **k: pytest.fail("A saved or unknown attempt was sent again"))
         resumed = Session(CONNECTION, {}, history=history, run_id=run_id)
-        result = await run(resumed)
+        result = await run(resumed, **limits)
         assert resumed.usage() == ledger and history.attempts(run_id) == attempts
         assert [row["finding_id"] for row in rows(result)] == [finding["id"] for finding in original["findings"]]
         assert [row["verdict"] for row in rows(result)] == [
@@ -269,7 +274,8 @@ def test_verification_keeps_finite_budget_accounting(verification_stage, monkeyp
             result = asyncio.run(run(session, verification_token_budget=1000, max_output_tokens=max_output))
     assert result["status"] == "completed"
     assert [row["verdict"] for row in rows(result)] == ["fixed"] * 7
-    assert sent == list(range(7))
+    assert [row["finding_id"] for row in rows(result)] == [f"issue-{index}" for index in range(7)]
+    assert sorted(sent) == list(range(7))
     assert session.usage("security_verification" if kind == "scan" else "verification")["total_tokens"] == 70
 
 
@@ -312,7 +318,7 @@ def test_scan_verification_waits_for_temporary_reservations(verification_stage, 
             index, _ = response(request)
             if index == 2:
                 waiting.set()
-            return 0 if index is None else 700 if index == 2 else 400
+            return {None: 0, 0: 650, 4: 100}.get(index, 200)
 
         async def send(connection, credentials, request, **kwargs):
             index, output = response(request)
@@ -328,7 +334,7 @@ def test_scan_verification_waits_for_temporary_reservations(verification_stage, 
 
         def progress(event):
             if (event["phase"] == "connection_capacity" and event["active_requests"] == 1
-                    and waiting.is_set() and sent == [0, 1]):
+                    and waiting.is_set() and sent == [0, 4]):
                 settled.set()
 
         session = Session(CONNECTION, {}, history=history, run_id=run_id, scan_budget=1009 if total_budget else None,
@@ -338,7 +344,7 @@ def test_scan_verification_waits_for_temporary_reservations(verification_stage, 
                 verification_token_budget=None if total_budget else 1000))
             await asyncio.wait_for(waiting.wait(), 10)
             await asyncio.wait_for(settled.wait(), 10)
-            assert sent == [0, 1] and session.active_requests == 1
+            assert sent == [0, 4] and session.active_requests == 1
             release.set()
         assert running.result()["status"] == "completed"
         assert sorted(sent) == list(range(7))

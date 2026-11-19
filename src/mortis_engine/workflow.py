@@ -9,6 +9,7 @@ from contextlib import suppress
 from uuid import uuid4
 
 from . import admission, gateway, llm_http
+from .assessment_dispatch import without_slot
 from .history import encode
 from .llm_http import InferenceError
 from .review.context import sanitize
@@ -68,8 +69,6 @@ class Session:
         self.active_requests = 0
         self.waiting_requests = 0
         self.stage_deadlines = {}
-        self.uncapped_lock = None
-        self.uncapped_loop = None
         self.budget_settlement = None
         self.client = None
         self.records = history.attempts(self.run_id) if history else {}
@@ -102,20 +101,6 @@ class Session:
                        "waiting_requests": self.waiting_requests})
 
     async def send(self, stage, key, request, *, client, timeout_at, token_budget, stopped, accept):
-        if request.max_output_tokens == 0 and (token_budget or self.scan_budget):
-            # A finite total budget supplies the output ceiling, one uncapped request at a time.
-            loop = asyncio.get_running_loop()
-            if self.uncapped_loop is not loop:
-                self.uncapped_lock, self.uncapped_loop = asyncio.Lock(), loop
-
-            async def limited():
-                async with self.uncapped_lock:
-                    return await self._send(stage, key, request, client, timeout_at, token_budget, stopped, accept)
-
-            return await llm_http._bounded(limited(), stopped, timeout_at - time.monotonic())
-        return await self._send(stage, key, request, client, timeout_at, token_budget, stopped, accept)
-
-    async def _send(self, stage, key, request, client, timeout_at, token_budget, stopped, accept):
         for retry in range(3):
             task = key + (f":retry:{retry}" if retry else "")
             try:
@@ -125,7 +110,8 @@ class Session:
                 if (not exc.retryable or exc.consumption_unknown or exc.usage.total_tokens not in {0, None}
                         or retry == 2 or time.monotonic() + delay >= timeout_at):
                     raise
-                await llm_http._bounded(asyncio.sleep(delay), stopped, timeout_at - time.monotonic())
+                await llm_http._bounded(without_slot(lambda delay=delay: asyncio.sleep(delay)), stopped,
+                                        timeout_at - time.monotonic())
         raise AssertionError("Retry limit exhausted")
 
     async def _attempt(self, stage, key, request, client, until, budget, stopped, accept):
@@ -148,7 +134,7 @@ class Session:
             except _BudgetReserved as exc:
                 # Release connection capacity before waiting for the reservation to settle.
                 try:
-                    await llm_http._bounded(exc.settled.wait(), stopped, until - time.monotonic())
+                    await llm_http._bounded(without_slot(exc.settled.wait), stopped, until - time.monotonic())
                 except InferenceError as stopped_wait:
                     raise InferenceError(stopped_wait.code, str(stopped_wait), consumption_unknown=False) from stopped_wait
 
@@ -195,14 +181,15 @@ class Session:
             return min(limits, default=float("inf"))
 
         def reject(amount):
-            if stage in {"security_assessment", "security_verification"} and amount <= remaining([row for row in rows if row["status"] != "running"]):
+            if amount <= remaining([row for row in rows if row["status"] != "running"]):
                 if self.budget_settlement is None:
                     self.budget_settlement = asyncio.Event()
                 raise _BudgetReserved(self.budget_settlement)
             raise InferenceError("budget", "The token budget cannot admit this request.", consumption_unknown=False)
 
         available = remaining(rows)
-        if request.max_output_tokens == 0 and (budget is not None or self.scan_budget is not None):
+        derived_cap = request.max_output_tokens == 0 and (budget is not None or self.scan_budget is not None)
+        if derived_cap:
             # Include the output field and its integer digits in the conservative input reservation.
             overhead = gateway.reservation(self.connection, request.model_copy(update={"max_output_tokens": 1})) + 16
             output = available - overhead
@@ -212,6 +199,9 @@ class Session:
         amount = gateway.reservation(self.connection, request) + request.max_output_tokens
         if amount > available:
             reject(amount)
+        if derived_cap:
+            # Keep the estimation margin reserved until the budget-derived request settles.
+            amount = available
         # No awaits between admission, reservation and the durable dispatch marker.
         row = {"task_key": key, "stage": stage, "reserved_tokens": amount, "usage": {},
                "consumption_unknown": True, "status": "running"}

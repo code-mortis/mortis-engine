@@ -86,10 +86,11 @@ def assessment_stage(request, local, monkeypatch):
     return repo, kind, run, response
 
 
-@pytest.mark.parametrize("mode", ["complete", "interrupt", "legacy", "legacy-interrupt"])
+@pytest.mark.parametrize("mode", ["complete", "budgeted", "interrupt", "legacy", "legacy-interrupt"])
 def test_assessment_dispatch_and_resume(assessment_stage, monkeypatch, mode):
     repo, kind, run, response = assessment_stage
     legacy, interrupted = mode.startswith("legacy"), mode.endswith("interrupt")
+    limits = {"budget": 5000, "max_output": 100} if mode == "budgeted" else {}
 
     async def exercise(history, run_id):
         started = {name: asyncio.Event() for name in "LRCXDI"}
@@ -127,7 +128,7 @@ def test_assessment_dispatch_and_resume(assessment_stage, monkeypatch, mode):
         monkeypatch.setattr(gateway, "send", send)
         session = Session(CONNECTION, {}, history=history, run_id=run_id, progress=progress)
         async with asyncio.TaskGroup() as group:
-            running = group.create_task(run(session, progress, continuous=not legacy))
+            running = group.create_task(run(session, progress, continuous=not legacy, **limits))
             async with asyncio.timeout(10):
                 for name in "LRCX":
                     await started[name].wait()
@@ -215,10 +216,9 @@ def test_assessment_dispatch_keeps_budget_reservations(assessment_stage, monkeyp
             name, output = response(request)
             if name is not None:
                 sent.append(name)
-                if len(sent) == (2 if kind == "scan" else 1):
+                if len(sent) == 2:
                     reserved.set()
-                if kind == "scan" or name == "L":
-                    await release.wait()
+                await release.wait()
             return Response(output=output, usage=Usage(total_tokens=450 if name else 1))
 
         monkeypatch.setattr(gateway, "send", send)
@@ -226,7 +226,7 @@ def test_assessment_dispatch_keeps_budget_reservations(assessment_stage, monkeyp
             running = group.create_task(run(session, lambda event: None, budget=budget, max_output=100))
             await asyncio.wait_for(reserved.wait(), 10)
             stage = "security_assessment" if kind == "scan" else "assessment"
-            assert session.usage(stage)["reserved_tokens"] == (1000 if kind == "scan" else 500)
+            assert session.usage(stage)["reserved_tokens"] == 1000
             release.set()
         result = running.result()
         assert result["status"] == "partial"
@@ -243,6 +243,54 @@ def test_assessment_dispatch_keeps_budget_reservations(assessment_stage, monkeyp
                 asyncio.run(exercise(session, budget))
 
 
+def test_assessment_retry_releases_slot_for_independent_work(assessment_stage, monkeypatch):
+    repo, kind, run, response = assessment_stage
+    sleep = asyncio.sleep
+
+    async def exercise(session):
+        running_other, backoff, replacement, release = (asyncio.Event() for _ in range(4))
+        sent = []
+
+        async def delay(seconds):
+            if seconds == 31:
+                backoff.set()
+                await release.wait()
+            else:
+                await sleep(seconds)
+
+        async def send(connection, credentials, request, **kwargs):
+            name, output = response(request)
+            if name is not None:
+                sent.append(name)
+            if name == "L" and sent.count("L") == 1:
+                await running_other.wait()
+                raise InferenceError("rate_limit", "Mock rejection", retryable=True, retry_after=31,
+                                     consumption_unknown=False, usage=Usage(total_tokens=0))
+            if name == "R":
+                running_other.set()
+                await release.wait()
+            if name == "C":
+                replacement.set()
+                await release.wait()
+            return Response(output=output, usage=Usage(total_tokens=10))
+
+        monkeypatch.setattr(asyncio, "sleep", delay)
+        monkeypatch.setattr(gateway, "send", send)
+        async with asyncio.TaskGroup() as group:
+            running = group.create_task(run(session, lambda event: None, concurrency=2))
+            await asyncio.wait_for(backoff.wait(), 5)
+            await asyncio.wait_for(replacement.wait(), 5)
+            assert sent == ["L", "R", "C"]
+            assert session.active_requests == 2
+            release.set()
+        assert sent.count("L") == 2 and running.result()["status"] == "completed"
+
+    with History(repo) as history:
+        run_id = history.begin(kind, "main", {"triage_versions": {}})
+        with history.claim(run_id):
+            asyncio.run(exercise(Session(CONNECTION, {}, history=history, run_id=run_id)))
+
+
 @pytest.mark.parametrize("assessment_stage", ["scan"], indirect=True)
 @pytest.mark.parametrize(("budget", "scan_budget", "cancel"), [(1000, None, False), (None, 1007, False),
                                                                (1000, None, True)])
@@ -250,19 +298,19 @@ def test_scan_assessment_waits_for_temporary_reservation(assessment_stage, monke
     repo, _, run, response = assessment_stage
 
     async def exercise(session):
-        release_slow, checking_next = asyncio.Event(), asyncio.Event()
+        release_slow, checking_next, cheap_settled = asyncio.Event(), asyncio.Event(), asyncio.Event()
         sent = []
 
         def reservation(_connection, request):
             candidate = request_context(request).get("proposal", {}).get("title")
             if candidate == "C":
                 checking_next.set()
-            return {None: 0, "R": 50}.get(candidate, 700)
+            return {None: 0, "R": 50, "X": 50}.get(candidate, 700)
 
         async def send(connection, credentials, request, **kwargs):
             name, output = response(request)
             if name is None:
-                output["findings"] = [row for row in output["findings"] if row["title"] in "LRC"]
+                output["findings"] = [row for row in output["findings"] if row["title"] in "LRCX"]
             else:
                 sent.append(name)
                 if name == "L":
@@ -271,11 +319,17 @@ def test_scan_assessment_waits_for_temporary_reservation(assessment_stage, monke
 
         monkeypatch.setattr(gateway, "reservation", reservation)
         monkeypatch.setattr(gateway, "send", send)
+
+        def progress(event):
+            if event["phase"] == "assessment" and event["assessed_candidates"] == 2:
+                cheap_settled.set()
+
         async with asyncio.TaskGroup() as group:
-            running = group.create_task(run(session, lambda event: None, budget=budget, max_output=100, concurrency=2))
+            running = group.create_task(run(session, progress, budget=budget, max_output=100, concurrency=2))
             await asyncio.wait_for(checking_next.wait(), 10)
+            await asyncio.wait_for(cheap_settled.wait(), 10)
             assert session.active_requests == 1
-            assert sent == ["L", "R"]
+            assert sent == ["L", "R", "X"]
             if cancel:
                 running.cancel()
             else:
@@ -283,10 +337,10 @@ def test_scan_assessment_waits_for_temporary_reservation(assessment_stage, monke
         ledger = session.usage("security_assessment")
         if cancel:
             assert running.cancelled() and session.active_requests == 0
-            assert sent == ["L", "R"] and ledger["reserved_tokens"] == 810
-            assert ledger["total_tokens"] is None and len(ledger["requests"]) == 2
+            assert sent == ["L", "R", "X"] and ledger["reserved_tokens"] == 820
+            assert ledger["total_tokens"] is None and len(ledger["requests"]) == 3
         else:
-            assert sent == ["L", "R", "C"] and ledger["total_tokens"] == 30
+            assert sent == ["L", "R", "X", "C"] and ledger["total_tokens"] == 40
             assert running.result()["status"] == "completed" and running.result()["grade"] == "D"
 
     with History(repo) as history:

@@ -336,7 +336,6 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             findings.append(observation)
         scanner_findings = len({finding["id"] for finding in findings})
         code_paths = [path for path, row in item.inventory.items() if row["code"]]
-        semaphore = asyncio.Semaphore(options["concurrency"])
         proposals_by_path = {}
         active_paths = set()
 
@@ -350,28 +349,35 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 **({"waiting_requests": session.waiting_requests} if hasattr(session, "waiting_requests") else {}),
                 "active_paths": sorted(item.redact(path) for path in active_paths)})
 
-        async def analyze(path):
-            async with semaphore:
+        def track(row, running):
+            path = row[1]
+            if running:
                 active_paths.add(path)
-                report_progress()
-                try:
-                    context = {"assigned_path": path, "head_sha": sha, "diff": "",
-                               "sources": {"current": {path: item.source(path)}}}
-                    value, context_paths = await ask(item, session, "analysis", context, "analysis:" + path, options)
-                    if not continuous:
-                        # Recover the original field order after replaying cached JSON.
-                        value = SecurityAnalysis.model_validate(value, strict=True).model_dump()
-                    proposals_by_path[path] = [(proposal, context_paths) for proposal in value["findings"]]
-                    units.append({"task": "analysis:" + path, "status": "completed"})
-                except Exception as exc:
-                    units.append({"task": "analysis:" + path, "status": "failed"})
-                    problems.append(f"Security analysis incomplete for {path}: {item.redact(str(exc))[:1000]}")
-                finally:
-                    active_paths.remove(path)
-                    report_progress()
+            else:
+                active_paths.discard(path)
+            report_progress()
+
+        async def analyze(row):
+            _, path = row
+            track(row, True)
+            try:
+                context = {"assigned_path": path, "head_sha": sha, "diff": "",
+                           "sources": {"current": {path: item.source(path)}}}
+                value, context_paths = await ask(item, session, "analysis", context, "analysis:" + path, options)
+                if not continuous:
+                    # Recover the original field order after replaying cached JSON.
+                    value = SecurityAnalysis.model_validate(value, strict=True).model_dump()
+                proposals_by_path[path] = [(proposal, context_paths) for proposal in value["findings"]]
+                units.append({"task": "analysis:" + path, "status": "completed"})
+            except Exception as exc:
+                units.append({"task": "analysis:" + path, "status": "failed"})
+                problems.append(f"Security analysis incomplete for {path}: {item.redact(str(exc))[:1000]}")
+            finally:
+                track(row, False)
 
         report_progress()
-        await asyncio.gather(*(analyze(path) for path in code_paths))
+        await dispatch(enumerate(code_paths), options["concurrency"], None, analyze, lambda _: None,
+                       continuous=True, on_slot=track)
         candidates = [proposal for path in code_paths for proposal in proposals_by_path.get(path, [])]
         completed = sum(unit["status"] == "completed" for unit in units)
         stages["analysis"] = {"status": "completed" if completed == len(code_paths) else "partial",

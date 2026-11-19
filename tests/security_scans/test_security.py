@@ -7,9 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from mortis_engine import gateway
 from mortis_engine.review import source
+from mortis_engine.schemas import Response, Usage
 from mortis_engine.security_scans import engine, scanner, service
 from mortis_engine.security_scans.inference import ask
+from mortis_engine.workflow import Session
 
 
 def git(repo, *args):
@@ -259,6 +262,47 @@ def test_failed_analysis_does_not_count_as_validated_coverage(repository):
     assert report["coverage"]["completed_files"] == 0
     assert report["coverage"]["selected_files"] == 2
     assert report["grade"] is None
+
+
+@pytest.mark.parametrize(("first_usage", "expected"), [(10, "completed"), (650, "partial")])
+def test_scan_analysis_waits_for_temporary_reservation(repository, monkeypatch, first_usage, expected):
+    checking_second = asyncio.Event()
+    sent = []
+
+    def path_for(request):
+        context, _ = json.JSONDecoder().raw_decode(request.messages[0].content.split("\n\n", 1)[1])
+        return context["assigned_path"]
+
+    def reserve(connection, request):
+        if path_for(request) == "a.py":
+            return 700
+        checking_second.set()
+        return 300
+
+    async def send(connection, credentials, request, **kwargs):
+        sent.append(path_for(request))
+        tokens = 10
+        if sent[-1] == "a.py":
+            await asyncio.wait_for(checking_second.wait(), 5)
+            assert sent == ["a.py"]
+            tokens = first_usage
+        return Response(output={"findings": [], "required_paths": []}, usage=Usage(total_tokens=tokens))
+
+    monkeypatch.setattr(gateway, "reservation", reserve)
+    monkeypatch.setattr(gateway, "send", send)
+
+    async def run():
+        connection = {"kind": "api", "provider": "test", "protocol": "openai", "model": "fixture", "options": {}}
+        async with Session(connection, {}, scan_budget=1000) as session:
+            report = await service.scan(repository, session=session, scanner=scan_result,
+                options={"concurrency": 2, "token_budget": 1000, "max_output_tokens": 100})
+            assert session.usage()["total_tokens"] == first_usage + 10 * (len(sent) - 1)
+            return report
+
+    report = asyncio.run(run())
+    assert report["status"] == expected
+    assert report["coverage"]["completed_files"] == len(sent)
+    assert sent == (["a.py", "guard.py"] if expected == "completed" else ["a.py"])
 
 
 @pytest.mark.parametrize("concurrency", [1, 2, 8])
