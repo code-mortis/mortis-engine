@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.2 - 2026-11-19
+
+- Run eligible review and scan assessments and AI fix checks as slots open. Related candidates remain ordered, verification preserves report order, and older runs resume with their saved assessment policy.
+- Release execution slots while requests wait for retries or temporary token reservations. Smaller recovery batches share the original analysis concurrency limit and budget.
+- Connect to validated endpoint addresses while preserving TLS hostname checks. The private-endpoint option permits HTTP only for private or loopback addresses. Protect Bedrock signing headers and the session-scoped prompt cache key for OpenAI Responses.
+- Validate security evidence paths and line ranges and reject graph facts without validated source. Malformed saved reports fail Markdown export with a clear error while preserving the original report.
+- Require Trivy 0.76.2 for scans and update the optional code graph parser. Rerun `mortis graph build` before using `--graph` with this version.
+
 ## 0.1.1 - 2026-11-17
 
 - Bundle the portable Mortis Engine skill in the wheel and source distribution. Use `mortis agent install` to install or update it for detected coding agents.

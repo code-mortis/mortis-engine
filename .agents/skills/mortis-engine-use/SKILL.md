@@ -19,8 +19,8 @@ For an existing engine development checkout, use
 `uv run --locked --project /path/to/mortis-engine mortis ... --repo /path/to/target`.
 Keep the engine checkout and the repository being analyzed distinct.
 
-With Mortis Engine 0.1.1, run `mortis agent install` after installing or upgrading
-the CLI to refresh the bundled skill for detected coding agents. The command
+Run `mortis agent install` after installing or upgrading the CLI to refresh the
+bundled skill for detected coding agents. The command
 runs locally. Use `--force` only when the user wants to replace an unmanaged
 installation.
 
@@ -115,8 +115,9 @@ saved reports need no AI connection. Export retains the original report;
 `findings` shows the current scope including later retries and decisions.
 `--output` is also repeatable on new reviews and scans. Use `.md`, `.markdown` or
 `.json` and fresh filenames: existing files, symlinks and duplicate destinations
-are rejected. After export failure, use the saved run ID to export again rather
-than rerunning analysis. Prefer output outside the analyzed repository so future
+are rejected. If the destination caused the failure, export again using the saved
+run ID and a fresh path. Invalid saved report structures can block Markdown
+export. The original report stays in history. Prefer output outside the analyzed repository so future
 working-tree reviews do not include generated reports.
 
 Resume interrupted work with the original workflow and ID:
@@ -129,8 +130,9 @@ mortis assess --repo /path/to/repo --run RUN_ID --candidate CANDIDATE_ID --forma
 mortis assess --repo /path/to/repo --resume RETRY_RUN_ID --format json --progress
 ```
 
-Resume retains pinned inputs, connection and overrides. Omit new scope, effort,
-concurrency, graph and limit flags. Inspect unfinished runs before deciding to
+Resume retains pinned inputs, connection, overrides and the original assessment
+policy. Older reviews and scans resume with batched assessment. Omit new scope,
+effort, concurrency, graph and limit flags. Inspect unfinished runs before deciding to
 resume. Retry an assessment only when its listing says it is eligible; it uses
 the original evidence and saves a separate `mortis.assessment/v1` result without
 repeating analysis, Trivy or summaries. Unknown consumption retains its

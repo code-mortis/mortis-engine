@@ -33,10 +33,12 @@ credential reads. `--options` replaces the saved options object; changing
 provider or destination requires selecting credentials again. Failed edits
 preserve the previous profile.
 
-Private/HTTP destinations require explicit host trust through
-`CM_TRUSTED_ENDPOINT_HOSTS` or `CM_ALLOW_PRIVATE_ENDPOINTS`. Never enable either
-just to suppress an endpoint error; use only the endpoint and trust scope the
-user selected. Repository configuration does not control endpoint trust.
+Public endpoints require HTTPS unless the hostname is explicitly trusted through
+`CM_TRUSTED_ENDPOINT_HOSTS`. With `CM_ALLOW_PRIVATE_ENDPOINTS=true`, HTTP is
+allowed only when every resolved address is private or loopback. Mortis connects
+to a validated address and retains the hostname for TLS and HTTP routing. Use
+only the endpoint and trust scope the user selected. Repository configuration
+does not control endpoint trust. Bedrock manages its own signing headers.
 
 ## Trusted revision settings
 
@@ -61,7 +63,10 @@ requested overrides; do not commit configuration just to run an analysis.
 Reviews default to two concurrent AI batches; scans default to four concurrent
 file requests. Both accept `--concurrency 1` through `8` and `--effort low|medium|high`.
 Processes sharing local state also share a ceiling of eight active model
-requests per connection identity. Waiting consumes the workflow deadline.
+requests per connection identity. Eligible analysis, assessment and AI fix checks
+start as slots open. Requests release their execution slot during retry backoff or
+while waiting for tokens to become available. Waiting still consumes the workflow
+deadline.
 
 Reviews accept `--max-files`, `--token-budget`, `--timeout-seconds`,
 `--max-output-tokens`, `--assessment-token-budget`, `--verification-token-budget`,
@@ -74,13 +79,13 @@ a single aggregate run budget.
 file limits. Preserve finite limits unless the user requests a change.
 Provider request timeouts, transport bounds and model/account limits still apply.
 
-`--max-output-tokens` caps each response including reasoning. With `0`, OpenAI
-protocols omit the output cap when the total budget is unlimited; with a finite
-budget, output is bounded by remaining tokens and requests are serialized.
-With an unlimited token budget, Bedrock Converse omits `maxTokens` and uses
-the service default. Anthropic Messages reads the selected model's output
-capacity from the Models API. Set a positive limit if the endpoint lacks that
-metadata or the provider rejects the derived cap. Resume restores saved limits
+`--max-output-tokens` caps each response including reasoning. With `0` and an
+unlimited token budget, OpenAI and Bedrock Converse use their service defaults.
+Anthropic Messages reads the selected model's output capacity from the Models API.
+With `0` and a finite budget, Mortis derives the cap from the remaining budget
+and reserves that budget until the request settles. Use a positive limit within
+the model's capacity to fit multiple requests or when the provider rejects the
+derived cap or cannot report its capacity. Resume restores saved limits
 and rejects new ones.
 
 `--second-pass` is an optional review experiment, disabled by default. Do not
@@ -90,7 +95,8 @@ enable it or increase limits as an implicit recovery step.
 
 Docker is optional for review graph context; Trivy is required for scans.
 `mortis graph build` builds the pinned parser image and can download build
-dependencies. `mortis review --graph ...` uses the isolated parser; unavailable
+dependencies. After upgrading from 0.1.1 or earlier, rerun the build before using
+graph context. `mortis review --graph ...` uses the isolated parser; unavailable
 graph context is recorded and the normal source review can continue. Do not
 enable networking, host mounts, inherited credentials or Docker-socket access
 on the parser container.

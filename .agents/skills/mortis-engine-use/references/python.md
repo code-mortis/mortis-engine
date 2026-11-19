@@ -57,7 +57,8 @@ a saved profile name, other modes or resume.
 `profile`. `ref` defaults to `"HEAD"`. Verification and summary take
 `finding_run=REVIEW_RUN_ID`; scans accept `rotations` and `concurrency`. These
 are synchronous entry points; do not call them directly inside an already
-running asyncio loop.
+running asyncio loop. Standalone verification uses the review concurrency
+configured at the target revision and returns verdicts in report order.
 
 ```python
 from mortis_engine import operations

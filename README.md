@@ -27,8 +27,8 @@ Install the CLI above; the skill supplies instructions, not the engine executabl
 Reviews and scans also need a [saved AI connection](#connect-with-environment-variables).
 Scope previews need no connection or provider calls.
 
-Mortis Engine 0.1.1 bundles the skill and its references. Install them for your
-user account with the CLI:
+Mortis Engine bundles the skill and its references. Install them for your user
+account with the CLI:
 
 ```sh
 mortis agent install
@@ -230,8 +230,9 @@ partial; its original status remains in the report.
 Output files are private to the current user. Missing parent directories are created
 when saving. Existing files, symlinks, duplicate destinations and unsupported extensions
 are rejected, so reports cannot overwrite source or prior output. Choose new filenames
-when saving another report. A write failure reports the saved run ID so you can export
-it again without repeating analysis.
+when saving another report. Export errors include the saved run ID when available.
+If a saved report has an invalid structure, Markdown export fails and the saved
+result stays intact.
 
 When saving inside the repository, add the output directory to `.gitignore` if you
 want future working-tree reviews to exclude those generated reports.
@@ -323,7 +324,11 @@ mortis graph build
 mortis review --base main --graph
 ```
 
-Docker builds a separate parser image with the pinned grammars. When an update changes the parser, rerun `mortis graph build` before using `--graph`. During review the parser receives bounded file contents at one revision. It runs without network or host mounts. A review records unavailable graph context and can continue using its normal source evidence.
+Docker builds a separate parser image with the pinned grammars. After upgrading
+from 0.1.1 or earlier, rerun `mortis graph build` before using `--graph`. During
+review the parser receives bounded file contents at one revision. It runs without
+network or host mounts. A review records unavailable graph context and can continue
+using its normal source evidence.
 
 Set extraction limits in the trusted committed configuration:
 
