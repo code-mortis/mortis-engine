@@ -89,6 +89,12 @@ During assessment, Mortis starts the next eligible candidate as soon as a slot o
 Related candidates wait for the earlier result to enter the assessment history.
 A finite review assessment budget reduces assessment concurrency to one.
 
+Fix verification also starts the next eligible finding as soon as a slot opens, using
+the configured concurrency and retaining report order. Evidence followups for a finding
+remain sequential, as do deterministic scanner checks. A finite review verification
+budget reduces verification concurrency to one; scans wait for temporary reservations
+to settle before admitting further requests within their budgets.
+
 Separate Mortis processes sharing the same local state directory also share a ceiling
 of eight active model requests per connection. This applies across repositories and
 workflow stages. Profiles using the same destination and credential reference share

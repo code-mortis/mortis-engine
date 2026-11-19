@@ -1,4 +1,4 @@
-"""Bounded local Assessment dispatch and replay ordering."""
+"""Bounded local workflow dispatch and Assessment replay ordering."""
 
 import asyncio
 

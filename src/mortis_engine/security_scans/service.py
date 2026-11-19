@@ -14,6 +14,7 @@ from pydantic import Field
 
 from mortis_engine.assessment_dispatch import dispatch, replay_order
 from mortis_engine.history import encode
+from mortis_engine.llm_http import _drain
 from mortis_engine.review import file_policy, source
 from mortis_engine.review.settings import RunLimits
 from mortis_engine.security import digest
@@ -492,12 +493,12 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                                "total": len(candidates), "completed": len(assessments)}
         advisory_cache = {}
         assessment_progress("verification")
-        for old in previous_findings:
-            if old["id"] in observed:
-                continue
-            if old.get("state", "open") not in {"open", "accepted_risk"}:
-                findings.append(old)
-                continue
+        retained = [(index, old) for index, old in enumerate(previous_findings) if old["id"] not in observed]
+        pending = [(index, old) for index, old in retained if old.get("state", "open") in {"open", "accepted_risk"}]
+        verified = {}
+
+        async def verify_row(candidate):
+            index, old = candidate
             evidence = (old["evidence"] if isinstance(old.get("evidence"), dict) else old)
             try:
                 if evidence["kind"] == "code":
@@ -512,10 +513,44 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                         context["sources"]["current"][current_path] = current_source
                     verdict, _ = await ask(item, session, "verification", context, "verification:" + old["id"], options)
                 else:
-                    verdict = await asyncio.to_thread(deterministic_fix, item, old, result,
-                        advisory_lookup=lambda evidence, packages: advisories.dependency_advisory(evidence, packages, item.stopped, advisory_cache))
+                    checking = asyncio.create_task(asyncio.to_thread(deterministic_fix, item, old, result,
+                        advisory_lookup=lambda evidence, packages: advisories.dependency_advisory(evidence, packages, item.stopped, advisory_cache)))
+                    try:
+                        verdict = await asyncio.shield(checking)
+                    finally:
+                        # The worker still owns snapshot files until its deterministic check settles.
+                        await _drain(asyncio.gather(checking, return_exceptions=True))
             except Exception as exc:
                 verdict = {"verdict": "uncertain", "explanation": item.redact(str(exc))[:1000]}
+            return index, verdict
+
+        def select_verifications(waiting, active, blocked, limit, rank):
+            deterministic = any(finding_evidence(old)["kind"] != "code" for _, old in active)
+            occupied = {old["id"] for _, old in active}
+            chosen = []
+            for candidate in waiting:
+                old = candidate[1]
+                scanner_check = finding_evidence(old)["kind"] != "code"
+                if old["id"] in occupied or scanner_check and deterministic:
+                    continue
+                chosen.append(candidate)
+                occupied.add(old["id"])
+                deterministic |= scanner_check
+                if len(chosen) == limit:
+                    break
+            return chosen
+
+        def accept_verification(completed):
+            index, verdict = completed
+            verified[index] = verdict
+
+        await dispatch(pending, options["concurrency"], select_verifications, verify_row, accept_verification,
+                       continuous=True)
+        for index, old in retained:
+            if index not in verified:
+                findings.append(old)
+                continue
+            verdict = verified[index]
             verifications.append({"finding_id": old["id"], **verdict})
             if verdict["verdict"] == "uncertain":
                 problems.append(f"Fix verification remains uncertain for {old['title']}.")

@@ -189,12 +189,15 @@ async def _verify_one(repo, env, original, original_sha, head_sha, options, sess
 async def verify(repo, env, original_report, current_sha, options, session):
     """Verify each retained finding without changing the original report or finding status."""
     options = dict(options)
-    rows, prepared, policy_error = [], {}, None
+    rows, prepared, policy_error = {}, {}, None
     try:
         prepared = _restore_verification_policy(repo, env, original_report, current_sha, options, session)
     except ValueError as exc:
         policy_error = exc
-    for snapshot in original_report.get("findings", []):
+    pending = list(enumerate(original_report.get("findings", [])))
+
+    async def verify_row(candidate):
+        index, snapshot = candidate
         original_sha = snapshot.get("source_sha") or original_report["head_sha"]
         row = {"finding_id": snapshot.get("id"), "snapshot": copy.deepcopy(snapshot),
                "original_sha": original_sha, "head_sha": current_sha}
@@ -203,20 +206,41 @@ async def verify(repo, env, original_report, current_sha, options, session):
                 raise policy_error
             identity = snapshot.get("id") or planning.fingerprint(snapshot)
             selected = dict(options)
-            if identity not in prepared:
-                prepared.clear()
+            selected_prepared = prepared.pop(identity, None)
+            if selected_prepared is None:
                 key = f"{identity}:{current_sha}:0"
                 if (options.get("_unmarked_verification_policy")
                         and ("verification", key) in getattr(session, "records", {})):
-                    prepared = _restore_verification_policy(repo, env,
-                        {"head_sha": original_report["head_sha"], "findings": [snapshot]}, current_sha, selected, session)
+                    selected_prepared = _restore_verification_policy(repo, env,
+                        {"head_sha": original_report["head_sha"], "findings": [snapshot]}, current_sha, selected, session).get(identity)
             result = await _verify_one(repo, env, snapshot, original_sha, current_sha, selected, session,
-                                       prepared=prepared.pop(identity, None))
+                                       prepared=selected_prepared)
             row.update(status="completed", verdict=result["verdict"], result=result)
         except (ValueError, TimeoutError, InferenceError) as exc:
             row.update(status="failed", verdict="uncertain", result=None,
                        error=review_context.sanitize(str(exc), session.credentials))
-        rows.append(row)
+        return index, row
+
+    def select(waiting, active, blocked, limit, rank):
+        # Repeated finding identities share durable request keys and must replay in order.
+        occupied = {snapshot.get("id") or planning.fingerprint(snapshot) for _, snapshot in active}
+        chosen = []
+        for candidate in waiting:
+            identity = candidate[1].get("id") or planning.fingerprint(candidate[1])
+            if identity not in occupied:
+                chosen.append(candidate)
+                occupied.add(identity)
+                if len(chosen) == limit:
+                    break
+        return chosen
+
+    def accept(completed):
+        index, row = completed
+        rows[index] = row
+
+    concurrency = options.get("concurrency", 1) if options.get("verification_token_budget") is None else 1
+    await dispatch(pending, concurrency, select, verify_row, accept, continuous=True)
+    rows = [rows[index] for index, _ in pending]
     return {"schema_version": "mortis.verification/v1", "head_sha": current_sha,
             "status": "partial" if any(row["status"] != "completed" or row["verdict"] == "uncertain" for row in rows) else "completed",
             "verifications": rows}

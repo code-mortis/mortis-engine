@@ -195,7 +195,7 @@ class Session:
             return min(limits, default=float("inf"))
 
         def reject(amount):
-            if stage == "security_assessment" and amount <= remaining([row for row in rows if row["status"] != "running"]):
+            if stage in {"security_assessment", "security_verification"} and amount <= remaining([row for row in rows if row["status"] != "running"]):
                 if self.budget_settlement is None:
                     self.budget_settlement = asyncio.Event()
                 raise _BudgetReserved(self.budget_settlement)
