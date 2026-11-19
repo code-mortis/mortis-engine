@@ -1,8 +1,10 @@
 """A release needs matching stable versions and the triggering mainline commit."""
 
 import importlib.util
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +19,7 @@ SHA = "a" * 40
 @pytest.mark.parametrize("tag", ["main", "v0.1", "v01.1.0", "v0.1.0rc1", "v0.1.0+local", "v0.1.0\n"])
 def test_release_rejects_invalid_tags_before_any_command(tmp_path, tag):
     with patch.object(release.subprocess, "check_output") as command:
-        with pytest.raises(AssertionError, match="stable"):
+        with pytest.raises(SystemExit, match="stable"):
             release.check_release(tag, SHA, tmp_path)
         command.assert_not_called()
 
@@ -30,8 +32,34 @@ def test_release_rejects_invalid_tags_before_any_command(tmp_path, tag):
 def test_release_rejects_version_and_revision_mismatch(tmp_path, outputs, sha, error):
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
     with patch.object(release.subprocess, "check_output", side_effect=outputs):
-        with pytest.raises(AssertionError, match=error):
+        with pytest.raises(SystemExit, match=error):
             release.check_release("v0.1.0", sha, tmp_path)
+
+
+@pytest.mark.parametrize("optimization", ["-O", "-OO", "env"])
+@pytest.mark.parametrize(("tag", "outputs", "sha", "error"), [
+    ("main", [], SHA, "stable"),
+    ("v9.9.9", [], SHA, "Tag and project"),
+    ("v0.1.0", ["mortis 0.1.1"], SHA, "CLI"),
+    ("v0.1.0", ["mortis 0.1.0", SHA, "b" * 40], SHA, "triggering"),
+    ("v0.1.0", ["mortis 0.1.0", SHA, SHA], "b" * 40, "triggering"),
+])
+def test_release_checks_survive_optimized_python(tmp_path, optimization, tag, outputs, sha, error):
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
+    code = """
+import json, runpy, sys
+from pathlib import Path
+from unittest.mock import patch
+check = runpy.run_path(sys.argv[1])["check_release"]
+with patch("subprocess.check_output", side_effect=json.loads(sys.argv[5])), patch("subprocess.run"):
+    check(sys.argv[2], sys.argv[3], Path(sys.argv[4]))
+"""
+    result = subprocess.run([sys.executable, *([] if optimization == "env" else [optimization]),
+        "-c", code, SPEC.origin, tag, sha, str(tmp_path), json.dumps(outputs)],
+        env={**os.environ, "PYTHONOPTIMIZE": "1"}, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert "Validated" not in result.stdout
 
 
 def test_release_requires_main_ancestry(tmp_path):

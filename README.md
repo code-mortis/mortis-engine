@@ -383,7 +383,13 @@ mortis connect local \
   --non-interactive
 ```
 
-For a trusted HTTP or private-network endpoint, set `CM_ALLOW_PRIVATE_ENDPOINTS=true`, or explicitly allow its hostname with `CM_TRUSTED_ENDPOINT_HOSTS=localhost`. Explicit hostname trust allows that destination through the endpoint checks. Use a placeholder key for a local provider that does not require authentication. Endpoint policy comes from these environment settings and is not loaded from repository files.
+For a private-network endpoint, set `CM_ALLOW_PRIVATE_ENDPOINTS=true`; HTTP is allowed
+only when every resolved address is private or loopback. Public endpoints still require
+HTTPS. Alternatively, explicitly allow a hostname with `CM_TRUSTED_ENDPOINT_HOSTS=localhost`.
+Explicit hostname trust allows that destination through the endpoint checks. Connections
+use validated IP addresses while retaining the hostname for TLS verification and HTTP
+routing. Use a placeholder key for a local provider that does not require authentication.
+Endpoint policy comes from these environment settings and is not loaded from repository files.
 
 Extra header values can also come from environment variables.
 

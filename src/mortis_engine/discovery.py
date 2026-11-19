@@ -5,6 +5,7 @@ import time
 
 import httpx
 
+from .http_transport import PinnedHTTPTransport
 from .llm_http import request_headers
 from .security import safe_endpoint
 
@@ -40,7 +41,7 @@ def list_models(connection, credentials):
     deadline = time.monotonic() + 20
     size, models, cursors = 0, {}, set()
     try:
-        with httpx.Client(follow_redirects=False, trust_env=False) as client:
+        with httpx.Client(follow_redirects=False, trust_env=False, transport=PinnedHTTPTransport()) as client:
             for _ in range(20):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

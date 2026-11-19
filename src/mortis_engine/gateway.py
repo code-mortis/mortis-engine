@@ -7,6 +7,7 @@ import time
 import httpx
 
 from . import llm_http
+from .http_transport import PinnedAsyncHTTPTransport
 from .llm_http import InferenceError
 from .schemas import Message, Request, Tool
 
@@ -14,7 +15,7 @@ from .schemas import Message, Request, Tool
 def http_client():
     """One pool per run/event loop, shared across its concurrent tasks and tool rounds."""
     return httpx.AsyncClient(trust_env=False, follow_redirects=False,
-                             limits=httpx.Limits(max_connections=8, max_keepalive_connections=8))
+                             transport=PinnedAsyncHTTPTransport())
 
 
 def reservation(connection, request):

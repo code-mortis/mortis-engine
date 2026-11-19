@@ -9,14 +9,18 @@ from pathlib import Path
 
 
 def check_release(tag, expected_sha, root):
-    assert re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag), "Use a stable vMAJOR.MINOR.PATCH tag"
+    if not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag):
+        raise SystemExit("Use a stable vMAJOR.MINOR.PATCH tag")
     version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
-    assert tag == f"v{version}", "Tag and project version differ"
+    if tag != f"v{version}":
+        raise SystemExit("Tag and project version differ")
     cli = subprocess.check_output([sys.executable, "-m", "mortis_engine", "--version"], cwd=root, text=True).strip()
-    assert cli == f"mortis {version}", "CLI and project version differ"
+    if cli != f"mortis {version}":
+        raise SystemExit("CLI and project version differ")
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     tagged = subprocess.check_output(["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], cwd=root, text=True).strip()
-    assert head == tagged == expected_sha, "Tag, checkout and triggering commit differ"
+    if not head == tagged == expected_sha:
+        raise SystemExit("Tag, checkout and triggering commit differ")
     subprocess.run(["git", "merge-base", "--is-ancestor", head, "refs/remotes/origin/main"], cwd=root, check=True)
     print(f"Validated {tag} at mainline commit {head}")
 
