@@ -144,3 +144,30 @@ def test_invalid_saved_diagram_is_not_rendered(diagram):
 def test_unsupported_report_contract_fails_explicitly(schema):
     with pytest.raises(ValueError, match="mortis.review/v1 and mortis.security/v1 only"):
         markdown({"schema_version": schema})
+
+
+@pytest.mark.parametrize("schema", ["mortis.review/v1", "mortis.security/v1"])
+@pytest.mark.parametrize("update", [
+    {"coverage": None}, {"coverage": {"selected": None}}, {"coverage": {"inventory": None}},
+    {"coverage": {"failed": [None]}}, {"coverage": {"excluded": ["private-source-value"]}},
+    {"findings": None}, {"findings": "private-source-value"}, {"findings": [None]},
+    {"findings": [{"title": 1}]}, {"summary": "private-source-value"},
+    {"summary": {"result": "private-source-value"}}, {"summary": {"result": {"groups": None}}},
+    {"summary": {"result": {"groups": [None]}}}, {"summary": {"result": {"groups": [{"paths": None}]}}},
+    {"units": [None]}, {"units": [{"status": []}]}, {"history": [None]},
+    {"history": [{"snapshot": None}]}, {"history": [{"snapshot": "path"}]},
+    {"candidates": [None]}, {"assessments": [{"result": "verdict"}]}, {"usage": "private-source-value"},
+])
+def test_malformed_saved_report_shapes_raise_safe_value_error(schema, update):
+    report = {"schema_version": schema, **update}
+    before = copy.deepcopy(report)
+    with pytest.raises(ValueError, match="Invalid saved report structure") as error:
+        markdown(report)
+    assert "private-source-value" not in str(error.value)
+    assert report == before
+
+
+@pytest.mark.parametrize("report", [None, [], "private-source-value"])
+def test_non_object_report_raises_safe_value_error(report):
+    with pytest.raises(ValueError, match="Invalid saved report structure"):
+        markdown(report)

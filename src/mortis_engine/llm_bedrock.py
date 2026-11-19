@@ -55,6 +55,8 @@ def _prepare(connection, credentials, body):
     url = f"{base}/model/{quote(model, safe='')}/converse"
     headers = httpx.Headers({"Content-Type": "application/json", "Accept": "application/json"})
     headers.update(credentials.get("extra_headers", {}))
+    if any(name in headers for name in ("authorization", "x-amz-date", "x-amz-security-token")):
+        raise ValueError("Bedrock signing headers are managed by the worker")
     key = credentials.get("api_key") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
     if key:
         header = options.get("auth_header") or "Authorization"
@@ -62,8 +64,6 @@ def _prepare(connection, credentials, body):
     else:
         if options.get("auth_header") and options["auth_header"].lower() != "authorization":
             raise ValueError("A custom Bedrock auth header requires an API key")
-        if any(name in headers for name in ("authorization", "x-amz-date", "x-amz-security-token")):
-            raise ValueError("Bedrock signing headers are managed by the worker")
     if any(name in headers for name in ("host", "content-length", "transfer-encoding", "connection", "proxy-authorization")):
         raise ValueError("Bedrock headers cannot replace HTTP routing or framing")
     if any("\r" in name + value or "\n" in name + value for name, value in headers.items()):

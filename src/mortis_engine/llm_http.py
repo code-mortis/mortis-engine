@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
 from . import __version__
+from .http_transport import EndpointPolicyError
 from .schemas import Request, Response, ToolCall, Usage
 from .security import clean_text, digest, safe_endpoint
 
@@ -24,7 +25,7 @@ PROTECTED = {
     "model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream",
     "api_key", "max_tokens", "max_completion_tokens", "max_output_tokens", "response_format",
     "inferenceConfig", "additionalModelRequestFields", "toolConfig", "outputConfig",
-    "store", "previous_response_id", "conversation", "background", "authorization", "extra_headers", "include",
+    "store", "prompt_cache_key", "previous_response_id", "conversation", "background", "authorization", "extra_headers", "include",
 }
 
 
@@ -566,6 +567,9 @@ async def post_json(client: httpx.AsyncClient, url: str, headers, body: dict | b
                 return data, identity
             finally:
                 await response.aclose()
+        except EndpointPolicyError as exc:
+            raise InferenceError("endpoint_policy", "The selected inference endpoint failed address validation.",
+                                 consumption_unknown=False) from exc
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise InferenceError("connection", "Could not connect to the selected inference endpoint.",
                                  retryable=True, consumption_unknown=False) from exc

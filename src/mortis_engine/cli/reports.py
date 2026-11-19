@@ -43,8 +43,9 @@ def write_outputs(result, paths):
     if not paths:
         return
     written = []
+    run_id = result.get("run_id") if isinstance(result, dict) else None
     try:
-        if result.get("schema_version") not in {"mortis.review/v1", "mortis.security/v1"}:
+        if not isinstance(result, dict) or result.get("schema_version") not in ("mortis.review/v1", "mortis.security/v1"):
             raise ValueError("Only saved review and security reports can be exported.")
         contents = [(path, json.dumps(result, indent=2) + "\n" if path.suffix.lower() == ".json"
                      else markdown(result)) for path in paths]
@@ -63,9 +64,11 @@ def write_outputs(result, paths):
                 os.unlink(temporary)
     except (OSError, ValueError) as exc:
         saved = ", ".join(repr(str(path)) for path in written) or "none"
+        recovery = (f"Saved run: {run_id}. Export it with mortis report --run {run_id} "
+                    "--repo REPOSITORY --output NEW_FILE; analysis does not need to be repeated."
+                    if isinstance(run_id, str) and run_id else "Saved run ID unavailable in this report.")
         raise ValueError(f"Report export failed: {exc}. Files written: {saved}. "
-                         f"Saved run: {result['run_id']}. Export it with mortis report --run {result['run_id']} "
-                         "--repo REPOSITORY --output NEW_FILE; analysis does not need to be repeated.") from exc
+                         + recovery) from exc
     for path in written:
         print(f"Saved report: {str(path)!r}", file=sys.stderr, flush=True)
 

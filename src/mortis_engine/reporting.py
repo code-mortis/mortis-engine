@@ -87,6 +87,13 @@ def _candidate(row):
 
 def markdown(report) -> str:
     """Render a saved report without changing it or consulting state/providers."""
+    try:
+        return _markdown(report)
+    except (AttributeError, TypeError, KeyError, RecursionError):
+        raise ValueError("Invalid saved report structure; Markdown export is unavailable.") from None
+
+
+def _markdown(report) -> str:
     schema = report.get("schema_version")
     if schema not in {"mortis.review/v1", "mortis.security/v1"}:
         raise ValueError("Markdown reports support mortis.review/v1 and mortis.security/v1 only.")

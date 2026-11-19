@@ -1,0 +1,209 @@
+"""Offline DNS and socket regressions; no credentials or network access."""
+
+import asyncio
+import socket
+import ssl
+
+import httpcore
+import httpx
+import pytest
+
+from mortis_engine import discovery, gateway, llm_http, security
+from mortis_engine.http_transport import EndpointPolicyError, PinnedAsyncHTTPTransport, PinnedHTTPTransport
+from mortis_engine.schemas import Message, Request
+from mortis_engine.security_scans import advisories
+
+PUBLIC = "8.8.8.8"
+
+
+def dns_rows(*addresses):
+    return [(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))
+            for ip in addresses]
+
+
+@pytest.fixture(autouse=True)
+def isolated_endpoint_policy(monkeypatch):
+    monkeypatch.delenv("CM_ALLOW_PRIVATE_ENDPOINTS", raising=False)
+    monkeypatch.delenv("CM_TRUSTED_ENDPOINT_HOSTS", raising=False)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: pytest.fail("Unexpected DNS lookup"))
+
+
+@pytest.mark.parametrize("addresses", [(PUBLIC,), ("127.0.0.1", PUBLIC), ("100.64.0.1",)])
+def test_private_endpoint_flag_never_enables_public_http(monkeypatch, addresses):
+    monkeypatch.setenv("CM_ALLOW_PRIVATE_ENDPOINTS", "true")
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: dns_rows(*addresses))
+    with pytest.raises(ValueError, match="HTTPS"):
+        security.safe_endpoint("http://provider.example/v1")
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "192.168.1.1", "::1", "fd00::1"])
+def test_private_http_requires_opt_in_and_uses_http_port(monkeypatch, address):
+    seen = []
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kw: seen.append(port) or dns_rows(address))
+    with pytest.raises(ValueError, match="HTTPS"):
+        security.safe_endpoint("http://provider.example/v1")
+    monkeypatch.setenv("CM_ALLOW_PRIVATE_ENDPOINTS", "true")
+    assert security.safe_endpoint("http://provider.example/v1/") == "http://provider.example/v1"
+    assert seen == [80]
+
+
+@pytest.mark.parametrize("address", ["169.254.169.254", "0.0.0.0", "224.0.0.1", "fe80::1", "::"])
+def test_private_flag_preserves_protected_address_denial(monkeypatch, address):
+    monkeypatch.setenv("CM_ALLOW_PRIVATE_ENDPOINTS", "true")
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: dns_rows(address))
+    with pytest.raises(ValueError, match="protected"):
+        security.safe_endpoint("https://provider.example")
+
+
+def test_explicit_host_trust_and_empty_dns(monkeypatch):
+    monkeypatch.setenv("CM_TRUSTED_ENDPOINT_HOSTS", " provider.example ")
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: dns_rows(PUBLIC))
+    assert security.safe_endpoint("http://provider.example") == "http://provider.example"
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: [])
+    with pytest.raises(ValueError, match="could not be found"):
+        security.safe_endpoint("https://provider.example")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("address", [PUBLIC, "2001:4860:4860::8888"])
+def test_transport_pins_dns_preserves_tls_host_and_pool_isolation(monkeypatch, asynchronous, address):
+    lookups, sockets, tls, writes, streams = [], [], [], [], []
+
+    def resolve(host, port, **kwargs):
+        lookups.append(host)
+        return dns_rows(address)
+
+    def connected(host, port):
+        # A second DNS lookup of the original hostname here would be vulnerable.
+        assert host == address
+        sockets.append((host, port))
+
+    def secured(context, hostname):
+        assert context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
+        tls.append(hostname)
+
+    response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
+
+    class SyncStream(httpcore.MockStream):
+        def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            secured(ssl_context, server_hostname)
+            return self
+
+        def write(self, buffer, timeout=None):
+            writes.append(buffer)
+
+    class AsyncStream(httpcore.AsyncMockStream):
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            secured(ssl_context, server_hostname)
+            return self
+
+        async def write(self, buffer, timeout=None):
+            writes.append(buffer)
+
+    def connect_sync(self, host, port, **kwargs):
+        connected(host, port)
+        stream = SyncStream([response, response])
+        streams.append(stream)
+        return stream
+
+    async def connect_async(self, host, port, **kwargs):
+        connected(host, port)
+        stream = AsyncStream([response, response])
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", connect_sync)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect_async)
+    urls = ["https://one.example:8443/v1?after=next"] * 2 + ["https://two.example:8443/v1"]
+
+    async def run():
+        async with gateway.http_client() as client:
+            for url in urls:
+                result = await client.post(url, content=b"signed bytes", headers={"Authorization": "fixture-key"})
+                assert result.json() == {} and str(result.request.url) == url
+
+    if asynchronous:
+        asyncio.run(run())
+    else:
+        with httpx.Client(transport=PinnedHTTPTransport(), trust_env=False) as client:
+            for url in urls:
+                result = client.post(url, content=b"signed bytes", headers={"Authorization": "fixture-key"})
+                assert result.json() == {} and str(result.request.url) == url
+
+    assert lookups == ["one.example", "one.example", "two.example"]
+    assert sockets == [(address, 8443)] * 2
+    assert tls == ["one.example", "two.example"]
+    wire = b"".join(writes)
+    assert wire.count(b"Host: one.example:8443\r\n") == 2
+    assert wire.count(b"Host: two.example:8443\r\n") == 1
+    assert wire.count(b"Authorization: fixture-key\r\n") == 3
+    assert wire.count(b"signed bytes") == 3
+    assert b"POST /v1?after=next HTTP/1.1" in wire
+    assert all(stream._closed for stream in streams)
+
+
+@pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
+def test_inference_rechecks_dns_at_dispatch_and_accounts_for_denial(monkeypatch, protocol):
+    answers = iter([dns_rows(PUBLIC), dns_rows("169.254.169.254")])
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: next(answers))
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", lambda *a, **kw: pytest.fail("Socket opened"))
+
+    async def run():
+        async with gateway.http_client() as client:
+            with pytest.raises(llm_http.InferenceError) as error:
+                await gateway.send({"kind": "api", "protocol": protocol, "base_url": "https://provider.example/v1",
+                    "model": "fixture", "options": {}}, {"api_key": "fixture-key"},
+                    Request(messages=[Message(role="user", content="fixture")], max_output_tokens=256), client=client)
+        assert error.value.code == "endpoint_policy"
+        assert not error.value.consumption_unknown and not error.value.retryable
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["discovery", "advisory"])
+def test_sync_callers_recheck_dns_before_sending(monkeypatch, operation):
+    answers = iter([dns_rows(PUBLIC), dns_rows("127.0.0.1")])
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: next(answers))
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", lambda *a, **kw: pytest.fail("Socket opened"))
+    with pytest.raises(EndpointPolicyError):
+        if operation == "discovery":
+            discovery.list_models({"protocol": "openai", "base_url": "https://provider.example"},
+                                  {"api_key": "fixture-key"})
+        else:
+            advisories.fetch("CVE-2026-12345")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ReadError, httpx.WriteError])
+def test_transport_only_tries_another_address_before_dispatch(monkeypatch, asynchronous, failure):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: dns_rows(PUBLIC, "1.1.1.1"))
+    seen = []
+
+    def respond(request):
+        seen.append(request.url.host)
+        if len(seen) == 1:
+            raise failure("fixture failure")
+        return httpx.Response(200, content=b"{}")
+
+    monkeypatch.setattr(httpx, "HTTPTransport", lambda **kw: httpx.MockTransport(respond))
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **kw: httpx.MockTransport(respond))
+
+    async def run():
+        async with httpx.AsyncClient(transport=PinnedAsyncHTTPTransport(), trust_env=False) as client:
+            await client.post("https://provider.example", content=b"fixture")
+
+    def execute():
+        if asynchronous:
+            asyncio.run(run())
+        else:
+            with httpx.Client(transport=PinnedHTTPTransport(), trust_env=False) as client:
+                client.post("https://provider.example", content=b"fixture")
+
+    if failure is httpx.ConnectError:
+        execute()
+        assert seen == [PUBLIC, "1.1.1.1"]
+    else:
+        with pytest.raises(failure):
+            execute()
+        assert seen == [PUBLIC]

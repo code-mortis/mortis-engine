@@ -90,10 +90,23 @@ def test_responses_cache_affinity_survives_tool_rounds_and_separates_sessions(se
     assert llm.reservation(saved, task) == encoded_size + 1024 + 64 * (len(task.messages) + len(task.tools))
 
 
-@pytest.mark.parametrize("cache_key", ["explicit-operator-affinity", None])
-def test_responses_cache_affinity_preserves_explicit_override(cache_key):
+@pytest.mark.parametrize("cache_key", ["explicit-operator-affinity", None, {"value": "shared"}])
+def test_responses_cache_affinity_rejects_explicit_override(cache_key):
     saved = connection("openai-responses", extra_body={"prompt_cache_key": cache_key})
-    assert llm_http.encode_request("openai-responses", saved, request())["prompt_cache_key"] == cache_key
+    with pytest.raises(ValueError, match="protected"):
+        llm_http.encode_request("openai-responses", saved, request())
+
+
+def test_responses_cache_affinity_accepts_only_the_same_session_key():
+    task = request(session_id="fixture-session")
+    original = llm_http.encode_request("openai-responses", connection("openai-responses"), task)
+    saved = connection("openai-responses", extra_body={"prompt_cache_key": original["prompt_cache_key"]})
+    assert llm_http.encode_request("openai-responses", saved, task) == original
+    with pytest.raises(ValueError, match="protected"):
+        llm_http.encode_request("openai-responses", saved, request(session_id="another-session"))
+    with pytest.raises(ValueError):
+        llm_http.encode_request("openai-responses", connection("openai-responses",
+            extra_body={"prompt_cache_key.value": "shared"}), task)
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)

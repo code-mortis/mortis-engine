@@ -13,8 +13,7 @@ def test_discovery_pages_use_configured_endpoint_and_credentials(monkeypatch):
             return httpx.Response(200, json={"data": [{"id": "first"}], "has_more": True, "last_id": "next"})
         return httpx.Response(200, json={"data": [{"id": "second", "display_name": "Second"}]})
 
-    make_client = httpx.Client
-    monkeypatch.setattr(discovery.httpx, "Client", lambda **kwargs: make_client(transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(discovery, "PinnedHTTPTransport", lambda: httpx.MockTransport(respond))
     monkeypatch.setattr(discovery, "safe_endpoint", lambda url: url)
     assert discovery.list_models(
         {"protocol": "anthropic", "base_url": "https://provider.example", "options": {"auth_header": "X-Key"}},

@@ -1,6 +1,7 @@
 """Redacted model context and stable, exact-revision citation identities."""
 
 import json
+from collections.abc import Mapping, Sequence, Set
 
 from mortis_engine.security import clean_text, digest
 
@@ -37,14 +38,16 @@ def sanitize(value, credentials, stopped=lambda: False):
             if structural and text != item:
                 raise ValueError("Credential material in a structural identifier; request withheld")
             return text
-        if isinstance(item, dict):
+        if isinstance(item, Mapping):
             identifiers = {"path", "assigned_path", "head_sha", "original_sha", "id", "source_id", "revision",
                            "finding_id", "available_paths", "required_paths", "paths", "changed_paths", "current_path",
                            "base_sha", "source_sha"}
             return {redact(key, True): redact(child, key in identifiers) for key, child in item.items()}
-        if isinstance(item, list):
+        if isinstance(item, (Sequence, Set)) and not isinstance(item, (bytes, bytearray, memoryview)):
             return [redact(child, structural) for child in item]
-        return item
+        if item is None or type(item) in (bool, int, float):
+            return item
+        raise ValueError("Unsupported model context type; request withheld")
 
     return redact(value)
 
@@ -54,7 +57,13 @@ def source_id(revision, path):
 
 
 def quote_matches(source, start_line, end_line, quote):
-    original = "".join(source.splitlines(keepends=True)[start_line - 1:end_line])
+    if (not isinstance(source, str) or not isinstance(quote, str) or not quote.strip()
+            or type(start_line) is not int or type(end_line) is not int):
+        return False
+    lines = source.splitlines(keepends=True)
+    if not 1 <= start_line <= end_line <= len(lines):
+        return False
+    original = "".join(lines[start_line - 1:end_line])
     rendered = "\n".join(source.splitlines()[start_line - 1:end_line])
     return quote in original or quote in rendered
 

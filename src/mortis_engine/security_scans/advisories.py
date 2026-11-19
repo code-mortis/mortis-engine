@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from mortis_engine.http_transport import PinnedHTTPTransport
 from mortis_engine.security import safe_endpoint
 
 URL = "https://api.github.com/advisories"
@@ -14,7 +15,7 @@ def fetch(cve):
     if not isinstance(cve, str) or not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve):
         raise ValueError("Public advisory lookup requires a validated CVE identifier.")
     safe_endpoint(URL)
-    with httpx.Client(trust_env=False, follow_redirects=False, timeout=10) as client:
+    with httpx.Client(trust_env=False, follow_redirects=False, timeout=10, transport=PinnedHTTPTransport()) as client:
         with client.stream("GET", URL, params={"cve_id": cve, "type": "reviewed", "per_page": 100},
                            headers={"Accept": "application/vnd.github+json", "User-Agent": "mortis-engine"}) as response:
             response.raise_for_status()

@@ -246,3 +246,30 @@ def test_render_failure_creates_no_output(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Saved run: saved-run"):
         reports.write_outputs({"schema_version": "mortis.review/v1", "run_id": "saved-run"}, paths)
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("coverage", [None, {"failed": [None]}, {"units": ["private-source-value"]}])
+def test_malformed_saved_report_export_preserves_history_and_outputs(repository, tmp_path, capsys, coverage):
+    with History(repository) as history:
+        run_id = history.begin("review", "scope", {})
+        result = {"schema_version": "mortis.review/v1", "run_id": run_id, "coverage": coverage}
+        history.finish(run_id, result)
+    json_path, markdown_path = tmp_path / "report.json", tmp_path / "report.md"
+    assert cli.main(["report", "--repo", str(repository), "--run", run_id,
+                     "--output", str(json_path), "--output", str(markdown_path)]) == 1
+    captured = capsys.readouterr()
+    assert "Report export failed: Invalid saved report structure" in captured.err
+    assert f"Saved run: {run_id}" in captured.err
+    assert "private-source-value" not in captured.err and "Traceback" not in captured.err
+    assert not captured.out and not json_path.exists() and not markdown_path.exists()
+    with History(repository) as history:
+        assert history.report(run_id) == result
+
+
+@pytest.mark.parametrize("result", [None, [], {"schema_version": []},
+    {"schema_version": "mortis.review/v1", "coverage": None}])
+def test_invalid_export_without_run_id_still_reports_safe_error(tmp_path, result):
+    path = tmp_path / "report.md"
+    with pytest.raises(ValueError, match="Saved run ID unavailable"):
+        reports.write_outputs(result, [path])
+    assert not path.exists()

@@ -8,11 +8,11 @@ from pathlib import PurePosixPath
 
 from mortis_engine.review import file_policy
 from mortis_engine.review import source as git_source
-from mortis_engine.review.contracts import ReviewComment
 from mortis_engine.review.errors import ReviewStopped
 from mortis_engine.security import clean_text, digest
 
 from . import policy
+from .contracts import relative_path
 
 
 class ResultValidationError(ValueError):
@@ -90,12 +90,6 @@ ASSESSMENT_INSTRUCTIONS = (
     "Rewording, moved lines or scanner origin do not create a different issue. Otherwise use null. "
     "For validation_feedback kind history_selection, choose an allowed reference or null without weakening evidence."
 )
-
-
-def relative_path(value):
-    if not isinstance(value, str) or not value or value in {".", ".."} or any(ord(c) < 32 for c in value):
-        raise ValueError("Security evidence contains an invalid repository path.")
-    return ReviewComment.relative_path(value)
 
 
 def secure_digest(value, key):

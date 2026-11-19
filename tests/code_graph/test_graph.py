@@ -14,6 +14,7 @@ from mortis_engine.code_graph.contracts import (
     EXTRACTOR_VERSION,
     CodeGraphRequest,
     CodeGraphResult,
+    CodeGraphSymbol,
     blob_sha,
     source_lines,
 )
@@ -67,6 +68,33 @@ def test_validator_checks_exact_snapshot_manifest_and_import_evidence():
     tampered.imports[0].target_path = "app.js"
     with pytest.raises(ValueError, match="target"):
         validate_result(request, tampered)
+
+
+@pytest.mark.parametrize("status", ["unknown", "excluded", "unsupported", "failed"])
+@pytest.mark.parametrize("fact", ["symbol", "import"])
+def test_validator_rejects_facts_without_validated_source(status, fact):
+    path = "unparsed.md" if status == "unsupported" else "unparsed.py"
+    raw = request_fixture().model_dump()
+    if status != "unknown":
+        content = b"\xff" if status == "failed" else b"x"
+        raw["files"].append({"path": path, "blob_sha": blob_sha(content), "size_bytes": len(content),
+            "content_base64": base64.b64encode(content).decode() if status == "failed" else None,
+            "exclusion": "excluded" if status == "excluded" else None})
+    request = CodeGraphRequest.model_validate(raw)
+    result = parsed(request)
+    if status == "failed":
+        result.files[-1] = result.files[-1].model_copy(update={"status": "failed", "reason": "invalid_encoding",
+                                                            "line_count": None, "unresolved_calls": None})
+    if fact == "symbol":
+        result.symbols = [CodeGraphSymbol(file_path=path, name="x", kind="function_definition",
+                                         start_byte=0, end_byte=1, start_line=1, end_line=1)]
+    else:
+        result.imports[0].file_path = path
+    # JSON is already guarded; mutated Python result objects need the same failure contract.
+    with pytest.raises(ValueError):
+        CodeGraphResult.model_validate_json(result.model_dump_json())
+    with pytest.raises(ValueError, match="validated source"):
+        validate_result(request, result)
 
 
 @pytest.mark.parametrize(("configuration", "version"), [

@@ -383,7 +383,13 @@ mortis connect local \
   --non-interactive
 ```
 
-For a trusted HTTP or private-network endpoint, set `CM_ALLOW_PRIVATE_ENDPOINTS=true`, or explicitly allow its hostname with `CM_TRUSTED_ENDPOINT_HOSTS=localhost`. Explicit hostname trust allows that destination through the endpoint checks. Use a placeholder key for a local provider that does not require authentication. Endpoint policy comes from these environment settings and is not loaded from repository files.
+For a private-network endpoint, set `CM_ALLOW_PRIVATE_ENDPOINTS=true`; HTTP is allowed
+only when every resolved address is private or loopback. Public endpoints still require
+HTTPS. Alternatively, explicitly allow a hostname with `CM_TRUSTED_ENDPOINT_HOSTS=localhost`.
+Explicit hostname trust allows that destination through the endpoint checks. Connections
+use validated IP addresses while retaining the hostname for TLS verification and HTTP
+routing. Use a placeholder key for a local provider that does not require authentication.
+Endpoint policy comes from these environment settings and is not loaded from repository files.
 
 Extra header values can also come from environment variables.
 
@@ -400,7 +406,7 @@ Use `--headers-env '{}'` to clear extra headers. A supplied `--options` object r
 | `timeout_sec` | Provider request timeout, 5–900 seconds |
 | `prompt_token_ceiling` | Conservative input ceiling per request, 4,096–2,000,000 tokens |
 | `retry_codes` | Provider HTTP 4xx codes classified as retryable by the transport |
-| `extra_body` | Additional provider request fields, with input and authentication protections |
+| `extra_body` | Additional provider request fields, with input, authentication and per-session prompt cache key protections |
 | `auth_header` | Custom authentication header name |
 | `aws_region` | Bedrock region |
 | `aws_profile` | AWS credential profile for Bedrock |

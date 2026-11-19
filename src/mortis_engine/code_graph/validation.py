@@ -52,6 +52,8 @@ def validate_result(request: CodeGraphRequest, result: CodeGraphResult) -> CodeG
         lines[item.path] = [index for index, value in enumerate(source) if value == 10]
     available = {item.path for item in result.files if item.status not in {"excluded", "failed"}}
     for item in [*result.symbols, *result.imports]:
+        if item.file_path not in sources:
+            raise ValueError("Parser facts require a validated source file")
         source = sources[item.file_path]
         newlines = lines[item.file_path]
         if (item.start_line, item.end_line) != (bisect_right(newlines, item.start_byte - 1) + 1,
