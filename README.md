@@ -406,7 +406,7 @@ Use `--headers-env '{}'` to clear extra headers. A supplied `--options` object r
 | `timeout_sec` | Provider request timeout, 5–900 seconds |
 | `prompt_token_ceiling` | Conservative input ceiling per request, 4,096–2,000,000 tokens |
 | `retry_codes` | Provider HTTP 4xx codes classified as retryable by the transport |
-| `extra_body` | Additional provider request fields, with input and authentication protections |
+| `extra_body` | Additional provider request fields, with input, authentication and per-session prompt cache key protections |
 | `auth_header` | Custom authentication header name |
 | `aws_region` | Bedrock region |
 | `aws_profile` | AWS credential profile for Bedrock |

@@ -25,7 +25,7 @@ PROTECTED = {
     "model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream",
     "api_key", "max_tokens", "max_completion_tokens", "max_output_tokens", "response_format",
     "inferenceConfig", "additionalModelRequestFields", "toolConfig", "outputConfig",
-    "store", "previous_response_id", "conversation", "background", "authorization", "extra_headers", "include",
+    "store", "prompt_cache_key", "previous_response_id", "conversation", "background", "authorization", "extra_headers", "include",
 }
 
 

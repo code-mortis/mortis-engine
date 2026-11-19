@@ -202,6 +202,23 @@ def test_signing_and_framing_headers_are_protected(headers):
     assert not failure.value.consumption_unknown
 
 
+@pytest.mark.parametrize("header", ["Authorization", "X-Amz-Date", "x-AMZ-security-token"])
+@pytest.mark.parametrize("auth_header", ["Authorization", "X-Worker-Key"])
+@pytest.mark.parametrize("key_source", ["api_key", "environment"])
+def test_bearer_auth_rejects_extra_signing_headers(monkeypatch, header, auth_header, key_source):
+    credentials = {"api_key": "fixture-key" if key_source == "api_key" else "",
+                   "extra_headers": {header: "untrusted-signing-material"}}
+    if key_source == "environment":
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "fixture-key")
+    with pytest.raises(InferenceError) as error:
+        execute(lambda req: pytest.fail("Unsafe request dispatched"),
+                connection(options={"auth_header": auth_header}), credentials)
+    assert not error.value.consumption_unknown and not error.value.retryable
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "signing headers" in str(error.value.__cause__)
+    assert "untrusted-signing-material" not in str(error.value)
+
+
 @pytest.mark.parametrize(("status", "payload"), [(401, {"message": "private-provider-diagnostic"}),
                                                      (403, {"message": "private-provider-diagnostic"}),
                                                      (429, {"message": "private-provider-diagnostic"}),
