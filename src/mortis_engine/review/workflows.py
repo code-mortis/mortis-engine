@@ -238,7 +238,7 @@ async def verify(repo, env, original_report, current_sha, options, session):
         index, row = completed
         rows[index] = row
 
-    concurrency = options.get("concurrency", 1) if options.get("verification_token_budget") is None else 1
+    concurrency = options.get("concurrency", 1)
     await dispatch(pending, concurrency, select, verify_row, accept, continuous=True)
     rows = [rows[index] for index, _ in pending]
     return {"schema_version": "mortis.verification/v1", "head_sha": current_sha,
@@ -416,7 +416,10 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
         report_progress("assessment")
 
     report_progress("assessment")
-    concurrency = options.get("concurrency", 1) if options.get("assessment_token_budget") is None else 1
+    concurrency = options.get("concurrency", 1)
+    if not continuous and options.get("assessment_token_budget") is not None:
+        # Legacy runs reconstruct saved inputs from their original serial assessment order.
+        concurrency = 1
     dependencies, order = replay_order(session, {row[0]: row[2] for row in pending}) if continuous else ({}, {})
     await dispatch(pending, concurrency, select, assess_row, accept, continuous=continuous,
                    predecessors=dependencies, order=order)

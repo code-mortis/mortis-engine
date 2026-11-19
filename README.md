@@ -85,15 +85,14 @@ records the byte and batch reduction.
 
 Use `--concurrency 1` through `--concurrency 8` to override the repository setting for a review or security scan. Reviews default to two concurrent AI batches; a batch may contain multiple files. Scans default to four concurrent file analyses. The override applies only to that run and leaves `mortis.toml` unchanged.
 
-During assessment, Mortis starts the next eligible candidate as soon as a slot opens.
-Related candidates wait for the earlier result to enter the assessment history.
-A finite review assessment budget reduces assessment concurrency to one.
+Analysis, assessment and fix verification start the next eligible task as soon as a
+slot opens. Related candidates wait for the earlier result to enter the assessment
+history. Evidence followups for one finding and deterministic scanner checks each run
+sequentially. Verification retains report order.
 
-Fix verification also starts the next eligible finding as soon as a slot opens, using
-the configured concurrency and retaining report order. Evidence followups for a finding
-remain sequential, as do deterministic scanner checks. A finite review verification
-budget reduces verification concurrency to one; scans wait for temporary reservations
-to settle before admitting further requests within their budgets.
+Requests waiting for a temporary token reservation or a retry release their execution
+slot, so other eligible work can proceed. When a review batch exceeds the output
+limit, its smaller recovery batches share the analysis concurrency limit and budget.
 
 Separate Mortis processes sharing the same local state directory also share a ceiling
 of eight active model requests per connection. This applies across repositories and
@@ -158,7 +157,10 @@ Use `0` for unlimited total token budgets, overall timeouts and maximum files. I
 
 Set `max_output_tokens = 0` to let the provider determine the output allowance when the total token budget is unlimited. OpenAI Chat Completions, OpenAI Responses and Bedrock Converse use the provider's default. Anthropic Messages fetches the selected model's output capacity from the Models API and uses it for the request. If the endpoint cannot supply that capacity, use an explicit positive limit.
 
-With a finite token budget, Mortis derives an output cap from the remaining budget and serializes requests so they cannot reserve the same tokens. If the provider rejects the resulting cap, set a positive limit within the model's capacity.
+With `max_output_tokens = 0` and a finite token budget, Mortis derives an output cap
+from the remaining budget and reserves that budget until the request settles.
+Use a positive output limit within the model's capacity to allow multiple requests
+to fit in the budget at once.
 
 Review flags also include `--assessment-token-budget`, `--verification-token-budget`, `--summary-token-budget` and `--summary-timeout-seconds`. Scans support the assessment and verification budget flags. Standalone verification uses `--verification-token-budget`; background generation uses `--token-budget`. These commands support `--max-output-tokens` and their corresponding overall timeout flag. `--resume` restores the saved overrides and rejects new limit flags.
 

@@ -3,8 +3,10 @@
 import asyncio
 import json
 import time
+from itertools import count
 
 from mortis_engine import gateway
+from mortis_engine.assessment_dispatch import dispatch
 from mortis_engine.llm_http import InferenceError
 from mortis_engine.workflow import Session
 
@@ -52,11 +54,10 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                 "waiting_requests": active.waiting_requests,
                 "active_paths": sorted({unit.path for batch in active_batches.values() for unit in batch.units})})
 
-        async def batch_run(batch, client, *, recovered=False, session_id=None):
+        async def batch_run(batch, client, *, recovered, session_id):
             if plan.limit_reason or batch.error:
                 fail(batch, batch.error or "file_limit")
                 return
-            session_id = session_id or fingerprint([run_id, batch.key])
             request = batch.request.model_copy(update={"session_id": session_id})
             sources, supporting, notices = list(batch.sources), [], []
             rounds, repairs = 0, 0
@@ -70,9 +71,7 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                 except InferenceError as exc:
                     if (exc.code == "output_limit" and exc.usage.total_tokens is not None
                             and not exc.consumption_unknown and not recovered):
-                        for child in engine._recovery_batches(batch, request, sources, batch.key):
-                            await batch_run(child, client, recovered=True, session_id=session_id)
-                        return
+                        return engine._recovery_batches(batch, request, sources, batch.key)
                     code = ("cancelled" if stopped() else "deadline") if cancelled() else exc.code
                     fail(batch, code)
                     return
@@ -133,40 +132,41 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                 request = request.model_copy(update={"session_id": session_id})
 
         async def run_batches(batches, client):
-            queue = asyncio.Queue()
-            for batch in batches:
-                queue.put_nowait(batch)
+            positions = count()
+            pending = [(next(positions), batch, None) for batch in batches]
 
-            async def worker():
-                while not queue.empty():
-                    batch = queue.get_nowait()
-                    try:
-                        if cancelled():
-                            fail(batch, "cancelled" if stopped() else "deadline")
-                        else:
-                            try:
-                                if not batch.error and not plan.limit_reason:
-                                    active_batches[batch.key] = batch
-                                    report_progress()
-                                await batch_run(batch, client)
-                            except ReviewStopped:
-                                fail(batch, "cancelled" if stopped() else "deadline")
-                            except TimeoutError:
-                                fail(batch, "deadline")
-                            except (ValueError, OSError):
-                                fail(batch, "source_unavailable")
-                    finally:
-                        active_batches.pop(batch.key, None)
-                        report_progress()
-                        queue.task_done()
+            def track(row, running):
+                batch = row[1]
+                if running:
+                    active_batches[batch.key] = batch
+                else:
+                    active_batches.pop(batch.key, None)
+                report_progress()
 
-            workers = [asyncio.create_task(worker()) for _ in range(min(options.get("concurrency", 2), len(batches)))]
-            try:
-                await asyncio.gather(*workers)
-            finally:
-                for task in workers:
-                    task.cancel()
-                await asyncio.gather(*workers, return_exceptions=True)
+            async def process(row):
+                _, batch, parent_session = row
+                session_id = parent_session or fingerprint([run_id, batch.key])
+                try:
+                    if cancelled():
+                        fail(batch, "cancelled" if stopped() else "deadline")
+                    else:
+                        if not batch.error and not plan.limit_reason:
+                            track(row, True)
+                        children = await batch_run(batch, client, recovered=parent_session is not None,
+                                                   session_id=session_id)
+                        if children:
+                            return [(next(positions), child, session_id) for child in children]
+                except ReviewStopped:
+                    fail(batch, "cancelled" if stopped() else "deadline")
+                except TimeoutError:
+                    fail(batch, "deadline")
+                except (ValueError, OSError):
+                    fail(batch, "source_unavailable")
+                finally:
+                    track(row, False)
+
+            await dispatch(pending, options.get("concurrency", 2), None, process, lambda children: children,
+                           continuous=True, on_slot=track)
 
         second_pass = None
         async with gateway.http_client() as client:

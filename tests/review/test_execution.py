@@ -100,21 +100,36 @@ def test_invalid_coverage_has_one_repair_and_never_completes(monkeypatch):
     assert "validation_diagnostics" in json.loads(calls[1].messages[-1].content)
 
 
-def test_concurrent_token_reservations_prevent_over_admission(monkeypatch):
-    calls = []
+@pytest.mark.parametrize(("first_usage", "expected"), [(10, "completed"), (650, "partial")])
+def test_analysis_waits_for_temporary_reservation_and_respects_settled_usage(monkeypatch, first_usage, expected):
+    checking_second = asyncio.Event()
+    sent = []
+
+    def position(request):
+        return json.loads(request.messages[0].content)["assigned_units"][0]["key"]
+
+    def reserve(connection, request):
+        if position(request) == "unit-0":
+            return 700
+        checking_second.set()
+        return 300
 
     async def send(connection, credentials, request, **kwargs):
-        calls.append(request)
-        await asyncio.sleep(0.01)
+        sent.append(position(request))
+        if sent[-1] == "unit-0":
+            await asyncio.wait_for(checking_second.wait(), 5)
+            assert sent == ["unit-0"]
+            return final(request, tokens=first_usage)
         return final(request)
 
     monkeypatch.setattr(gateway, "send", send)
-    monkeypatch.setattr(gateway, "reservation", lambda *args: 100)
-    options = {**OPTIONS, "token_budget": 16484, "concurrency": 2}
+    monkeypatch.setattr(gateway, "reservation", reserve)
+    options = {**OPTIONS, "token_budget": 1000, "max_output_tokens": 100, "concurrency": 2}
     state, report, _ = engine.run(None, {}, plan(2), CONNECTION, options, {})
-    assert len(calls) == 1 and state == "partial"
-    assert report["summary"]["budget_exceeded"] is True
-    assert report["summary"]["reserved_tokens"] == 10
+    assert state == expected
+    assert sent == (["unit-0", "unit-1"] if expected == "completed" else ["unit-0"])
+    assert report["summary"]["budget_exceeded"] == (expected == "partial")
+    assert report["summary"]["reserved_tokens"] == first_usage + 10 * (len(sent) - 1)
 
 
 def test_unknown_usage_retains_reservation_and_stops_repair(monkeypatch):
@@ -189,6 +204,42 @@ def test_recovery_interruption_preserves_completed_units(monkeypatch):
     assert [unit["status"] for unit in report["units"]] == ["completed", "failed"]
     assert report["units"][1]["error"] == "deadline"
     assert len({request.session_id for request in calls}) == 1
+
+
+def test_recovery_units_share_analysis_slots_and_refill(monkeypatch):
+    value = plan(5)
+    value.batches = [value.units]
+    gates = {unit.key: asyncio.Event() for unit in value.units}
+    active, sessions = set(), set()
+    replaced = []
+
+    async def send(connection, credentials, request, **kwargs):
+        sessions.add(request.session_id)
+        units = json.loads(request.messages[0].content)["assigned_units"]
+        if len(units) > 1:
+            raise InferenceError("output_limit", "Output truncated", usage=Usage(total_tokens=50))
+        key = units[0]["key"]
+        active.add(key)
+        try:
+            assert len(active) <= 4
+            if len(active) == 4 and key == "unit-3":
+                gates["unit-1"].set()
+            if key == "unit-4":
+                replaced.append(active.copy())
+                for gate in gates.values():
+                    gate.set()
+            await asyncio.wait_for(gates[key].wait(), 5)
+        finally:
+            active.remove(key)
+        return final(request)
+
+    monkeypatch.setattr(gateway, "send", send)
+    monkeypatch.setattr(gateway, "reservation", lambda *args: 100)
+    options = {**OPTIONS, "concurrency": 4, "token_budget": 1000, "max_output_tokens": 100}
+    state, report, _ = engine.run(None, {}, value, CONNECTION, options, {})
+    assert state == "completed" and report["summary"]["total_tokens"] == 100
+    assert replaced == [{"unit-0", "unit-2", "unit-3", "unit-4"}]
+    assert len(sessions) == 1
 
 
 @pytest.mark.parametrize("limit,expected", [(None, [16384, 32768, 32768]), (4096, [4096] * 3), (0, [0] * 3)])
