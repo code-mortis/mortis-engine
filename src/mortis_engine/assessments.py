@@ -81,7 +81,8 @@ def _retain(session, repo, env, revisions, value):
     return sorted(objects)
 
 
-def pin_input(session, candidate_id, kind, candidate, context, options, task_key, repo, env, **evidence):
+def pin_input(session, candidate_id, kind, candidate, context, options, task_key, repo, env, *, predecessors=None,
+              **evidence):
     """Persist sanitized input before dispatch; existing records can never be replaced."""
     from .findings import snapshot
 
@@ -94,6 +95,7 @@ def pin_input(session, candidate_id, kind, candidate, context, options, task_key
         "task_key": task_key, "connection": connection_identity(session.connection),
         "admission_key": session.connection.get("_admission_key"),
         "triage_versions": plan.get("triage_versions", snapshot(session.history, kind, row["scope"])),
+        **({"predecessors": predecessors} if predecessors is not None else {}),
         **evidence}, session.credentials)
     revisions = sorted(set(_revisions(value)))
     try:
@@ -102,6 +104,9 @@ def pin_input(session, candidate_id, kind, candidate, context, options, task_key
         value["retry_blocked_reason"] = review_context.sanitize(str(exc), session.credentials)
     value["revisions"] = revisions
     session.history.save_assessment_input(session.run_id, candidate_id, value)
+    if predecessors is not None:
+        # The first request must render the context in the same key order as a replay.
+        return json.loads(encode(value["context"]))
 
 
 def _children(history, parent, candidate):

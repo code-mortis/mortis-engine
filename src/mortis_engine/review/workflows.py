@@ -1,10 +1,10 @@
 """Portable review stages sharing the app's prompts and evidence validators."""
 
-import asyncio
 import copy
 import json
 from types import SimpleNamespace
 
+from mortis_engine.assessment_dispatch import dispatch, replay_order
 from mortis_engine.llm_http import InferenceError
 
 from . import assessment, background, evidence, planning, policy, summary, verification
@@ -63,8 +63,10 @@ def _related_paths(repo, env, context, options, base_sha, head_sha):
             context["related_paths"] = sorted(permitted)[:20]
 
 
-async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=None, pinned_context=None):
+async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=None, pinned_context=None,
+                  predecessors=None, rebuild_saved=False):
     options = run.config["settings"]
+    saved = None
     if pinned_context is None and candidate_id and getattr(session, "history", None):
         saved = session.history.assessment_input(session.run_id, candidate_id)
         if saved:
@@ -72,16 +74,22 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
             options = {**options, "_evidence_policy": planning.saved_evidence_policy(saved["options"])}
             run = SimpleNamespace(base_sha=run.base_sha, head_sha=run.head_sha,
                                   config={**run.config, "settings": options})
-    if pinned_context is None:
+    if pinned_context is None or (saved and rebuild_saved):
         context = assessment.build_context(repo, env, env, run, snapshot, previous, lambda: False)
         context["review_sensitivity"] = options.get("review_sensitivity")
         _related_paths(repo, env, context, options, run.base_sha, run.head_sha)
         context = review_context.sanitize(context, session.credentials)
-        if candidate_id and getattr(session, "history", None):
+        if saved:
+            if context != pinned_context:
+                raise ValueError("The saved candidate has different immutable assessment inputs.")
+        elif candidate_id and getattr(session, "history", None):
             from mortis_engine.assessments import pin_input
-            pin_input(session, candidate_id, "review", snapshot, context, options,
-                      planning.fingerprint(snapshot), repo, env,
-                      base_sha=run.base_sha, head_sha=run.head_sha)
+            prepared = pin_input(session, candidate_id, "review", snapshot, context, options,
+                                 planning.fingerprint(snapshot), repo, env,
+                                 base_sha=run.base_sha, head_sha=run.head_sha,
+                                 predecessors=predecessors(context) if predecessors is not None else None)
+            if prepared is not None:
+                context = prepared
     else:
         context = copy.deepcopy(pinned_context)
     # Same-head history does not establish attribution against this review's merge base.
@@ -259,9 +267,14 @@ async def generate_background(repo, env, sha, options, session, *, repository="l
     )
 
 
-def _independent_batch(repo, env, run, pending, previous, concurrency):
+def _independent_batch(repo, env, run, pending, previous, concurrency, *, active=(), blocked=(), rank=None):
     groups = []
-    for row in pending:
+    active_indices = {row[0] for row in active}
+
+    def order(row):
+        return rank(row[0]) if rank else row[0]
+
+    for row in (*pending, *active):
         _, snapshot, _ = row
         keys = {("path", snapshot["path"])}
         if snapshot.get("existing_code", "").strip():
@@ -283,10 +296,12 @@ def _independent_batch(repo, env, run, pending, previous, concurrency):
             if not merged:
                 break
         groups = [*remaining, (members, keys)]
-    return sorted((min(group, key=lambda row: row[0]) for group, _ in groups), key=lambda row: row[0])[:concurrency]
+    heads = [min(group, key=order) for group, _ in groups if active_indices.isdisjoint(row[0] for row in group)]
+    return sorted((row for row in heads if row[0] not in blocked), key=order)[:concurrency]
 
 
-async def postprocess(repo, env, report, options, session, *, history=(), progress=lambda value: None):
+async def postprocess(repo, env, report, options, session, *, history=(), progress=lambda value: None,
+                      continuous=True):
     """Assess candidates, retain history, optionally verify fixes and summarize pinned changes."""
     result = copy.deepcopy(report)
     result["settings"] = {key: value for key, value in options.items() if not key.startswith("_")}
@@ -305,11 +320,25 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
                 item["reasons"] = [verified[item["id"]].get("result", {}).get("explanation", "Verification unavailable")
                                    if verified[item["id"]].get("result") else "Verification unavailable"]
 
-    async def assess_row(index, snapshot, identity):
-        row = {"id": "candidate-" + identity[:32], "snapshot": snapshot, "position": index}
+    candidate_positions, finding_positions, created_findings = {}, {}, {}
+
+    def context_predecessors(context):
+        return sorted({row["id"] for row in context["prior_candidates"] if row["id"] in candidate_positions}
+                      | {created_findings[row["id"]] for row in context["history"] if row["id"] in created_findings})
+
+    async def assess_row(candidate):
+        index, snapshot, candidate_id = candidate
+        row = {"id": candidate_id, "snapshot": snapshot, "position": index}
         try:
             pinned = {"candidate_id": row["id"]} if getattr(session, "history", None) else {}
+            if pinned:
+                if continuous:
+                    pinned["predecessors"] = context_predecessors
+                else:
+                    pinned["rebuild_saved"] = True
             assessment_result = await _assess(repo, env, run, snapshot, previous, session, **pinned)
+            if not continuous:
+                assessment_result = assessment.AssessmentResult.model_validate(assessment_result, strict=True).model_dump()
             row.update(status="completed", result=assessment_result)
         except (ValueError, TimeoutError, InferenceError) as exc:
             row.update(status="failed", result=None, error=review_context.sanitize(str(exc), session.credentials))
@@ -319,45 +348,58 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
     for index, snapshot in enumerate(report.get("findings", [])):
         snapshot = {**snapshot, "source_sha": snapshot.get("source_sha") or report["head_sha"]}
         identity = planning.fingerprint({"run": report.get("run_id", report["head_sha"]), "index": index, "snapshot": snapshot})
-        pending.append((index, snapshot, identity))
+        pending.append((index, snapshot, "candidate-" + identity[:32]))
     counts = {"possible_findings": len(pending), "selected_candidates": len(pending), "assessed_candidates": 0,
               "confirmed_candidates": 0, "rejected_candidates": 0, "uncertain_candidates": 0, "failed_candidates": 0}
 
     def report_progress(phase):
         progress({"phase": phase, **counts, "confirmed_findings": len(result["findings"])})
 
+    def select(waiting, active, blocked, limit, rank):
+        return _independent_batch(repo, env, run, waiting, previous, limit, active=active, blocked=blocked, rank=rank)
+
+    def accept(row):
+        snapshot, assessment_result = row["snapshot"], row.get("result")
+        if assessment_result and assessment_result["verdict"] == "confirmed":
+            finding_id = assessment_result["finding_id"] or "finding-" + row["id"].removeprefix("candidate-")
+            finding = {**snapshot, "id": finding_id, "assessment": assessment_result, "status": "open"}
+            if not assessment_result["suggestion_supported"]:
+                finding["suggestion_code"] = ""
+            existing = next((item for item in previous["findings"] if item["id"] == finding_id), None)
+            if existing:
+                finding["status"] = existing["status"]
+            if finding_id not in finding_positions:
+                result["findings"].append(finding)
+                finding_positions[finding_id] = row["position"]
+            row["finding_id"] = finding_id
+            if existing is None:
+                created_findings[finding_id] = row["id"]
+                previous["findings"].append({"id": finding_id, "fingerprint": planning.fingerprint(snapshot),
+                    "snapshot": finding, "sha": report["head_sha"], "assessment": assessment_result,
+                    "status": "open", "review_sensitivity": options.get("review_sensitivity")})
+                if continuous:
+                    previous["findings"].sort(key=lambda item: finding_positions[item["id"]]
+                                              if item["id"] in created_findings else -1)
+        if row["status"] == "failed":
+            result["stage_errors"].append({"stage": "assessment", "candidate_id": row["id"], "error": row["error"]})
+        result["candidates"].append(row)
+        previous["prior_candidates"].append({"id": row["id"], "snapshot": snapshot, "result": row.get("result")})
+        candidate_positions[row["id"]] = row["position"]
+        if continuous:
+            previous["prior_candidates"].sort(key=lambda item: candidate_positions.get(item["id"], -1))
+        counts["assessed_candidates"] += 1
+        counts[(assessment_result["verdict"] if assessment_result else "failed") + "_candidates"] += 1
+        report_progress("assessment")
+
     report_progress("assessment")
     concurrency = options.get("concurrency", 1) if options.get("assessment_token_budget") is None else 1
-    while pending:
-        batch = _independent_batch(repo, env, run, pending, previous, concurrency)
-        outcomes = await asyncio.gather(*(assess_row(*item) for item in batch))
-        for row in outcomes:
-            snapshot, assessment_result = row["snapshot"], row.get("result")
-            if assessment_result and assessment_result["verdict"] == "confirmed":
-                finding_id = assessment_result["finding_id"] or "finding-" + row["id"].removeprefix("candidate-")
-                finding = {**snapshot, "id": finding_id, "assessment": assessment_result, "status": "open"}
-                if not assessment_result["suggestion_supported"]:
-                    finding["suggestion_code"] = ""
-                existing = next((item for item in previous["findings"] if item["id"] == finding_id), None)
-                if existing:
-                    finding["status"] = existing["status"]
-                if not any(item["id"] == finding_id for item in result["findings"]):
-                    result["findings"].append(finding)
-                row["finding_id"] = finding_id
-                if existing is None:
-                    previous["findings"].append({"id": finding_id, "fingerprint": planning.fingerprint(snapshot),
-                        "snapshot": finding, "sha": report["head_sha"], "assessment": assessment_result,
-                        "status": "open", "review_sensitivity": options.get("review_sensitivity")})
-            if row["status"] == "failed":
-                result["stage_errors"].append({"stage": "assessment", "candidate_id": row["id"], "error": row["error"]})
-            result["candidates"].append(row)
-            previous["prior_candidates"].append({"id": row["id"], "snapshot": snapshot, "result": row.get("result")})
-            counts["assessed_candidates"] += 1
-            counts[(assessment_result["verdict"] if assessment_result else "failed") + "_candidates"] += 1
-            report_progress("assessment")
-        finished = {item[0] for item in batch}
-        pending = [item for item in pending if item[0] not in finished]
+    dependencies, order = replay_order(session, {row[0]: row[2] for row in pending}) if continuous else ({}, {})
+    await dispatch(pending, concurrency, select, assess_row, accept, continuous=continuous,
+                   predecessors=dependencies, order=order)
     result["candidates"].sort(key=lambda item: item["position"])
+    if continuous:
+        result["findings"].sort(key=lambda item: finding_positions[item["id"]])
+        result["stage_errors"].sort(key=lambda item: candidate_positions[item["candidate_id"]])
     observed = {item["id"] for item in result["findings"]}
     prior_ids = {item["id"] for item in _history(history)["findings"]}
     result["history"] = [{**item, "observation": "observed" if item["id"] in observed else "not_observed"}

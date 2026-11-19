@@ -38,7 +38,9 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
         context["source_navigation"] = source_navigation(item, context["sources"]["current"],
                                                            context["available_paths"], item.stopped)
     if pin is not None:
-        pin(context)
+        saved_context = pin(context)
+        if saved_context is not None:
+            context = saved_context
     history_ids = {}
     if task == "assessment":
         history = context.get("history", [])

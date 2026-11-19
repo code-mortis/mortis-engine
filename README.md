@@ -85,6 +85,10 @@ records the byte and batch reduction.
 
 Use `--concurrency 1` through `--concurrency 8` to override the repository setting for a review or security scan. Reviews default to two concurrent AI batches; a batch may contain multiple files. Scans default to four concurrent file analyses. The override applies only to that run and leaves `mortis.toml` unchanged.
 
+During assessment, Mortis starts the next eligible candidate as soon as a slot opens.
+Related candidates wait for the earlier result to enter the assessment history.
+A finite review assessment budget reduces assessment concurrency to one.
+
 Separate Mortis processes sharing the same local state directory also share a ceiling
 of eight active model requests per connection. This applies across repositories and
 workflow stages. Profiles using the same destination and credential reference share
@@ -238,7 +242,9 @@ mortis background --ref HEAD
 
 Run history, task reservations and retained snapshot objects live under `$XDG_STATE_HOME/mortis` (default `~/.local/state/mortis`). These private files can contain reviewed source. Use `mortis review --resume RUN_ID` to continue an interrupted review with its pinned revisions and saved connection. Each workflow accepts `--resume`. Validated task results can be reused. A request interrupted after dispatch retains its reservation with unknown usage.
 
-Resumed reviews and scans keep their saved concurrency override. Omit `--concurrency` when using `--resume`; `--progress` can be enabled when resuming.
+Resumed reviews and scans keep their saved concurrency override and assessment dispatch
+policy. Runs created before continuous assessment resume in batches. Omit
+`--concurrency` when using `--resume`. You can enable `--progress` when resuming.
 
 ### Retry a failed assessment
 

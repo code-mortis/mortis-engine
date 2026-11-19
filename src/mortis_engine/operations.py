@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 
+from .assessment_dispatch import ASSESSMENT_DISPATCH_POLICY, continuous_assessment
 from .assessments import list_assessments as list_assessments
 from .assessments import retry_assessment as retry_assessment
 from .findings import apply_decisions, scan_history, snapshot
@@ -38,6 +39,7 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
             concurrency = saved.get("concurrency")
             overrides = saved.get("overrides")
             rotations = saved.get("rotations", [])
+        continuous = continuous_assessment(saved) if kind == "scan" else False
         # Normalize subdirectory invocations to the same local repository as its saved history.
         path = Path(repository).resolve()
         root = next((p for p in (path, *path.parents) if (p / ".git").exists()), path)
@@ -77,6 +79,7 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                 run_id = history.begin(kind, scope, {"ref": ref, "sha": sha, "connection": identity, "previous": previous,
                     "profile": profile, "finding_run": finding_run, "effort": effort, "rotations": list(rotations),
                     "concurrency": concurrency, "overrides": overrides, "triage_versions": decisions, "assessment_runs": assessment_runs,
+                    **({"assessment_dispatch": ASSESSMENT_DISPATCH_POLICY} if kind == "scan" else {}),
                     **({"evidence_policy": options["_evidence_policy"]} if kind == "verify" else {})})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
@@ -96,7 +99,7 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                             if rotations:
                                 acknowledge_rotations(prior, rotations)
                             return await security.scan(root, ref=sha, session=session, options=scan_options, previous=prior,
-                                                       progress=progress)
+                                                       progress=progress, continuous=continuous)
                         if kind == "verify":
                             return await workflows.verify(repo, env, original, sha, options, session)
                         if kind == "summary":

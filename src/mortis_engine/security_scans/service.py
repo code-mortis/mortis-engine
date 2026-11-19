@@ -12,11 +12,13 @@ from typing import Literal
 
 from pydantic import Field
 
+from mortis_engine.assessment_dispatch import dispatch, replay_order
 from mortis_engine.review import file_policy, source
 from mortis_engine.review.settings import RunLimits
 from mortis_engine.security import digest
 
 from . import advisories, engine
+from .contracts import SecurityAnalysis, SecurityAssessment
 from .inference import ask
 from .scanner import identity_key, trivy
 
@@ -131,15 +133,17 @@ def assessment_history(proposal, history, item):
     return [old for old in history if connected & assessment_keys(old, item)]
 
 
-def assessment_batch(candidates, history, item, concurrency):
-    chosen, occupied = [], set()
+def assessment_batch(candidates, history, item, concurrency, *, active_keys=None, blocked=()):
+    chosen, occupied = [], set(active_keys or ())
     for candidate in candidates:
         keys = assessment_keys(candidate[1], item, history)
-        if not keys & occupied:
+        if candidate[0] not in blocked and not keys & occupied:
             chosen.append(candidate)
             occupied.update(keys)
             if len(chosen) >= concurrency:
                 break
+        elif active_keys is not None:
+            occupied.update(keys)
     return chosen
 
 
@@ -189,7 +193,7 @@ def secret_rules(report):
 
 
 async def scan(repository, *, ref="HEAD", session, options=None, previous=None, scanner=None,
-               progress=lambda value: None):
+               progress=lambda value: None, continuous=True):
     options = ScanOptions.model_validate(options or {}).model_dump()
     deadline = time.monotonic() + options["timeout_seconds"] if options["timeout_seconds"] else None
 
@@ -315,6 +319,9 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     context = {"assigned_path": path, "head_sha": sha, "diff": "",
                                "sources": {"current": {path: item.source(path)}}}
                     value, context_paths = await ask(item, session, "analysis", context, "analysis:" + path, options)
+                    if not continuous:
+                        # Recover the original field order after replaying cached JSON.
+                        value = SecurityAnalysis.model_validate(value, strict=True).model_dump()
                     proposals_by_path[path] = [(proposal, context_paths) for proposal in value["findings"]]
                     units.append({"task": "analysis:" + path, "status": "completed"})
                 except Exception as exc:
@@ -330,34 +337,66 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         completed = sum(unit["status"] == "completed" for unit in units)
         stages["analysis"] = {"status": "completed" if completed == len(code_paths) else "partial",
                               "total": len(code_paths), "completed": completed}
-        async def assess(candidate, history):
-            index, proposal, paths = candidate
-            candidate_id = "candidate-" + digest(json.dumps([getattr(session, "run_id", sha), index, proposal], sort_keys=True))[:32]
-            row = {"id": candidate_id, "snapshot": proposal, "position": index}
-            candidate_rows.append(row)
-            try:
-                context = {"proposal": proposal, "history": assessment_history(proposal, history, item),
-                           "head_sha": sha, "diff": "",
-                           "sources": {"current": {path: item.source(path) for path in paths}}}
-                def pin(context):
-                    if getattr(session, "history", None):
-                        from mortis_engine.assessments import pin_input
-                        # Keep scanner redaction identities and line masks, never raw secret matches.
-                        redaction = {"secret_rules": [*item.secret_rules, *secret_rules({"schema_version": "mortis.security/v1", "findings": findings})],
-                                     "secret_lines": item.secret_lines, "inventory": item.inventory,
-                                     "key_check": engine.secure_digest("assessment-redaction-key", item.key)}
-                        pin_input(session, candidate_id, "scan", proposal, context, options,
-                                  f"assessment:{index}", repo, env, head_sha=sha, redaction=redaction)
-                assessed, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options, pin=pin)
-                row.update(status="completed", result=assessed)
-                return assessed
-            except Exception as exc:
-                row.update(status="failed", result=None, error=item.redact(str(exc))[:1000])
-                problems.append(f"Security assessment incomplete: {row['error']}")
-                units.append({"task": f"assessment:{index}", "status": "failed"})
-                return None
 
         remaining = [(index, proposal, paths) for index, (proposal, paths) in enumerate(candidates)]
+        candidate_ids = {index: "candidate-" + digest(json.dumps(
+            [getattr(session, "run_id", sha), index, proposal], sort_keys=True))[:32]
+            for index, proposal, _ in remaining}
+        dependencies, order = replay_order(session, candidate_ids) if continuous else ({}, {})
+        finding_positions, finding_origins, admitted_keys = {}, {}, {}
+        saved_history = getattr(session, "history", None)
+        initial_findings = findings.copy()
+
+        def current_history():
+            return list({old["id"]: old for old in [*previous_findings, *findings]}.values())
+
+        def select(waiting, active, blocked, limit, _rank):
+            history = current_history()
+            if not continuous:
+                return assessment_batch(waiting, history, item, limit)
+            occupied = set().union(*(admitted_keys[index] | assessment_keys(proposal, item, history)
+                                     for index, proposal, _ in active))
+            chosen = assessment_batch(waiting, history, item, limit, active_keys=occupied, blocked=blocked)
+            for index, proposal, _ in chosen:
+                admitted_keys[index] = assessment_keys(proposal, item, history)
+            return chosen
+
+        async def assess(candidate):
+            index, proposal, paths = candidate
+            candidate_id = candidate_ids[index]
+            row = {"id": candidate_id, "snapshot": proposal, "position": index}
+            try:
+                saved = saved_history.assessment_input(session.run_id, candidate_id) if continuous and saved_history else None
+                context = saved["context"] if saved else {
+                    "proposal": proposal, "history": assessment_history(proposal, current_history(), item),
+                    "head_sha": sha, "diff": "",
+                    "sources": {"current": {path: item.source(path) for path in paths}}}
+
+                def pin(context):
+                    from mortis_engine.assessments import pin_input
+
+                    initial = {"schema_version": "mortis.security/v1",
+                               "findings": initial_findings if continuous else findings}
+                    redaction = {"secret_rules": [*item.secret_rules, *secret_rules(initial)],
+                                 "secret_lines": item.secret_lines, "inventory": item.inventory,
+                                 "key_check": engine.secure_digest("assessment-redaction-key", item.key)}
+                    predecessors = None
+                    if continuous:
+                        predecessors = saved["predecessors"] if saved else sorted({
+                            finding_origins[old["id"]] for old in context["history"] if old["id"] in finding_origins})
+                    return pin_input(session, candidate_id, "scan", proposal, context, options,
+                                     f"assessment:{index}", repo, env, head_sha=sha, redaction=redaction,
+                                     predecessors=predecessors)
+
+                assessed, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options,
+                                        prepared=saved is not None, pin=pin if saved_history else None)
+                if not continuous:
+                    assessed = SecurityAssessment.model_validate(assessed, strict=True).model_dump()
+                row.update(status="completed", result=assessed)
+            except Exception as exc:
+                row.update(status="failed", result=None, error=item.redact(str(exc))[:1000])
+            return row
+
         confirmed_ids = set()
         counts = {"possible_findings": len(candidates), "selected_candidates": len(candidates), "assessed_candidates": 0,
                   "confirmed_candidates": 0, "rejected_candidates": 0, "uncertain_candidates": 0, "failed_candidates": 0,
@@ -366,24 +405,14 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
         def assessment_progress(phase):
             progress({"phase": phase, **counts, "confirmed_findings": len(confirmed_ids)})
 
-        assessment_progress("assessment")
-        while remaining:
-            history = {old["id"]: old for old in [*previous_findings, *findings]}
-            batch = assessment_batch(remaining, list(history.values()), item, options["concurrency"])
-            results = await asyncio.gather(*(assess(candidate, list(history.values())) for candidate in batch))
-            for (index, proposal, _paths), assessed in zip(batch, results, strict=True):
-                counts["assessed_candidates"] += 1
-                counts[(assessed["verdict"] if assessed else "failed") + "_candidates"] += 1
-                if assessed is None:
-                    assessment_progress("assessment")
-                    continue
-                assessments.append({"proposal": proposal, "result": assessed})
-                units.append({"task": f"assessment:{index}", "status": "completed"})
-                if assessed["verdict"] == "uncertain":
-                    problems.append(f"Proposed security finding requires further verification: {proposal['title']}")
-                if assessed["verdict"] != "confirmed":
-                    assessment_progress("assessment")
-                    continue
+        def accept(row):
+            nonlocal findings
+            index, proposal, assessed = row["position"], row["snapshot"], row["result"]
+            admitted_keys.pop(index, None)
+            candidate_rows.append(row)
+            counts["assessed_candidates"] += 1
+            counts[(assessed["verdict"] if assessed else "failed") + "_candidates"] += 1
+            if assessed and assessed["verdict"] == "confirmed":
                 fingerprint = digest(json.dumps(["code", proposal["path"], proposal["category"],
                                                  proposal["evidence"][0]["quote"], proposal["title"]]))
                 identity = assessed["finding_id"] or fingerprint[:32]
@@ -396,11 +425,26 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 findings.append(finding)
                 observed.add(finding["id"])
                 confirmed_ids.add(finding["id"])
-                assessment_progress("assessment")
-            selected_indices = {candidate[0] for candidate in batch}
-            remaining = [candidate for candidate in remaining if candidate[0] not in selected_indices]
-        assessment_units = [unit for unit in units if unit["task"].startswith("assessment:")]
-        stages["assessment"] = {"status": "completed" if all(a["status"] == "completed" for a in assessment_units)
+                finding_positions[finding["id"]] = index
+                finding_origins[finding["id"]] = row["id"]
+                if continuous:
+                    findings.sort(key=lambda old: finding_positions.get(old["id"], -1))
+            assessment_progress("assessment")
+
+        assessment_progress("assessment")
+        await dispatch(remaining, options["concurrency"], select, assess, accept, continuous=continuous,
+                       predecessors=dependencies, order=order)
+        if continuous:
+            candidate_rows.sort(key=lambda row: row["position"])
+        for row in candidate_rows:
+            units.append({"task": f"assessment:{row['position']}", "status": row["status"]})
+            if row["status"] == "failed":
+                problems.append(f"Security assessment incomplete: {row['error']}")
+                continue
+            assessments.append({"proposal": row["snapshot"], "result": row["result"]})
+            if row["result"]["verdict"] == "uncertain":
+                problems.append(f"Proposed security finding requires further verification: {row['snapshot']['title']}")
+        stages["assessment"] = {"status": "completed" if all(row["status"] == "completed" for row in candidate_rows)
                                and not any(a["result"]["verdict"] == "uncertain" for a in assessments) else "partial",
                                "total": len(candidates), "completed": len(assessments)}
         advisory_cache = {}

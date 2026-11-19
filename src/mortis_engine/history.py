@@ -176,3 +176,8 @@ class History:
     def assessment_inputs(self, run_id):
         return {row["candidate"]: json.loads(row["input"]) for row in self.db.execute(
             "SELECT candidate, input FROM assessment_inputs WHERE run=? ORDER BY rowid", (run_id,))}
+
+    def assessment_dependencies(self, run_id):
+        rows = self.db.execute("SELECT candidate, input FROM assessment_inputs WHERE run=? ORDER BY rowid", (run_id,))
+        return {row["candidate"]: dependencies for row in rows
+                if (dependencies := json.loads(row["input"]).get("predecessors")) is not None}

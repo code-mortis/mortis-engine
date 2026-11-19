@@ -477,30 +477,39 @@ def test_invalid_concurrency_is_rejected_before_running(command, value, monkeypa
 
 @pytest.mark.parametrize("command", ["review", "scan"])
 @pytest.mark.parametrize("legacy", [False, True])
-def test_resume_preserves_concurrency_and_rejects_an_override(
+def test_resume_preserves_concurrency_and_assessment_policy(
     repo, profile, workflow_provider, monkeypatch, capsys, command, legacy,
 ):
     from mortis_engine.history import History
-    from mortis_engine.review import engine
+    from mortis_engine.review import engine, workflows
     from mortis_engine.security_scans import service as scans
 
     monkeypatch.chdir(repo)
     commit(repo, {"app.py": "value = 1\n", "mortis.toml": '[review]\nconcurrency=1\n[scan]\nconcurrency=1\n'})
-    seen = []
+    seen, dispatch_policies = [], []
     if command == "review":
         original = engine.run
+        postprocess = workflows.postprocess
+
         def interrupted(*args, **kwargs):
             seen.append(args[4]["concurrency"])
             if len(seen) == 1:
                 raise KeyboardInterrupt
             return original(*args, **kwargs)
+
+        async def observe_postprocess(*args, **kwargs):
+            dispatch_policies.append(kwargs["continuous"])
+            return await postprocess(*args, **kwargs)
+
         monkeypatch.setattr(engine, "run", interrupted)
+        monkeypatch.setattr(workflows, "postprocess", observe_postprocess)
     else:
         original = scans.scan
         async def interrupted(*args, **kwargs):
             seen.append(kwargs["options"]["concurrency"])
             if len(seen) == 1:
                 raise KeyboardInterrupt
+            dispatch_policies.append(kwargs["continuous"])
             return await original(*args, **kwargs)
         monkeypatch.setattr(scans, "scan", interrupted)
     assert cli.main([command, *(["--all"] if command == "review" else []), "--concurrency", "2"]) == 130
@@ -508,9 +517,11 @@ def test_resume_preserves_concurrency_and_rejects_an_override(
     with History(repo) as history:
         run_id = history.list()[0]["id"]
         assert history.row(run_id)["report"] is None
+        plan = json.loads(history.row(run_id)["plan"])
+        assert plan["assessment_dispatch"] == "continuous/v1"
         if legacy:
-            plan = json.loads(history.row(run_id)["plan"])
             del plan["concurrency"]
+            del plan["assessment_dispatch"]
             with history.db:
                 history.db.execute("UPDATE runs SET plan=? WHERE id=?", (json.dumps(plan), run_id))
     assert cli.main([command, "--resume", run_id, "--concurrency", "8"]) == 1
@@ -519,6 +530,7 @@ def test_resume_preserves_concurrency_and_rejects_an_override(
     assert cli.main([command, "--resume", run_id, "--progress", "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["run_id"] == run_id and seen == [2, 1 if legacy else 2]
+    assert dispatch_policies == [not legacy]
 
 
 @pytest.mark.parametrize("progress", [False, True])

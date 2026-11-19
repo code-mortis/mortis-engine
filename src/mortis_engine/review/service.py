@@ -6,6 +6,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import fields
 
+from mortis_engine.assessment_dispatch import ASSESSMENT_DISPATCH_POLICY, continuous_assessment
 from mortis_engine.code_graph.contracts import CodeGraphLimits
 from mortis_engine.findings import effective_report
 from mortis_engine.findings import snapshot as triage_snapshot
@@ -91,6 +92,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
         if resume and history.row(resume, "review")["report"] is not None:
             return history.report(resume)
         with _inputs(history, repository, mode, base, head, resume, overrides) as (snap, saved):
+            continuous = continuous_assessment(saved)
             options = settings.load(snap.repo, snap.env, snap.settings_sha)
             full_tree_source_policy = saved.get("full_tree_source_policy") if saved else planning.FULL_TREE_SOURCE_POLICY
             source_tool_policy = saved.get("source_tool_policy", "bounded-reads/v2") if saved else engine.SOURCE_TOOL_POLICY
@@ -140,6 +142,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
                     "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
                     "triage_versions": decisions, "assessment_runs": assessment_runs,
+                    "assessment_dispatch": ASSESSMENT_DISPATCH_POLICY,
                     "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution,
                     "source_tool_policy": source_tool_policy, "evidence_policy": options["_evidence_policy"],
                     "discovery_result_policy": options["_discovery_result_policy"]})
@@ -194,7 +197,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                         return await workflows.postprocess(snap.repo, snap.env, result, options, session,
                             history=[effective_report(history, row, triage_snapshot=decisions,
                                                       assessment_runs=assessment_runs) for row in previous],
-                            progress=progress)
+                            progress=progress, continuous=continuous)
 
                 progress({"phase": "postprocess"})
                 result = asyncio.run(finish())
