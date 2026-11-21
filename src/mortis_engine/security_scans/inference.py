@@ -32,7 +32,11 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
         if task in {"analysis", "assessment"} and len(code) <= 16:
             sources = {**context["sources"]["current"]}
             for path in code:
-                sources.setdefault(path, item.source(path))
+                if path not in sources:
+                    try:
+                        sources[path] = item.source(path)
+                    except ValueError:
+                        continue
             if sum(len(text.encode()) for text in sources.values()) <= 32768:
                 context["sources"]["current"] = sources
         context["source_navigation"] = source_navigation(item, context["sources"]["current"],
@@ -41,6 +45,8 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
         saved_context = pin(context)
         if saved_context is not None:
             context = saved_context
+    if prepared or pin is not None:
+        payload.check_saved_sources(context)
     history_ids = {}
     if task == "assessment":
         history = context.get("history", [])
@@ -120,6 +126,11 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
             timeout=timeout)
         requested = result["required_paths"]
         if not requested:
+            if task == "verification" and result["verdict"] == "still_present" and not any(
+                citation["revision"] == "current" for citation in result["evidence"]
+            ):
+                result = {**result, "verdict": "uncertain",
+                          "explanation": "The original defect was not confirmed in current code. " + result["explanation"]}
             if task == "assessment" and result["finding_id"] is not None:
                 result["finding_id"] = history_ids[result["finding_id"]]
             return result, sorted(context["sources"]["current"])
@@ -130,7 +141,11 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
                 continue
             if len(context["sources"]["current"]) >= 100:
                 raise ValueError("Security source requests reached the 100-file evidence limit.")
-            context["sources"]["current"][path] = item.source(path)
+            try:
+                context["sources"]["current"][path] = item.source(path)
+            except ValueError:
+                unavailable.append(path)
+                continue
             if task == "verification":
                 try:
                     context["sources"].setdefault("original", {})[path] = item.source(path, context["original_sha"])

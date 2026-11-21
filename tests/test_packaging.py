@@ -53,6 +53,7 @@ def test_source_distribution_allows_only_the_usage_skill_under_agents():
                                   "tests/__pycache__/test_cli.pyc", "../credentials", "/tmp/secret", "reports/run.json",
                                   "tests/.env", "docs/.env.production", "src/mortis_engine/local.sqlite3",
                                   "tests/.pytest_cache/state", "src/.aws/config", "docs/private.pem", "tests/run.log",
+                                  "docs/sample.PEM.backup", "tests/DB.SQLITE3.txt",
                                   "PLAN.md", "evals/review_improvements/PLAN.md", "REVIEW_IMPROVEMENTS.md"])
 def test_source_distribution_rejects_private_generated_and_unsafe_paths(name):
     with pytest.raises(AssertionError):

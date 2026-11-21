@@ -20,13 +20,17 @@ SDIST_ROOTS = {
 }
 
 
+def private_file(path):
+    return any("." + segment in PRIVATE_SUFFIXES for segment in path.name.lower().split(".")[1:])
+
+
 def check_names(names, *, wheel):
     for name in names:
         path = PurePosixPath(name)
         assert path.parts and not path.is_absolute() and ".." not in path.parts, f"Unsafe archive path: {name}"
         assert not (set(path.parts) & FORBIDDEN), f"Private/generated archive content: {name}"
         assert not any(part == ".env" or part.startswith(".env.") for part in path.parts), name
-        assert path.suffix not in PRIVATE_SUFFIXES, f"Private/generated archive content: {name}"
+        assert not private_file(path), f"Private/generated archive content: {name}"
         if wheel:
             assert path.parts[0] == "mortis_engine" or path.parts[0].endswith(".dist-info"), name
         else:
@@ -69,7 +73,7 @@ def check_dist(directory, root):
             for source in (root / tree).rglob("*"):
                 relative = source.relative_to(root).as_posix()
                 if (source.is_file() and not (set(source.parts) & FORBIDDEN)
-                        and source.suffix not in PRIVATE_SUFFIXES
+                        and not private_file(source)
                         and not any(part == ".env" or part.startswith(".env.") for part in source.parts)):
                     assert relative in names, f"Missing source archive file: {relative}"
                     assert archive.extractfile(prefix + relative).read() == source.read_bytes(), relative

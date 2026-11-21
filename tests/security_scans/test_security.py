@@ -55,6 +55,62 @@ class EmptySession:
         return kwargs["validate"]({"findings": [], "required_paths": []})
 
 
+@pytest.mark.parametrize("path", ["C:/folder/source.py", "D:source.py", "C:\\source.py"])
+def test_security_paths_reject_windows_drive_prefixes(path):
+    with pytest.raises(ValueError, match="invalid repository path"):
+        engine.relative_path(path)
+    assert engine.relative_path("src/source.py") == "src/source.py"
+
+
+def test_unavailable_current_source_is_reported_to_the_next_evidence_pass():
+    def read(path):
+        raise ValueError("Source unavailable")
+
+    class EvidenceSession:
+        async def ask(self, stage, key, *, context, validate, **kwargs):
+            if key.endswith(":0"):
+                return validate({"findings": [], "required_paths": ["helper.py"]})
+            assert context["validation_feedback"]["required_paths"] == ["helper.py"]
+            return validate({"findings": [], "required_paths": []})
+
+    item = SimpleNamespace(redact=lambda text: text, stopped=lambda: False, source=read)
+    context = {"assigned_path": "a.py", "available_paths": ["a.py", "helper.py"],
+               "sources": {"current": {"a.py": "value = 1\n"}}}
+    result, paths = asyncio.run(ask(item, EvidenceSession(), "analysis", context, "paths",
+                                    {"effort": "medium"}, prepared=True))
+    assert result["findings"] == [] and paths == ["a.py"]
+
+
+def test_pinned_evidence_cannot_resend_source_newly_excluded_by_policy():
+    session = EmptySession()
+    context = {"sources": {"current": {"certificate.PEM.txt": "previously retained source"}}}
+    with pytest.raises(ValueError, match="Saved assessment source is excluded"):
+        asyncio.run(ask(None, session, "assessment", context, "saved", {"effort": "medium"}, prepared=True))
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(("verdict", "has_current", "expected"), [
+    ("fixed", False, "uncertain"),
+    ("still_present", False, "uncertain"),
+    ("still_present", True, "still_present"),
+])
+def test_security_verification_requires_current_evidence(verdict, has_current, expected):
+    class EvidenceSession:
+        async def ask(self, stage, key, *, context, validate, **kwargs):
+            evidence = [{"source_id": identity, "start_line": 1, "end_line": 1}
+                        for identity, row in context["citation_sources"].items()
+                        if row["revision"] == "current" and has_current]
+            return validate({"verdict": verdict, "explanation": "Result", "change_explanation": "Changed",
+                             "original_issue_present": True, "evidence": evidence, "required_paths": []})
+
+    item = SimpleNamespace(redact=lambda text: text, stopped=lambda: False)
+    context = {"available_paths": ["a.py"], "diff": "Changed",
+               "sources": {"original": {"a.py": "value = 1\n"}, "current": {"a.py": "value = 2\n"}}}
+    result, _ = asyncio.run(ask(item, EvidenceSession(), "verification", context, "verify",
+                               {"effort": "medium"}, prepared=True))
+    assert result["verdict"] == expected
+
+
 @pytest.mark.parametrize("findings", [[None], [False], ["finding"], [[]], {}, "findings"])
 def test_history_findings_rejects_malformed_record_containers(findings):
     with pytest.raises(ValueError, match="history"):

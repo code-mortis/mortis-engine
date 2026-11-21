@@ -13,6 +13,10 @@ from pathlib import Path, PurePosixPath
 
 from mortis_engine.review.errors import ReviewStopped
 
+MAX_OBJECT_ENTRIES = 1_000_000
+MAX_REF_ENTRIES = 100_000
+METADATA_WALK_SECONDS = 30
+
 
 def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=None, strict_utf8=False):
     executable = shutil.which("git", path=os.pathsep.join(
@@ -132,21 +136,41 @@ def find_repository(path):
     return None
 
 
-def _regular_tree(path):
+def _regular_tree(path, *, limit=MAX_OBJECT_ENTRIES, visit=None):
     if path.is_symlink():
         raise ValueError("Symbolic links in Git object or reference storage are unsupported.")
     if path.is_dir():
-        for root, dirs, files in os.walk(path, followlinks=False):
-            for name in (*dirs, *files):
-                try:
-                    info = (Path(root) / name).lstat()
-                except FileNotFoundError:
-                    # Git maintenance may remove a temporary entry during enumeration.
-                    continue
-                if stat.S_ISLNK(info.st_mode):
-                    raise ValueError("Symbolic links in Git object or reference storage are unsupported.")
-                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
-                    raise ValueError("Git object and reference storage requires regular files and directories.")
+        pending, count = [path], 0
+        deadline = time.monotonic() + METADATA_WALK_SECONDS
+        while pending:
+            root = pending.pop()
+            if time.monotonic() >= deadline:
+                raise ValueError("Git metadata exceeds the local inspection time limit.")
+            if root.is_symlink():
+                raise ValueError("Symbolic links in Git object or reference storage are unsupported.")
+            try:
+                entries = os.scandir(root)
+            except FileNotFoundError:
+                continue
+            with entries:
+                for entry in entries:
+                    count += 1
+                    if count > limit or time.monotonic() >= deadline:
+                        raise ValueError("Git metadata exceeds the local inspection entry or time limit.")
+                    child = Path(entry.path)
+                    try:
+                        info = child.lstat()
+                    except FileNotFoundError:
+                        # Git maintenance may remove a temporary entry during enumeration.
+                        continue
+                    if stat.S_ISLNK(info.st_mode):
+                        raise ValueError("Symbolic links in Git object or reference storage are unsupported.")
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(child)
+                    elif not stat.S_ISREG(info.st_mode):
+                        raise ValueError("Git object and reference storage requires regular files and directories.")
+                    elif visit is not None:
+                        visit(child)
     elif path.exists() and not stat.S_ISREG(path.stat().st_mode):
         raise ValueError("Git object and reference storage requires regular files and directories.")
 
@@ -185,20 +209,19 @@ def local_repository(path, *, object_cache=None):
             alternate_objects.append(cache)
         env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = os.pathsep.join(json.dumps(str(p), ensure_ascii=False) for p in alternate_objects)
         refs = common / "refs"
-        _regular_tree(refs)
-        total, count = 0, 0
-        if refs.is_dir():
-            for original in refs.rglob("*"):
-                if original.is_dir():
-                    continue
-                value = _read_local(original, 4096)
-                total += len(value)
-                count += 1
-                if total > 16_000_000 or count > 100_000:
-                    raise ValueError("Git references exceed the local inspection size limit.")
-                target = isolated / "refs" / original.relative_to(refs)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(value)
+        total = 0
+
+        def copy_ref(original):
+            nonlocal total
+            value = _read_local(original, 4096)
+            total += len(value)
+            if total > 16_000_000:
+                raise ValueError("Git references exceed the local inspection size limit.")
+            target = isolated / "refs" / original.relative_to(refs)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(value)
+
+        _regular_tree(refs, limit=MAX_REF_ENTRIES, visit=copy_ref)
         for name in ("packed-refs", "shallow"):
             original = common / name
             if original.exists():
@@ -237,15 +260,9 @@ def merge_base(repo, env, base_sha, head_sha):
 
 def _object_cache(path):
     """A private loose-object cache retains local snapshots across invocations."""
-    path = Path(path).expanduser().absolute()
-    if path.is_symlink():
-        raise ValueError("The snapshot object cache cannot be a symbolic link.")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
-        raise ValueError("The snapshot object cache requires a private directory (mode 0700).")
-    if hasattr(os, "getuid") and info.st_uid != os.getuid():
-        raise ValueError("The snapshot object cache must belong to the current user.")
+    from mortis_engine.history import private_directory
+
+    path = private_directory(Path(path).expanduser())
     _regular_tree(path)
     if (path / "info/alternates").exists():
         raise ValueError("The snapshot object cache cannot contain alternates.")

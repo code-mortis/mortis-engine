@@ -16,17 +16,11 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from . import __version__
 from .http_transport import EndpointPolicyError
-from .schemas import Request, Response, ToolCall, Usage
+from .schemas import Request, Response, ToolCall, Usage, extra_body_entries
 from .security import clean_text, digest, safe_endpoint
 
 MAX_RESPONSE_BYTES = 20_000_000
 MAX_REQUEST_BYTES = 32_000_000
-PROTECTED = {
-    "model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream",
-    "api_key", "max_tokens", "max_completion_tokens", "max_output_tokens", "response_format",
-    "inferenceConfig", "additionalModelRequestFields", "toolConfig", "outputConfig",
-    "store", "prompt_cache_key", "previous_response_id", "conversation", "background", "authorization", "extra_headers", "include",
-}
 
 
 class InferenceError(Exception):
@@ -78,18 +72,8 @@ def _strict_schema(schema):
 
 
 def _extra_body(body, extra):
-    if not isinstance(extra, dict):
-        raise ValueError("extra_body must be a JSON object")
-    def assign(parts, value):
+    for parts, value, protected, strict_flag in extra_body_entries(extra):
         dotted = ".".join(parts)
-        strict_flag = (len(parts) == 3 and parts[0] == "tools" and parts[1].isdigit() and parts[2] == "strict") or (
-            len(parts) == 4 and parts[0] == "tools" and parts[1].isdigit() and parts[2:] == ["function", "strict"])
-        protected = parts[0] in PROTECTED and not strict_flag
-        protected |= dotted.startswith("text.format") or dotted.startswith("output_config.format")
-        if parts[0].lower() in {"headers", "authentication"}:
-            protected = True
-        if strict_flag and type(value) is not bool:
-            raise ValueError("Tool strict options must be boolean")
         target = body
         for index, part in enumerate(parts):
             last = index == len(parts) - 1
@@ -115,17 +99,6 @@ def _extra_body(body, extra):
                     target[key] = {}
                 target = target[key]
 
-    def expand(parts, value):
-        if isinstance(value, dict) and parts[0] in {"text", "output_config", "reasoning"}:
-            for key, item in value.items():
-                expand([*parts, key], item)
-        else:
-            assign(parts, value)
-
-    for dotted, value in extra.items():
-        if not isinstance(dotted, str) or not dotted or any(not part for part in dotted.split(".")):
-            raise ValueError("extra_body requires nonempty property names")
-        expand(dotted.split("."), value)
     if "n" in body and body["n"] != 1:
         raise ValueError("Inference supports one budgeted completion per request")
     thinking = body.get("thinking")

@@ -33,6 +33,11 @@ def reusable_source_context(checkpoint):
             and (checkpoint.get("source_packing") is not True or isinstance(paths, list) and bool(paths)))
 
 
+def check_saved_sources(context):
+    if excluded_source_paths({"sources": context.get("sources", {})}):
+        raise ValueError("Saved assessment source is excluded by the current mandatory file policy.")
+
+
 def compact_evidence(context):
     sources = context.get("sources", {})
     references = {}

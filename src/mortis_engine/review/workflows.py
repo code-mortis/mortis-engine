@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from mortis_engine.assessment_dispatch import dispatch, replay_order
 from mortis_engine.llm_http import InferenceError
+from mortis_engine.security_scans.payload import check_saved_sources
 
 from . import assessment, background, evidence, planning, policy, summary, verification
 from . import context as review_context
@@ -91,6 +92,7 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
             if prepared is not None:
                 context = prepared
     else:
+        check_saved_sources(pinned_context)
         context = copy.deepcopy(pinned_context)
     # Same-head history does not establish attribution against this review's merge base.
     result = None if context.get("attribution", {}).get("version") == 1 else assessment.exact_repeat(context)

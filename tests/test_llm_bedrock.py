@@ -345,7 +345,8 @@ def test_invalid_timeout_never_prepares_credentials(duration, source, monkeypatc
     assert failure.value.code == "timeout" and not failure.value.consumption_unknown
 
 
-@pytest.mark.parametrize("header", ["Host", "Connection", "Proxy-Authorization", "X-Invalid\nHeader"])
+@pytest.mark.parametrize("header", ["Host", "Connection", "Proxy-Authorization", "X-Invalid\nHeader",
+                                   "X-Amz-Date", "x-AMZ-Security-Token"])
 def test_custom_auth_header_cannot_change_routing_or_inject_headers(header):
     with pytest.raises(InferenceError) as failure:
         execute(lambda req: pytest.fail("Unsafe auth header dispatched"), connection(options={"auth_header": header}))

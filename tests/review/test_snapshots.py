@@ -211,6 +211,26 @@ def test_symlink_directory_components_reject(repo, tmp_path):
         pass
 
 
+def test_worktree_requires_no_follow_support_but_staged_remains_available(repo, monkeypatch):
+    commit(repo, {"app.py": "value = 1\n"})
+    monkeypatch.delattr(snapshots.os, "O_NOFOLLOW", raising=False)
+    with pytest.raises(ValueError, match="safe no-follow file access"), snapshots.snapshot(repo, mode="worktree"):
+        pass
+    with snapshots.snapshot(repo, mode="staged") as value:
+        assert contents(value, "app.py") == "value = 1\n"
+
+
+def test_snapshot_cache_rejects_symlinked_parent(tmp_path):
+    destination = tmp_path / "destination"
+    destination.mkdir(mode=0o700)
+    alias = tmp_path / "alias"
+    alias.symlink_to(destination, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="parent directories without symbolic links"):
+        source._object_cache(alias / "objects")
+    assert list(destination.iterdir()) == []
+
+
 def test_worktree_subdirectory_and_linked_worktree_use_correct_root(repo, tmp_path):
     commit(repo, {"dir/app.py": "initial\n"})
     linked = tmp_path / "linked"

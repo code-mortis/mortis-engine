@@ -72,7 +72,7 @@ def _entries(repo, env):
 
 def _worktree_stat(root, path):
     parts = source.repository_path(path).split("/")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory = os.open(root, flags)
     try:
         for part in parts[:-1]:
@@ -91,7 +91,7 @@ def _worktree_stat(root, path):
 def _worktree_bytes(root, path):
     """Open every path component without following repository symbolic links."""
     parts = source.repository_path(path).split("/")
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory = os.open(root, directory_flags)
     try:
         for part in parts[:-1]:
@@ -106,7 +106,7 @@ def _worktree_bytes(root, path):
             raise ValueError("Working-tree source must be a regular file or symbolic link.")
         if info.st_size > MAX_SOURCE_BYTES:
             raise ValueError("Working-tree source exceeds the 20 MB read limit.")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         with os.fdopen(os.open(parts[-1], flags, dir_fd=directory), "rb") as stream:
             opened = os.fstat(stream.fileno())
             if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
@@ -150,6 +150,10 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
     excluded = []
     if mode == "staged":
         return _tree(repo, env, staged), excluded
+    if not all(getattr(os, flag, 0) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")) or not {
+        os.open, os.stat, os.readlink
+    }.issubset(os.supports_dir_fd) or os.stat not in os.supports_follow_symlinks:
+        raise ValueError("Working-tree snapshots require platform support for safe no-follow file access. Use --staged.")
     paths = source.git(repo, env, "-c", "core.fsmonitor=false", "--work-tree=" + str(root),
                        "ls-files", "--cached", "--others", "--exclude-standard", "--full-name", "-z",
                        stopped=stopped, strict_utf8=True).split("\0")

@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from pathlib import PurePosixPath
 
-from .contracts import CodeGraphRequest, CodeGraphResult, source_lines
+from .contracts import EXTRACTOR_VERSION, CodeGraphRequest, CodeGraphResult, source_lines
 from .syntax import LANGUAGES, import_target
 
 
@@ -37,6 +37,10 @@ def validate_result(request: CodeGraphRequest, result: CodeGraphResult) -> CodeG
         except UnicodeDecodeError:
             if item.status != "failed" or item.reason != "invalid_encoding" or item.line_count is not None:
                 raise ValueError("Parser claimed invalid source was parsed") from None
+            continue
+        if request.extractor_version == EXTRACTOR_VERSION and item.status == "failed" and item.reason == "parse_error":
+            if item.line_count is not None:
+                raise ValueError("Parser returned invalid file coverage")
             continue
         if item.status not in {"parsed", "partial"} or item.line_count != source_lines(source) or item.unresolved_calls is None:
             raise ValueError("Parser returned invalid file coverage")

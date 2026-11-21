@@ -6,6 +6,7 @@ import resource
 import sys
 from pathlib import Path, PurePosixPath
 
+from pydantic import ValidationError
 from tree_sitter import Language, Parser
 
 from mortis_engine.code_graph.contracts import (
@@ -146,6 +147,52 @@ def parse_diagnostic(root, language=None):
     return None
 
 
+def _extract_facts(path, root, config, symbols, imports):
+    language, definitions, calls, import_kinds = config
+    initializer = module_initializer(root, language)
+    count = 0
+    for node in descendants(root):
+        if node.has_error:
+            continue
+        value = node.child_by_field_name("value") if node.type == "variable_declarator" else None
+        if node.type in definitions.split() or (value is not None and value.type in {"arrow_function", "function_expression"}):
+            identifier = node.child_by_field_name("name")
+            if identifier is None and node.type == "function_definition":
+                declarator = node.child_by_field_name("declarator")
+                if declarator is not None:
+                    identifier = next((n for n in descendants(declarator) if n.type in {"identifier", "field_identifier"}), None)
+            if identifier is not None:
+                if len(symbols) >= MAX_FACTS:
+                    raise ValueError("Symbol count exceeds the result limit")
+                symbols.append(CodeGraphSymbol(**location(path, node), name=identifier.text.decode(), kind=node.type))
+        count += node.type in calls.split() and node.parent != initializer
+        if node.type not in import_kinds.split():
+            continue
+        if language == "python":
+            if node.type == "import_statement":
+                # Each imported name has its own source range, including multi-import statements.
+                sites = [(n, n.child_by_field_name("name") if n.type == "aliased_import" else n)
+                         for n in node.children_by_field_name("name")]
+            else:
+                sites = [(node, node.child_by_field_name("module_name"))]
+        elif language == "go":
+            sites = [(n, n.child_by_field_name("path")) for n in descendants(node) if n.type == "import_spec"]
+        else:
+            specifier = node.child_by_field_name("source")
+            if node.type == "export_statement" and specifier is None:
+                continue
+            sites = [(node, specifier)]
+        for site, specifier in sites:
+            text = (specifier or site).text.decode()
+            if language in {"javascript", "typescript", "tsx", "go"} and specifier is not None:
+                # Keep the literal as unresolved evidence when its module name is empty.
+                text = text[1:-1] or text
+            if len(imports) >= MAX_FACTS:
+                raise ValueError("Import count exceeds the result limit")
+            imports.append(CodeGraphImport(**location(path, site), specifier=text, provenance="unresolved"))
+    return count
+
+
 def extract(request: CodeGraphRequest) -> CodeGraphResult:
     if request.extractor_version != EXTRACTOR_VERSION:
         raise ValueError("The request requires a different parser version")
@@ -159,7 +206,7 @@ def extract(request: CodeGraphRequest) -> CodeGraphResult:
         if config is None:
             files.append(CodeGraphFile(**metadata, status="unsupported", reason="unsupported_language"))
             continue
-        language, definitions, calls, import_kinds = config
+        language = config[0]
         source = item.source()
         try:
             source.decode("utf-8")
@@ -173,47 +220,14 @@ def extract(request: CodeGraphRequest) -> CodeGraphResult:
             parsers[language] = Parser(Language(getattr(module, factory)()))
         root = syntax_tree(parsers[language], source, language)
         diagnostic = parse_diagnostic(root, language) if root.has_error else None
-        initializer = module_initializer(root, language)
-        count = 0
-        for node in descendants(root):
-            if node.has_error:
-                continue
-            value = node.child_by_field_name("value") if node.type == "variable_declarator" else None
-            if node.type in definitions.split() or (value is not None and value.type in {"arrow_function", "function_expression"}):
-                identifier = node.child_by_field_name("name")
-                if identifier is None and node.type == "function_definition":
-                    declarator = node.child_by_field_name("declarator")
-                    if declarator is not None:
-                        identifier = next((n for n in descendants(declarator) if n.type in {"identifier", "field_identifier"}), None)
-                if identifier is not None:
-                    if len(symbols) >= MAX_FACTS:
-                        raise ValueError("Symbol count exceeds the result limit")
-                    symbols.append(CodeGraphSymbol(**location(item.path, node), name=identifier.text.decode(), kind=node.type))
-            count += node.type in calls.split() and node.parent != initializer
-            if node.type not in import_kinds.split():
-                continue
-            if language == "python":
-                if node.type == "import_statement":
-                    # Each imported name has its own source range, including multi-import statements.
-                    sites = [(n, n.child_by_field_name("name") if n.type == "aliased_import" else n)
-                             for n in node.children_by_field_name("name")]
-                else:
-                    sites = [(node, node.child_by_field_name("module_name"))]
-            elif language == "go":
-                sites = [(n, n.child_by_field_name("path")) for n in descendants(node) if n.type == "import_spec"]
-            else:
-                specifier = node.child_by_field_name("source")
-                if node.type == "export_statement" and specifier is None:
-                    continue
-                sites = [(node, specifier)]
-            for site, specifier in sites:
-                text = (specifier or site).text.decode()
-                if language in {"javascript", "typescript", "tsx", "go"} and specifier is not None:
-                    # Keep the literal as unresolved evidence when its module name is empty.
-                    text = text[1:-1] or text
-                if len(imports) >= MAX_FACTS:
-                    raise ValueError("Import count exceeds the result limit")
-                imports.append(CodeGraphImport(**location(item.path, site), specifier=text, provenance="unresolved"))
+        symbol_start, import_start = len(symbols), len(imports)
+        try:
+            count = _extract_facts(item.path, root, config, symbols, imports)
+        except ValidationError:
+            del symbols[symbol_start:]
+            del imports[import_start:]
+            files.append(CodeGraphFile(**metadata, language=language, status="failed", reason="parse_error"))
+            continue
         files.append(CodeGraphFile(**metadata, language=language,
                                    status="partial" if diagnostic else "parsed",
                                    reason="syntax_error" if diagnostic else None,

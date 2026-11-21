@@ -253,6 +253,22 @@ def test_native_extractor_retains_real_source_contract():
         extract(request.model_copy(update={"extractor_version": APP_EXTRACTOR_VERSION}))
 
 
+@pytest.mark.parametrize("source", [
+    b"function " + b"a" * 513 + b"() {}\n",
+    b"import value from '" + b"a" * 2001 + b"';\n",
+])
+def test_native_extractor_preserves_other_files_on_overlong_fact(source):
+    pytest.importorskip("tree_sitter")
+    from mortis_engine.code_graph.extract import extract
+
+    request = request_fixture(extra_files=(("overlong.js", b"function valid() {}\n" + source),))
+    result = validate_result(request, extract(request))
+    file = next(item for item in result.files if item.path == "overlong.js")
+    assert (file.status, file.reason) == ("failed", "parse_error")
+    assert all(item.file_path != file.path for item in [*result.symbols, *result.imports])
+    assert result.imports[0].target_path == "dep.js"
+
+
 @pytest.mark.parametrize("failure", ["missing_args", "extra_args", "missing_request", "unreadable_request"])
 def test_native_extractor_request_failures_return_exit_two(tmp_path, monkeypatch, failure):
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace(Language=None, Parser=None))

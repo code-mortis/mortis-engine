@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,10 +18,30 @@ def encode(value):
 
 
 def private_directory(path):
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = Path(os.path.abspath(path))
+    if sys.platform == "darwin" and len(path.parts) > 1 and path.parts[1] in {"tmp", "var"}:
+        # These system aliases are owned by root and cannot be replaced by a local user.
+        alias = Path(*path.parts[:2])
+        if alias.is_symlink() and alias.readlink() == Path("private", alias.name):
+            path = Path("/private", *path.parts[1:])
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    for parent in reversed(path.parents):
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            parent.mkdir(mode=0o700, exist_ok=True)
+            info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or (
+            uid is not None and (
+                info.st_uid not in {0, uid}
+                or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)
+            )
+        ):
+            raise ValueError("Mortis state requires private, trusted parent directories without symbolic links.")
+    path.mkdir(mode=0o700, exist_ok=True)
     info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077
-            or hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            or uid is not None and info.st_uid != uid):
         raise ValueError("Mortis state requires a private directory owned by the current user.")
     return path
 

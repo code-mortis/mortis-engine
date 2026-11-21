@@ -13,6 +13,7 @@ from .llm_http import InferenceError
 from .review import context as review_context
 from .review import planning, source, workflows
 from .review.service import credentials_for_history, effective_connection
+from .security_scans.payload import check_saved_sources
 from .workflow import Session
 
 INPUT_VERSION = "mortis.assessment-input/v1"
@@ -160,6 +161,7 @@ def _candidates(history, run_id):
 
 
 def _validate_evidence(repo, env, value):
+    check_saved_sources(value.get("context", {}))
     try:
         for sha in value["revisions"]:
             source.resolve_commit(repo, env, sha)

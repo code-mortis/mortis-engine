@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from mortis_engine import __version__, llm_http
 from mortis_engine import gateway as llm
-from mortis_engine.schemas import Message, Request, Tool, ToolCall
+from mortis_engine.schemas import ConnectionInput, Message, Request, Tool, ToolCall
 
 PROTOCOLS = ["openai", "openai-responses", "anthropic"]
 SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}},
@@ -264,6 +264,7 @@ def test_unlimited_output_omits_wire_cap_and_cannot_be_overridden(protocol):
 def test_existing_tool_strict_options_and_reasoning_defaults(protocol, key):
     task = request(tools=[Tool(name="evidence", parameters=SCHEMA)])
     saved = connection(protocol, extra_body={key: False, "reasoning.effort": "high", "service_tier": "flex"})
+    assert ConnectionInput(name="test", provider="test", **saved).options == saved["options"]
     body = llm_http.encode_request(protocol, saved, task)
     tool = body["tools"][0]
     assert (tool["function"] if protocol == "openai" else tool)["strict"] is False

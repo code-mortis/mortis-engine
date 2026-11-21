@@ -235,6 +235,7 @@ def test_language_template_admission_preserves_trusted_rules_and_exclusions(repo
 
 
 @pytest.mark.parametrize("path", ["tls.pem.in", "tls.key.in", "tls.pem.in.in", "tls.KEY.IN",
+                                  "tls.PEM.backup.in", "fixture.p12.txt", "downloads/archive.tar.json",
                                   ".env.in", ".env.production.in", "config/.env.in",
                                   "config/credentials.rb.in", "AGENTS.md.in"])
 def test_template_include_cannot_bypass_mandatory_exclusions(path):
@@ -289,3 +290,14 @@ def test_git_metadata_permission_error_is_not_treated_as_disappearance(tmp_path,
     monkeypatch.setattr(Path, "lstat", unreadable_entry)
     with pytest.raises(PermissionError):
         source._regular_tree(objects)
+
+
+def test_git_metadata_limit_counts_directories_and_files_before_visiting(tmp_path):
+    objects = tmp_path / "objects"
+    objects.mkdir()
+    (objects / "nested").mkdir()
+    (objects / "nested" / "entry").touch()
+    visited = []
+    with pytest.raises(ValueError, match="entry or time limit"):
+        source._regular_tree(objects, limit=1, visit=visited.append)
+    assert visited == []

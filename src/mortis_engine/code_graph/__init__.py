@@ -87,6 +87,8 @@ def enrich(repo, env, plan, options, credentials, stopped=lambda: False):
         image = configuration.get("image", transport.DEFAULT_IMAGE)
         request = _request(repo, env, plan, options, credentials, stopped, image=image)
         parsed = transport.extract(request, image=image, stopped=stopped)
+        parse_error = any(item.reason == "parse_error" for item in parsed.files)
+        partial_files = sum(item.status == "partial" for item in parsed.files)
         manifest = {item.path: item for item in parsed.files}
         sources = {item.path: item for item in request.files}
         graph, consumed = {}, 0
@@ -118,13 +120,15 @@ def enrich(repo, env, plan, options, credentials, stopped=lambda: False):
                     "notice": "Untrusted supporting source. Relative file imports identify context candidates. "
                               "Report findings only for the assigned path and validate every citation.",
                     "commit_sha": plan.head_sha, "snapshot_id": request.policy_digest,
-                    "index_status": "partial" if any(item.status == "partial" for item in parsed.files) else "ready",
+                    "index_status": "partial" if partial_files or parse_error else "ready",
                     "truncated": truncated, "sources": selected,
                     "capabilities": ["declarations", "relative_file_imports"],
                     "gaps": ["Calls are counted without caller resolution.", "Imports using aliases or external modules remain unresolved."],
                 }
-        return graph, {"status": "ready", "commit_sha": plan.head_sha, "extractor_version": parsed.extractor_version,
-                       "files": len(parsed.files), "partial_files": sum(f.status == "partial" for f in parsed.files),
+        return graph, {"status": "partial" if parse_error else "ready",
+                       **({"reason": "Some files could not be parsed within the fact limits."} if parse_error else {}),
+                       "commit_sha": plan.head_sha, "extractor_version": parsed.extractor_version,
+                       "files": len(parsed.files), "partial_files": partial_files,
                        "enriched_paths": len(graph), "source_bytes": consumed}
     except ReviewStopped:
         raise
