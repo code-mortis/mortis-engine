@@ -457,7 +457,7 @@ def split_units(path, old_path, status, sha, text, patch, rule, maximum, *, sour
 
 def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
                 max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None,
-                full_tree_source_policy=FULL_TREE_SOURCE_POLICY):
+                full_tree_source_policy=FULL_TREE_SOURCE_POLICY, unavailable=None):
     for sha in (base_sha, head_sha, merge_base):
         if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{40}", sha):
             raise ValueError("PR planning requires exact Git revisions.")
@@ -473,8 +473,16 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
     rules = load_rules(repo, env, trusted_rules_sha or base_sha, options, stopped)
     plan = ReviewPlan(base_sha, head_sha, merge_base, fingerprint({"file_policy": file_policy.policy(options), "rules": rules["digest"]}),
                       rules["digest"], rules, [], [])
+    unavailable = unavailable or {}
+    missing_status = {}
     binary = _binary_paths(repo, env, merge_base, head_sha, stopped)
     for path, old_path, status in _changes(repo, env, merge_base, head_sha, stopped):
+        if path in unavailable:
+            missing_status[path] = "M"
+            continue
+        if old_path in unavailable:
+            missing_status[old_path] = "M"
+            old_path, status = None, "A"
         if not all(allowed_path(value, options, rules) for value in (path, old_path) if value):
             plan.exclusions.append({"path": path, "old_path": old_path, "reason": "excluded"})
         elif path in binary or old_path in binary:
@@ -483,6 +491,10 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
             plan.exclusions.append({"path": path, "reason": "deleted", "source_sha": merge_base})
         else:
             plan.selected.append(SelectedFile(path, old_path, status, head_sha))
+    if unavailable:
+        plan.selected.extend(SelectedFile(path, None, missing_status.get(path, "A"), head_sha, error=error)
+                             for path, error in unavailable.items() if allowed_path(path, options, rules))
+        plan.selected.sort(key=lambda row: row.path)
     maximum = options.get("max_files")
     if maximum is not None and (type(maximum) is not int or maximum < 1):
         raise ValueError("PR max_files must be positive or unlimited.")
@@ -491,6 +503,8 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
         return plan
     used = 0
     for selected in plan.selected:
+        if selected.error:
+            continue
         if stopped():
             raise ReviewStopped("The review was cancelled or superseded.")
         try:

@@ -87,6 +87,9 @@ class History:
                 run TEXT NOT NULL, candidate TEXT NOT NULL, input TEXT NOT NULL,
                 PRIMARY KEY (run, candidate)
             );
+            CREATE TABLE IF NOT EXISTS review_graphs (
+                run TEXT PRIMARY KEY, input TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS triage_events (
                 kind TEXT NOT NULL, scope TEXT NOT NULL, finding TEXT NOT NULL,
                 version INTEGER NOT NULL, run TEXT NOT NULL, previous TEXT NOT NULL,
@@ -163,6 +166,16 @@ class History:
                                      (encode(report), run_id))
             if cursor.rowcount != 1:
                 raise ValueError("The saved run already has a final report.")
+
+    def review_graph(self, run_id):
+        row = self.db.execute("SELECT input FROM review_graphs WHERE run=?", (run_id,)).fetchone()
+        return json.loads(row["input"]) if row is not None else None
+
+    def save_review_graph(self, run_id, graphs, status):
+        # Key order is part of the serialized analysis request.
+        with self.db:
+            self.db.execute("INSERT INTO review_graphs VALUES (?, ?)",
+                            (run_id, json.dumps([graphs, status], ensure_ascii=False, allow_nan=False)))
 
     def attempts(self, run_id):
         return {(row["stage"], row["task"]): (row["input"], json.loads(row["record"]), row["result"])

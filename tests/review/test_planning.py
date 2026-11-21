@@ -235,7 +235,7 @@ def test_language_template_admission_preserves_trusted_rules_and_exclusions(repo
 
 
 @pytest.mark.parametrize("path", ["tls.pem.in", "tls.key.in", "tls.pem.in.in", "tls.KEY.IN",
-                                  "tls.PEM.backup.in", "fixture.p12.txt", "downloads/archive.tar.json",
+                                  "tls.PEM.backup.in", "fixture.p12.txt", "downloads/archive.tar.in",
                                   ".env.in", ".env.production.in", "config/.env.in",
                                   "config/credentials.rb.in", "AGENTS.md.in"])
 def test_template_include_cannot_bypass_mandatory_exclusions(path):
@@ -244,8 +244,9 @@ def test_template_include_cannot_bypass_mandatory_exclusions(path):
 
 
 @pytest.mark.parametrize("path", ["service.py.in", "packaging/homebrew/noodle.rb.in",
-                                  "workflow.yml.in", "frontend/app.ts.in"])
-def test_known_source_templates_admitted(path):
+                                  "workflow.yml.in", "frontend/app.ts.in", "config.node.ts",
+                                  "frontend/format.svg.tsx", "downloads/archive.tar.json"])
+def test_known_source_and_templates_admitted(path):
     rules = {"layers": [{"include": [], "exclude": [], "rules": []}]}
     assert planning.allowed_path(path, {}, rules)
 

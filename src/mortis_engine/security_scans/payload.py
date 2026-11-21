@@ -5,7 +5,7 @@ import json
 from mortis_engine.review import file_policy
 
 
-def excluded_source_paths(value):
+def excluded_source_paths(value, *, excerpts_only=False):
     paths = set()
 
     def collect(value):
@@ -13,10 +13,11 @@ def excluded_source_paths(value):
             for field, child in value.items():
                 if field == "sources" and isinstance(child, dict):
                     paths.update(path for sources in child.values() if isinstance(sources, dict) for path in sources)
-                elif field == "context_paths" and isinstance(child, list):
+                elif not excerpts_only and field == "context_paths" and isinstance(child, list):
                     paths.update(path for path in child if isinstance(path, str))
                 elif field in {"path", "from_path", "assigned_path", "current_path"} and isinstance(child, str):
-                    paths.add(child)
+                    if not excerpts_only or {"quote", "quote_source_id", "existing_code"} & value.keys():
+                        paths.add(child)
                 else:
                     collect(child)
         elif isinstance(value, list):
@@ -34,7 +35,7 @@ def reusable_source_context(checkpoint):
 
 
 def check_saved_sources(context):
-    if excluded_source_paths({"sources": context.get("sources", {})}):
+    if excluded_source_paths(context, excerpts_only=True):
         raise ValueError("Saved assessment source is excluded by the current mandatory file policy.")
 
 

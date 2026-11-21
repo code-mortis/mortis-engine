@@ -62,6 +62,7 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
     }[task] + " " + policy.instructions(task)
     feedback = None
     source_ids = {}
+    unreadable = set()
     for attempt in range(4):
         catalog = {}
         for revision, sources in sorted(context["sources"].items()):
@@ -133,7 +134,9 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
                           "explanation": "The original defect was not confirmed in current code. " + result["explanation"]}
             if task == "assessment" and result["finding_id"] is not None:
                 result["finding_id"] = history_ids[result["finding_id"]]
-            return result, sorted(context["sources"]["current"])
+            return result, sorted(context["sources"]["current"]), not unreadable
+        if attempt == 3:
+            break
         unavailable = []
         for path in dict.fromkeys(requested):
             if path not in context["available_paths"] or path in context["sources"]["current"]:
@@ -144,8 +147,10 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
             try:
                 context["sources"]["current"][path] = item.source(path)
             except ValueError:
+                unreadable.add(path)
                 unavailable.append(path)
                 continue
+            unreadable.discard(path)
             if task == "verification":
                 try:
                     context["sources"].setdefault("original", {})[path] = item.source(path, context["original_sha"])
@@ -153,10 +158,9 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
                     pass
         feedback = {"kind": "evidence", "required_paths": unavailable,
                     "reason": "Use available_paths and complete sources already supplied. Missing evidence requires uncertainty."} if unavailable else None
-    if task == "analysis":
-        raise ValueError("Security analysis still requires unavailable source after four evidence passes.")
-    result.update(verdict="uncertain", required_paths=[],
-                  explanation="Required security evidence remains unavailable after four evidence passes.")
+    if task != "analysis":
+        result.update(verdict="uncertain", required_paths=[],
+                      explanation="Required security evidence remains unavailable after four evidence passes.")
     if task == "assessment":
         result["finding_id"] = None
-    return result, sorted(context["sources"]["current"])
+    return result, sorted(context["sources"]["current"]), False

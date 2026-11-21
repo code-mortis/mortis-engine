@@ -92,8 +92,9 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
             if prepared is not None:
                 context = prepared
     else:
-        check_saved_sources(pinned_context)
         context = copy.deepcopy(pinned_context)
+    if pinned_context is not None:
+        check_saved_sources(context)
     # Same-head history does not establish attribution against this review's merge base.
     result = None if context.get("attribution", {}).get("version") == 1 else assessment.exact_repeat(context)
     if result is not None:

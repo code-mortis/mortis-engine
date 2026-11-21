@@ -11,9 +11,10 @@ from mortis_engine.code_graph.contracts import CodeGraphLimits
 from mortis_engine.findings import effective_report
 from mortis_engine.findings import snapshot as triage_snapshot
 from mortis_engine.history import History
+from mortis_engine.security_scans.payload import excluded_source_paths
 from mortis_engine.workflow import Session
 
-from . import assessment, context, engine, planning, settings, snapshots, source, workflows
+from . import assessment, context, engine, file_policy, planning, settings, snapshots, source, workflows
 
 
 def scope_ref(repo, env, ref):
@@ -67,7 +68,7 @@ def plan_snapshot(snap, options, stopped=lambda: False, *, prompt_token_ceiling=
                   full_tree_source_policy=planning.FULL_TREE_SOURCE_POLICY):
     return planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
         options, stopped, max_unit_bytes=unit_byte_limit(prompt_token_ceiling), trusted_rules_sha=snap.settings_sha,
-        full_tree_source_policy=full_tree_source_policy)
+        full_tree_source_policy=full_tree_source_policy, unavailable=snap.unavailable)
 
 
 def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,
@@ -173,8 +174,20 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 graphs, graph_status = {}, None
                 if graph and plan.batches:
                     from mortis_engine import code_graph
+
                     progress({"phase": "graph"})
-                    graphs, graph_status = code_graph.enrich(snap.repo, snap.env, plan, {**options, "_graph": graph}, credentials, stopped)
+                    retained = history.review_graph(run_id)
+                    if retained is None:
+                        legacy = bool(saved and session.records)
+                        graphs, graph_status = code_graph.enrich(snap.repo, snap.env, plan, {**options, "_graph": graph},
+                                                                 credentials, stopped, legacy=legacy)
+                        if not legacy:
+                            history.save_review_graph(run_id, graphs, graph_status)
+                    else:
+                        graphs, graph_status = retained
+                        if any(file_policy.excluded(path) for path in graphs) or excluded_source_paths(graphs):
+                            graphs, graph_status = {}, {"status": "unavailable",
+                                "reason": "Saved graph context includes source excluded by the current file policy."}
                 status, raw, findings = engine.run(snap.repo, snap.env, plan, connection, options, credentials,
                     deadline=deadline, session=session, graph_by_path=graphs, progress=progress,
                     source_tool_policy=source_tool_policy)

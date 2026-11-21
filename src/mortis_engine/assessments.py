@@ -263,7 +263,7 @@ async def _execute(repository, repo, env, value, session):
         item.secret_rules = value["redaction"]["secret_rules"]
         item.secret_lines = value["redaction"]["secret_lines"]
         item.deadline = session.deadline
-        result, _ = await inference.ask(item, session, "assessment", value["context"], value["task_key"],
+        result, _, _ = await inference.ask(item, session, "assessment", value["context"], value["task_key"],
                                         options, prepared=True)
         return result
 

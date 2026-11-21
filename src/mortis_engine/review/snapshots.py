@@ -5,6 +5,7 @@ import re
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from itertools import batched
 from pathlib import Path
 
 from mortis_engine.code_graph.contracts import blob_sha
@@ -13,6 +14,10 @@ from . import planning, settings, source
 
 MAX_SOURCE_BYTES = 20_000_000
 MAX_SNAPSHOT_BYTES = 100_000_000
+
+
+class OversizedWorktreeSource(ValueError):
+    pass
 
 
 @dataclass
@@ -26,6 +31,7 @@ class Snapshot:
     mode: str
     excluded: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    unavailable: dict[str, str] = field(default_factory=dict)
 
 
 def _worktree_root(path):
@@ -105,7 +111,7 @@ def _worktree_bytes(root, path):
         if not stat.S_ISREG(info.st_mode):
             raise ValueError("Working-tree source must be a regular file or symbolic link.")
         if info.st_size > MAX_SOURCE_BYTES:
-            raise ValueError("Working-tree source exceeds the 20 MB read limit.")
+            raise OversizedWorktreeSource("Working-tree source exceeds the 20 MB read limit.")
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         with os.fdopen(os.open(parts[-1], flags, dir_fd=directory), "rb") as stream:
             opened = os.fstat(stream.fileno())
@@ -114,7 +120,7 @@ def _worktree_bytes(root, path):
             value = stream.read(MAX_SOURCE_BYTES + 1)
             after = os.fstat(stream.fileno())
         if len(value) > MAX_SOURCE_BYTES:
-            raise ValueError("Working-tree source exceeds the 20 MB read limit.")
+            raise OversizedWorktreeSource("Working-tree source exceeds the 20 MB read limit.")
         if (opened.st_size, opened.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise ValueError("Working-tree source changed while the snapshot was being created.")
         return "100755" if opened.st_mode & 0o111 else "100644", value
@@ -144,12 +150,21 @@ def _tree(repo, env, entries):
     return source.git(repo, temporary_env, "write-tree").strip()
 
 
+def _text_paths(repo, env, paths, stopped):
+    # Ask the copied index for declarative EOL attributes without loading filter drivers.
+    records = source.git(repo, env, "check-attr", "--cached", "-z", "--stdin", "text", "eol",
+                         input_bytes=b"".join(path.encode() + b"\0" for path in paths), stopped=stopped,
+                         strict_utf8=True).split("\0")[:-1]
+    return {path for path, _, text, _, _, eol in batched(records, 6, strict=True)
+            if text not in {"unset", "auto"} and (text == "set" or eol in {"lf", "crlf"})}
+
+
 def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
     _index(repo, env, git_dir)
     staged = _entries(repo, env)
-    excluded = []
+    excluded, unavailable = [], {}
     if mode == "staged":
-        return _tree(repo, env, staged), excluded
+        return _tree(repo, env, staged), excluded, unavailable
     if not all(getattr(os, flag, 0) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")) or not {
         os.open, os.stat, os.readlink
     }.issubset(os.supports_dir_fd) or os.stat not in os.supports_follow_symlinks:
@@ -159,8 +174,10 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
                        stopped=stopped, strict_utf8=True).split("\0")
     flags = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "-v", "-z", strict_utf8=True).split("\0")
     sparse_paths = {value[2:] for value in flags if value[:2].lower() == "s "}
+    paths = sorted(set(filter(None, paths)))
+    text_paths = None
     entries, total = {}, 0
-    for path in sorted(set(filter(None, paths))):
+    for path in paths:
         source.repository_path(path)
         if not planning.allowed_path(path, options, rules):
             excluded.append({"path": path, "reason": "excluded"})
@@ -174,7 +191,12 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
         if path in staged and staged[path][0] == "160000":
             entries[path] = staged[path]
             continue
-        value = _worktree_bytes(root, path)
+        try:
+            value = _worktree_bytes(root, path)
+        except OversizedWorktreeSource as exc:
+            # Keep unreadable files out of the pinned source tree and report target gaps to the planner.
+            unavailable[path] = str(exc)
+            continue
         if value is None:
             if path in sparse_paths:
                 entries[path] = staged[path]
@@ -184,12 +206,20 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
         if path in staged and staged[path] == (file_mode, blob_sha(content)):
             entries[path] = staged[path]
             continue
+        if file_mode in {"100644", "100755"} and b"\r\n" in content:
+            if text_paths is None:
+                text_paths = _text_paths(repo, env, paths, stopped)
+            if path in text_paths:
+                content = content.replace(b"\r\n", b"\n")
+                if path in staged and staged[path] == (file_mode, blob_sha(content)):
+                    entries[path] = staged[path]
+                    continue
         total += len(content)
         if total > MAX_SNAPSHOT_BYTES:
             raise ValueError("Working-tree source exceeds the 100 MB snapshot admission limit.")
         sha = source.git(repo, env, "hash-object", "-w", "--stdin", input_bytes=content, stopped=stopped).strip()
         entries[path] = (file_mode, sha)
-    return _tree(repo, env, entries), excluded
+    return _tree(repo, env, entries), excluded, unavailable
 
 
 @contextmanager
@@ -221,8 +251,9 @@ def snapshot(repository, *, mode="commits", base=None, head="HEAD", object_cache
             if overrides:
                 settings.apply_overrides(options, overrides)
             rules = planning.load_rules(repo, env, target, options, stopped)
-            tree, excluded = _local_tree(repo, env, root, source.find_repository(root), mode, stopped, options, rules)
+            tree, excluded, unavailable = _local_tree(repo, env, root, source.find_repository(root), mode, stopped,
+                                                      options, rules)
             pinned = _commit(repo, env, tree, target)
             if object_cache is not None:
                 source._retain_objects(repo / "objects", source._object_cache(object_cache))
-            yield Snapshot(repo, env, target, pinned, target, target, mode, excluded)
+            yield Snapshot(repo, env, target, pinned, target, target, mode, excluded, unavailable=unavailable)

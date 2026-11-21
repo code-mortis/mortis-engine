@@ -72,14 +72,17 @@ def test_worktree_supporting_test_renames_preserve_both_endpoint_exclusions(repo
         assert [row["text"] for row in sources] == (["assert child_count == 0"] if permitted else [])
 
 
-@pytest.mark.parametrize("limit,message", [("MAX_SOURCE_BYTES", "20 MB read limit"),
-                                        ("MAX_SNAPSHOT_BYTES", "100 MB snapshot admission limit")])
-def test_worktree_supporting_tests_keep_snapshot_admission_limits(repo, monkeypatch, limit, message):
+def test_worktree_supporting_tests_keep_snapshot_admission_limits(repo, monkeypatch):
     commit(repo, {"app.py": "value = 1\n"})
     (repo / "test_new.py").write_text("assert True\n")
-    monkeypatch.setattr(snapshots, limit, 8)
-    with pytest.raises(ValueError, match=message), snapshots.snapshot(repo, mode="worktree"):
+    monkeypatch.setattr(snapshots, "MAX_SNAPSHOT_BYTES", 8)
+    with pytest.raises(ValueError, match="100 MB snapshot admission limit"), snapshots.snapshot(repo, mode="worktree"):
         pass
+    monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 11)
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert "20 MB read limit" in value.unavailable["test_new.py"]
+        plan, _notice, sources = supporting_sources(value, ["test_new.py"])
+        assert not plan.selected and not sources
 
 
 def test_worktree_includes_staged_unstaged_and_untracked_with_immutable_sources(repo, tmp_path):
@@ -395,6 +398,33 @@ def test_worktree_snapshot_detects_same_size_content_change(repo):
     (repo / "app.py").write_text("value = 2\n")
     with snapshots.snapshot(repo, mode="worktree") as value:
         assert contents(value, "app.py") == "value = 2\n"
+
+
+def test_oversized_tracked_file_keeps_unrelated_review_units(repo, monkeypatch):
+    commit(repo, {"large.py": "# " + "x" * 60 + "\n", "small.py": "port = 1\n"})
+    (repo / "small.py").write_text("port = 2\n")
+    monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 32)
+    report = preview.preview_local(repo)
+    assert [unit["path"] for unit in report["units"]] == ["small.py"]
+    assert report["errors"] == [{"path": "large.py", "message": "Working-tree source exceeds the 20 MB read limit."}]
+    assert not report["excluded_files"]
+    with snapshots.snapshot(repo, mode="worktree") as value, pytest.raises(ValueError, match="missing"):
+        contents(value, "large.py")
+
+
+def test_worktree_snapshot_respects_text_line_endings_and_preserves_raw_bytes(repo):
+    commit(repo, {".gitattributes": "app.py text eol=crlf\nraw.py -text\n",
+                  "app.py": "port = 1\nkeep = 3\n", "raw.py": "raw = 1\n"})
+    (repo / "app.py").unlink()
+    git(repo, "checkout", "--", "app.py")
+    assert (repo / "app.py").read_bytes().endswith(b"\r\n")
+    assert not git(repo, "status", "--porcelain")
+    assert not preview.preview_local(repo)["selected_files"]
+    (repo / "app.py").write_bytes(b"port = 2\r\nkeep = 3\r\n")
+    (repo / "raw.py").write_bytes(b"raw = 1\r\n")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "app.py") == "port = 2\nkeep = 3\n"
+        assert contents(value, "raw.py") == "raw = 1\r\n"
 
 
 @pytest.mark.parametrize(("mode", "flag"), [("worktree", "--others"), ("worktree", "--stage"), ("staged", "--stage")])

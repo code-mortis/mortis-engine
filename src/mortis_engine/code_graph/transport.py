@@ -15,6 +15,7 @@ from .contracts import EXTRACTION_SECONDS, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, 
 from .validation import validate_result
 
 DEFAULT_IMAGE = "mortis-engine-parser:0.1.2"
+LEGACY_IMAGE = "mortis-engine-parser:0.1.1"
 APP_IMAGE = "code-mortis-code-graph:0.1.0"
 
 
