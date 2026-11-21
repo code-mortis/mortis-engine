@@ -37,6 +37,8 @@ the user's intended scope before spending provider tokens:
 Refs must already exist locally. Do not check out, stage or commit files to create
 a review scope. Working-tree reviews require an initial commit; report that
 prerequisite if missing. `--head` requires `--base` or `--all`.
+Working-tree snapshots need platform support for safe no-follow file access.
+If unavailable, use `--staged` for changes the user has already staged.
 
 Preview a scope without profiles, credentials, inference or a saved run:
 
@@ -46,7 +48,8 @@ mortis review --repo /path/to/repo --base main --head HEAD --preview --format js
 
 Replace the scope flags for the other modes. Inspect `selected_files`,
 `excluded_files`, `limit_reason` and `errors` before analysis when scope is unclear
-or large. A preview is a plan, not a completed review or an exact token estimate.
+or large. Unreadable files, including files over 20 MB, can appear as per-file
+errors alongside planned files. A preview estimates scope and initial batches.
 Do not combine it with `--connection`, `--resume`, `--graph`, `--progress`,
 `--output`, `--concurrency` or `--second-pass`.
 

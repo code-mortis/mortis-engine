@@ -33,6 +33,12 @@ credential reads. `--options` replaces the saved options object; changing
 provider or destination requires selecting credentials again. Failed edits
 preserve the previous profile.
 
+Mortis validates `extra_body` to protect engine-managed inputs, output and
+authentication. Use supported properties, such as `{"reasoning":{"effort":"medium"}}`
+with matching run effort. Replacing the whole `reasoning`, `text` or
+`output_config` value or the engine's structured output format is rejected.
+Bedrock bearer `auth_header` cannot be `X-Amz-Date` or `X-Amz-Security-Token`.
+
 Public endpoints require HTTPS unless the hostname is explicitly trusted through
 `CM_TRUSTED_ENDPOINT_HOSTS`. With `CM_ALLOW_PRIVATE_ENDPOINTS=true`, HTTP is
 allowed only when every resolved address is private or loopback. Mortis connects
@@ -95,11 +101,11 @@ enable it or increase limits as an implicit recovery step.
 
 Docker is optional for review graph context; Trivy is required for scans.
 `mortis graph build` builds the pinned parser image and can download build
-dependencies. After upgrading from 0.1.1 or earlier, rerun the build before using
-graph context. `mortis review --graph ...` uses the isolated parser; unavailable
-graph context is recorded and the normal source review can continue. Do not
-enable networking, host mounts, inherited credentials or Docker-socket access
-on the parser container.
+dependencies. After upgrading from 0.1.2 or earlier, rerun the build before using
+graph context. `mortis review --graph ...` uses the isolated parser. A review can
+use available graph facts when coverage is incomplete and resume with saved
+graph context when present. Do not enable networking, host mounts, inherited
+credentials or Docker-socket access on the parser container.
 
 Graph flags require `--graph`: `--graph-max-files`, `--graph-max-file-bytes`,
 `--graph-max-source-bytes`. Their positive bounds cannot be unlimited; inspect

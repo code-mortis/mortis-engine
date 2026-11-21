@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.3 - 2026-11-21
+
+- Harden local snapshots and private history. Working-tree reviews read files without following symlinks or running Git filters. Files that cannot be read remain visible as coverage gaps, with Git change and rename metadata when available. Private key files remain excluded even with backup suffixes.
+- Preserve readable code graph facts when another file fails extraction. Interrupted reviews reuse their saved graph context when available. Run `mortis graph build` again before using `--graph` after upgrading.
+- Check the original and current paths when verifying findings. Withhold saved assessment evidence that current exclusions disallow. Security scans keep validated results and withhold the grade when required supporting evidence is unavailable.
+- Validate custom `extra_body` options before inference. Reject overrides of engine-managed fields, including whole `reasoning`, `text` and `output_config` values. Bedrock bearer authentication cannot use AWS signing header names.
+- Check the release tag against the triggering commit and `origin/main` before running tagged code. Reject private files with mixed-case extensions or backup suffixes in distribution archives.
+
 ## 0.1.2 - 2026-11-19
 
 - Run eligible review and scan assessments and AI fix checks as slots open. Related candidates remain ordered, verification preserves report order, and older runs resume with their saved assessment policy.

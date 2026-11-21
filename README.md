@@ -68,6 +68,8 @@ to that connection and may consume provider tokens.
 
 Use `--effort low`, `--effort medium` or `--effort high` to override the repository setting for one run. Local working-tree and staged reviews use an immutable snapshot and leave your Git index, objects and refs untouched. Working-tree reviews require an initial commit. Ignored untracked files, credentials and excluded files are outside review scope.
 
+Working-tree reviews read files without following symlinks or running Git filters. On a platform without safe no-follow file access, stage the changes you intend to review and use `--staged`. Files over 20 MB or otherwise unreadable are reported as coverage gaps when the snapshot can still be built.
+
 Preview the same local planner without an AI connection or saved analysis run:
 
 ```sh
@@ -325,10 +327,11 @@ mortis review --base main --graph
 ```
 
 Docker builds a separate parser image with the pinned grammars. After upgrading
-from 0.1.1 or earlier, rerun `mortis graph build` before using `--graph`. During
+from 0.1.2 or earlier, rerun `mortis graph build` before using `--graph`. During
 review the parser receives bounded file contents at one revision. It runs without
-network or host mounts. A review records unavailable graph context and can continue
-using its normal source evidence.
+network or host mounts. A review can continue using available graph facts and its
+normal source evidence when graph coverage is incomplete. Resumed reviews reuse
+their saved graph context when available.
 
 Set extraction limits in the trusted committed configuration:
 
@@ -425,12 +428,14 @@ Use `--headers-env '{}'` to clear extra headers. A supplied `--options` object r
 | `timeout_sec` | Provider request timeout, 5–900 seconds |
 | `prompt_token_ceiling` | Conservative input ceiling per request, 4,096–2,000,000 tokens |
 | `retry_codes` | Provider HTTP 4xx codes classified as retryable by the transport |
-| `extra_body` | Additional provider request fields, with input, authentication and per-session prompt cache key protections |
+| `extra_body` | Additional provider request fields, subject to validation of engine-managed inputs, output and authentication |
 | `auth_header` | Custom authentication header name |
 | `aws_region` | Bedrock region |
 | `aws_profile` | AWS credential profile for Bedrock |
 
-Bedrock can use ambient AWS credentials or an API key supplied through the same environment or vault methods. Choose a model or inference profile that supports the [Converse API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html) and the tool and structured-output features in use. IAM credentials need `bedrock:InvokeModel` permission.
+Use nested properties for supported `extra_body` settings, such as `{"reasoning":{"effort":"medium"}}` with matching review effort. Whole-value overrides of `reasoning`, `text` or `output_config` and replacement of structured output formats are rejected. A protocol's supported output budget alias must match the effective per-request limit when Mortis supplies one.
+
+Bedrock can use ambient AWS credentials or an API key supplied through the same environment or vault methods. With an API key, a custom `auth_header` cannot be `X-Amz-Date` or `X-Amz-Security-Token`. Choose a model or inference profile that supports the [Converse API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html) and the tool and structured-output features in use. IAM credentials need `bedrock:InvokeModel` permission.
 
 ```sh
 mortis connect aws \

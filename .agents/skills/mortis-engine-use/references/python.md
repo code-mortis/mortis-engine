@@ -17,6 +17,8 @@ assert plan["schema_version"] == "mortis.review-preview/v1"
 Modes are `worktree` (default), `staged`, `commits` and `all`. Optional preview
 arguments include `effort`, `overrides` and `prompt_token_ceiling`. Preview does
 not read profiles, credentials or saved history and does not invoke inference.
+Inspect `errors` for files the snapshot could not read. Their `selected_files`
+entries can retain Git change status and the original rename path when available.
 
 ## Review with the selected saved profile
 
@@ -57,8 +59,9 @@ a saved profile name, other modes or resume.
 `profile`. `ref` defaults to `"HEAD"`. Verification and summary take
 `finding_run=REVIEW_RUN_ID`; scans accept `rotations` and `concurrency`. These
 are synchronous entry points; do not call them directly inside an already
-running asyncio loop. Standalone verification uses the review concurrency
-configured at the target revision and returns verdicts in report order.
+running asyncio loop. Verification checks the original and current paths for
+saved findings. Standalone verification uses the review concurrency configured
+at the target revision and returns verdicts in report order.
 
 ```python
 from mortis_engine import operations
@@ -83,7 +86,7 @@ Additional exports in `mortis_engine.operations`:
 | `list_findings(repository, ...)` | `run_id`; optional `include_history=True` |
 | `triage(repository, ...)` | `run_id`, `finding_id`, `state`, `version`, `reason` |
 
-Retries use saved evidence, preserve the original report and can be blocked by
-unknown usage or stale history. Triage requires the user's decision and current
-version, just as with the CLI. Inspect `status`, coverage, stage failures and
-usage in returned dictionaries; receiving a result is not proof of completion.
+Retries use saved evidence allowed by the current file policy, preserve the
+original report and can be blocked by unknown usage or stale history. Triage
+requires the user's decision and current version, just as with the CLI. Inspect
+`status`, coverage, stage failures and usage in returned dictionaries.

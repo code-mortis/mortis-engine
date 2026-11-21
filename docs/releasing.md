@@ -106,8 +106,12 @@ destination; the production workflow in this repository targets PyPI only.
 ## Publish only when ready
 
 The release workflow accepts stable `vMAJOR.MINOR.PATCH` tags. It validates the tag,
-package and CLI versions, requires the triggering SHA to match the checkout/tag
-commit, and requires that commit to belong to `origin/main`.
+package and CLI versions. It first checks that the tag names the triggering SHA
+and that the commit belongs to `origin/main`, then checks out the tagged code
+to validate the embedded version. Rerunning a failed workflow uses the original
+tagged commit. If an existing tag failed on a version mismatch, verify PyPI and
+GitHub Release status and have the release maintainer reconcile the tag with the
+prepared commit on `main` before retrying publication.
 
 After merging the prepared release and verifying CI, a maintainer can publish a
 single explicit tag. Replace `MAJOR.MINOR.PATCH` with the prepared version.
