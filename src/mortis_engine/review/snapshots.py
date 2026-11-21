@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mortis_engine.code_graph.contracts import blob_sha
+
 from . import planning, settings, source
 
 MAX_SOURCE_BYTES = 20_000_000
@@ -55,7 +57,7 @@ def _index(repo, env, git_dir):
 
 
 def _entries(repo, env):
-    values = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z")
+    values = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z", strict_utf8=True)
     result = {}
     for value in values.split("\0"):
         if not value:
@@ -66,15 +68,6 @@ def _entries(repo, env):
         path = source.repository_path(match[4])
         result[path] = (match[1], match[2])
     return result
-
-
-def _cached_times(repo, env):
-    output = source.git(repo, env, "ls-files", "--debug", "-z")
-    pattern = (r"([^\0]+)\0  ctime: (\d+):(\d+)\n  mtime: (\d+):(\d+)\n"
-               r"  dev: [^\n]+\n  uid: [^\n]+\n  size: (\d+)\tflags: [^\n]+\n")
-    return {match[1]: (int(match[2]) * 1_000_000_000 + int(match[3]),
-                      int(match[4]) * 1_000_000_000 + int(match[5]), int(match[6]))
-            for match in re.finditer(pattern, output)}
 
 
 def _worktree_stat(root, path):
@@ -159,21 +152,9 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
         return _tree(repo, env, staged), excluded
     paths = source.git(repo, env, "-c", "core.fsmonitor=false", "--work-tree=" + str(root),
                        "ls-files", "--cached", "--others", "--exclude-standard", "--full-name", "-z",
-                       stopped=stopped).split("\0")
-    flags = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "-v", "-z").split("\0")
+                       stopped=stopped, strict_utf8=True).split("\0")
+    flags = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "-v", "-z", strict_utf8=True).split("\0")
     sparse_paths = {value[2:] for value in flags if value[:2].lower() == "s "}
-    # Validate path traversal before Git inspects worktree stat information.
-    stats = {path: _worktree_stat(root, path) for path in staged}
-    cached_times = _cached_times(repo, env)
-    source.git(repo, env, "--work-tree=" + str(root), "update-index", "--no-assume-unchanged", "-z", "--stdin",
-               input_bytes=b"".join(path.encode() + b"\0" for path in staged), stopped=stopped)
-    changed = set(filter(None, source.git(
-        repo, env, "-c", "core.fsmonitor=false", "--work-tree=" + str(root),
-        "diff-files", "--name-only", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "-z",
-        stopped=stopped).split("\0")))
-    # Some Git builds ignore subsecond stat differences when reporting diff-files.
-    changed.update(path for path, info in stats.items() if info is not None
-                   and cached_times.get(path) != (info.st_ctime_ns, info.st_mtime_ns, info.st_size))
     entries, total = {}, 0
     for path in sorted(set(filter(None, paths))):
         source.repository_path(path)
@@ -186,7 +167,7 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
                 continue
         if stopped():
             raise source.ReviewStopped("The review was cancelled.")
-        if path in staged and (path not in changed or staged[path][0] == "160000"):
+        if path in staged and staged[path][0] == "160000":
             entries[path] = staged[path]
             continue
         value = _worktree_bytes(root, path)
@@ -195,6 +176,10 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
                 entries[path] = staged[path]
             continue
         file_mode, content = value
+        # Cached stat data cannot prove the worktree file still matches the staged object.
+        if path in staged and staged[path] == (file_mode, blob_sha(content)):
+            entries[path] = staged[path]
+            continue
         total += len(content)
         if total > MAX_SNAPSHOT_BYTES:
             raise ValueError("Working-tree source exceeds the 100 MB snapshot admission limit.")

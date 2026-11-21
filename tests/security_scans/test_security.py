@@ -76,7 +76,7 @@ def test_scan_rejects_invalid_previous_before_snapshot(repository, previous):
     {"source_sha": None}, {"evidence": None}, {"evidence": [None]},
     {"evidence": [{"path": []}]}, {"evidence": [{"path": "a.py", "quote": []}]},
     {"locations": None}, {"ai_analysis": None}, {"sources": None}, {"version": "1"},
-    {"state": []}, {"rotation": []},
+    {"state": []}, {"state": "closed"}, {"rotation": []},
     {"state": "false_positive", "fix_verification": None},
     {"state": "false_positive", "fix_verification": []},
     {"state": "false_positive", "fix_verification": "fixed"},

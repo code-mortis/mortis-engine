@@ -127,6 +127,31 @@ def test_verification_requires_both_revisions_and_changed_cause(repo):
     assert "status" not in old["findings"][0]
 
 
+@pytest.mark.parametrize(("verdict", "original_path", "current_path", "expected"), [
+    ("fixed", "old.py", "renamed.py", "fixed"),
+    ("fixed", "other.py", "renamed.py", "uncertain"),
+    ("fixed", "old.py", "other.py", "uncertain"),
+    ("still_present", "old.py", "other.py", "uncertain"),
+])
+def test_verification_citations_must_match_finding_paths(monkeypatch, verdict, original_path, current_path, expected):
+    context = {"finding": {"path": "old.py"}, "current_path": "renamed.py", "diff": "changed",
+               "sources": {"original": {"old.py": "original", "other.py": "original"},
+                           "current": {"renamed.py": "current", "other.py": "current"}}}
+    value = {"verdict": verdict, "original_issue_present": True, "dismissal_recommended": False,
+             "explanation": "The original source had a defect.", "change_explanation": "The source changed.",
+             "evidence": [{"revision": revision, "path": path, "start_line": 1, "end_line": 1, "quote": revision}
+                          for revision, path in [("original", original_path), ("current", current_path)]]}
+    assert verification.validate_result(value, context)["verdict"] == expected
+
+    async def cached_result(*args):
+        return value.copy()
+
+    monkeypatch.setattr(workflows, "_ask", cached_result)
+    resumed = asyncio.run(workflows._verify_one(None, None, {"id": "finding"}, "a" * 40, "b" * 40,
+                                               {}, None, prepared=(context, "")))
+    assert resumed["verdict"] == expected
+
+
 def test_absent_observation_preserves_history_and_failed_assessment(repo):
     base = commit(repo, {"app.py": "def inverse(value):\n    return value\n"})
     head = commit(repo, {"app.py": "def inverse(value):\n    return 1 / value\n"})

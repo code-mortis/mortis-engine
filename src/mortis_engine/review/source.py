@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from mortis_engine.review.errors import ReviewStopped
 
 
-def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=None):
+def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=None, strict_utf8=False):
     executable = shutil.which("git", path=os.pathsep.join(
         entry for entry in env.get("PATH", os.defpath).split(os.pathsep) if Path(entry).is_absolute()))
     if executable is None:
@@ -47,7 +47,10 @@ def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=N
             if os.fstat(output.fileno()).st_size + os.fstat(errors.fileno()).st_size > 20_000_000:
                 raise ValueError("Local Git output exceeds 20 MB.")
             output.seek(0)
-            return output.read(20_000_000).decode("utf-8", "replace")
+            try:
+                return output.read(20_000_000).decode("utf-8", "strict" if strict_utf8 else "replace")
+            except UnicodeDecodeError:
+                raise ValueError("Git returned a path that is not valid UTF-8.") from None
         finally:
             if process.poll() is None:
                 process.terminate()

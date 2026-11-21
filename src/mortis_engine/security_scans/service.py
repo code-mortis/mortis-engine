@@ -257,7 +257,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             raise ValueError("Previous security finding history contains invalid source evidence.")
         engine.relative_path(old["path"])
         engine.relative_path(evidence.get("path"))
-        if (not isinstance(old.get("state", "open"), str)
+        if (old.get("state", "open") not in ("open", "resolved", "false_positive", "accepted_risk")
                 or type(old.get("version", 0)) is not int or old.get("version", 0) < 0
                 or old.get("rotation") is not None and not isinstance(old["rotation"], dict)
                 or not isinstance(old.get("fix_verification", {}), dict)

@@ -23,9 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: refs/heads/main
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify main ancestry before loading the release checkout
+        shell: bash
+        run: |
+          test "$(git rev-parse --verify --end-of-options "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          git merge-base --is-ancestor "$RELEASE_SHA" HEAD
+          git -c core.hooksPath=/dev/null checkout --detach "$RELEASE_SHA"
       - name: Isolate configuration and state
         run: |
           echo "XDG_CONFIG_HOME=$RUNNER_TEMP/mortis-config" >> "$GITHUB_ENV"

@@ -175,7 +175,8 @@ async def _verify_one(repo, env, original, original_sha, head_sha, options, sess
                             instructions, verification.output_schema(), verification.validate_response, options)
         requested = result.pop("required_sources", [])
         if not requested:
-            return result
+            # Resumed tasks can return a verdict saved by an earlier validator.
+            return verification.validate_verdict(result, context)
         if round == 2:
             return {**result, "verdict": "uncertain",
                     "explanation": "Verification still needs evidence after three passes. " + result["explanation"]}
