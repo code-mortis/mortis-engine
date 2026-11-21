@@ -4,14 +4,15 @@ import json
 
 from mortis_engine import findings
 
-from .review import terminal
+from .review import terminal_block, terminal_line
 
 
 def run(args):
     if args.command == "triage":
         result = findings.triage(args.repo, run_id=args.run_id, finding_id=args.finding,
                                  state=args.state, version=args.version, reason=args.reason)
-        text = f"{result['finding']}: {result['state']} (version {result['version']})\n{result['reason']}"
+        lines = [f"{result['finding']}: {result['state']} (version {result['version']})",
+                 *terminal_block(result["reason"])]
     else:
         result = findings.list_findings(args.repo, run_id=args.run_id, include_history=args.history)
         lines = [f"Current findings: {len(result['findings'])}  Scope: {result['scope']}"]
@@ -24,8 +25,7 @@ def run(args):
                 lines.append(f"  Recorded status: {item['evidence_status']}")
         for event in result.get("history", []):
             lines.append(f"{event['finding']} v{event['version']}: {event['previous']} -> {event['state']}: {event['reason']}")
-        text = "\n".join(lines)
-    print(json.dumps(result, indent=2) if args.format == "json" else terminal(text))
+    print(json.dumps(result, indent=2) if args.format == "json" else "\n".join(map(terminal_line, lines)))
     return 0
 
 

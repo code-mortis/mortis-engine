@@ -50,6 +50,14 @@ def terminal(text):
     return re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", "", text)
 
 
+def terminal_line(text):
+    return terminal(text).replace("\n", "\\n").replace("\t", "\\t").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
+
+def terminal_block(text):
+    return [f"  | {line}" for line in text.split("\n")]
+
+
 @contextmanager
 def progress_display(enabled, *, scan=False):
     if not enabled:
@@ -92,7 +100,7 @@ def progress_display(enabled, *, scan=False):
             if phase == "analysis":
                 coverage = f"Files {'scanned' if scan else 'reviewed'}: {value['completed_files']}/{value['selected_files']}    Failed: {value['failed_files']}"
                 description = "Scanning code" if scan else "Reviewing code"
-                paths = [terminal(path).replace("\n", "\\n").replace("\t", "\\t") for path in value["active_paths"]]
+                paths = [terminal_line(path) for path in value["active_paths"]]
                 lines.append(f"AI requests running: {value['active_requests']}")
                 if paths:
                     lines.extend(["", "Files in active requests:", *(f"  {path}" for path in paths[:3])])
@@ -140,20 +148,21 @@ def render(result):
         lines.append(f"Incomplete {error['stage']}: {error['error']}")
     for finding in result["findings"]:
         lines.extend(["", f"[{finding['severity']}] {finding['path']}:{finding['start_line']}-{finding['end_line']}",
-                      finding["content"], f"Trigger: {finding['trigger']}", f"Consequence: {finding['consequence']}"])
+                      *terminal_block(finding["content"]), f"Trigger: {finding['trigger']}",
+                      f"Consequence: {finding['consequence']}"])
         for evidence in finding["evidence"]:
             lines.append(f"  {evidence['path']}:{evidence['start_line']}-{evidence['end_line']}  {evidence['quote']}")
     if result.get("summary", {}).get("result"):
-        lines.extend(["", result["summary"]["result"]["narrative"]])
+        lines.extend(["", *terminal_block(result["summary"]["result"]["narrative"])])
     if result.get("verification", {}).get("verifications"):
         for row in result["verification"]["verifications"]:
             lines.append(f"{row['finding_id']}: {row['verdict']}")
     if result.get("fix_prompts"):
-        lines.append(result["fix_prompts"])
+        lines.extend(terminal_block(result["fix_prompts"]))
     graph = result.get("code_graph", {})
     if graph:
         lines.append(f"Code graph: {graph.get('status', 'unavailable')}" + (" — " + graph["reason"] if graph.get("reason") else ""))
-    return terminal("\n".join(lines))
+    return "\n".join(map(terminal_line, lines))
 
 
 
@@ -177,7 +186,7 @@ def render_preview(result):
         lines.append(f"Incomplete: {row['path']}: {row['message']}")
     lines.extend(result["warnings"])
     lines.extend(result["assumptions"])
-    return terminal("\n".join(lines))
+    return "\n".join(map(terminal_line, lines))
 
 
 def run(args):
@@ -212,7 +221,7 @@ def run(args):
     name, profile = selected(args)
 
     def announce(count, model):
-        print(terminal(f"Reviewing {count} file(s) with {name!r} / {model}…"), file=sys.stderr, flush=True)
+        print(terminal_line(f"Reviewing {count} file(s) with {name!r} / {model}…"), file=sys.stderr, flush=True)
 
     started = time.monotonic()
     try:

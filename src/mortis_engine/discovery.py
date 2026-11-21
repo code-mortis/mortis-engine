@@ -5,7 +5,7 @@ import time
 
 import httpx
 
-from .http_transport import PinnedHTTPTransport
+from .http_transport import PinnedHTTPTransport, resolve_sync
 from .llm_http import request_headers
 from .security import safe_endpoint
 
@@ -33,14 +33,14 @@ def list_models(connection, credentials):
         raise ValueError("Model discovery is unavailable for Bedrock. Enter the model ID.")
     if not credentials.get("api_key"):
         raise ValueError("Set an API key to load models.")
-    base = safe_endpoint(connection["base_url"])
-    anthropic = protocol == "anthropic"
-    url = base + ("/v1/models" if anthropic and not base.endswith("/v1") else "/models")
-    headers = request_headers(protocol, connection.get("options", {}), credentials)
-    params = {"limit": 1000} if anthropic else {}
     deadline = time.monotonic() + 20
     size, models, cursors = 0, {}, set()
     try:
+        base = resolve_sync(lambda: safe_endpoint(connection["base_url"]), 10)
+        anthropic = protocol == "anthropic"
+        url = base + ("/v1/models" if anthropic and not base.endswith("/v1") else "/models")
+        headers = request_headers(protocol, connection.get("options", {}), credentials)
+        params = {"limit": 1000} if anthropic else {}
         with httpx.Client(follow_redirects=False, trust_env=False, transport=PinnedHTTPTransport()) as client:
             for _ in range(20):
                 remaining = deadline - time.monotonic()

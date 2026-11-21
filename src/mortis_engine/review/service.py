@@ -88,6 +88,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
         raise ValueError("--resume uses the inputs and options of the saved run.")
     if not graph and overrides and "code_graph_limits" in overrides:
         raise ValueError("Graph limit overrides require --graph.")
+    if resume is None:
+        effort = settings.effort_override(effort)
     with History(repository) as history:
         if resume and history.row(resume, "review")["report"] is not None:
             return history.report(resume)
@@ -108,7 +110,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 raise ValueError("The saved assessment attribution version is unsupported.")
             options["_assessment_attribution"] = attribution
             if saved:
-                effort, graph = saved["effort"], saved["graph"]
+                effort, graph = settings.effort_override(saved["effort"]), saved["graph"]
                 concurrency = saved.get("concurrency")
                 overrides = saved.get("overrides")
                 started = history.row(resume)["started"]

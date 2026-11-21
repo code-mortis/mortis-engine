@@ -5,9 +5,37 @@ import json
 import pytest
 
 from mortis_engine import cli, config, gateway
+from mortis_engine.history import History
 from mortis_engine.review import engine, planning, preview_local, service, snapshots
 
 from .git_helpers import commit, git
+
+
+@pytest.mark.parametrize("effort", ["unsupported", "", False])
+def test_invalid_effort_stops_review_and_preview_before_creating_history(repo, tmp_path, monkeypatch, effort):
+    state = tmp_path / "new-state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    with pytest.raises(ValueError, match="effort"):
+        service.review_local(repo, connection={}, get_credentials=lambda: pytest.fail("Credentials were loaded"),
+                             effort=effort)
+    with pytest.raises(ValueError, match="effort"):
+        preview_local(repo, effort=effort)
+    assert not state.exists()
+
+
+def test_resume_rejects_invalid_saved_effort_before_loading_credentials(repo, tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("resume-effort-state")))
+    sha = commit(repo, {"app.py": "value = 1\n"})
+    with History(repo) as history:
+        run_id = history.begin("review", "fixture", {
+            "effort": "unsupported", "graph": False,
+            "snapshot": {"base_sha": sha, "head_sha": sha, "merge_base": sha, "settings_sha": sha, "mode": "commits"},
+        })
+    with pytest.raises(ValueError, match="effort"):
+        service.review_local(repo, connection={}, get_credentials=lambda: pytest.fail("Credentials were loaded"),
+                             resume=run_id)
+    with History(repo) as history:
+        assert history.row(run_id)["report"] is None
 
 
 @pytest.mark.parametrize("mode", ["worktree", "staged", "commits", "all"])

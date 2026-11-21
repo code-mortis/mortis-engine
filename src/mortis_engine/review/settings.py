@@ -81,6 +81,12 @@ class RepoSettings(RunLimits):
         return value.strip() if isinstance(value, str) else value
 
 
+def effort_override(value):
+    if value is None:
+        return None
+    return RepoSettings.model_validate({"effort": value}, strict=True).effort
+
+
 def _tables(repo, env, base_sha):
     entry = source.git(repo, env, "ls-tree", "-z", "-l", base_sha, "--", "mortis.toml")
     value = {}

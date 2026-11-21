@@ -3,12 +3,13 @@
 import asyncio
 import socket
 import ssl
+import threading
 
 import httpcore
 import httpx
 import pytest
 
-from mortis_engine import discovery, gateway, llm_http, security
+from mortis_engine import discovery, gateway, http_transport, llm_http, security
 from mortis_engine.http_transport import EndpointPolicyError, PinnedAsyncHTTPTransport, PinnedHTTPTransport
 from mortis_engine.schemas import Message, Request
 from mortis_engine.security_scans import advisories
@@ -172,6 +173,56 @@ def test_sync_callers_recheck_dns_before_sending(monkeypatch, operation):
                                   {"api_key": "fixture-key"})
         else:
             advisories.fetch("CVE-2026-12345")
+
+
+@pytest.mark.parametrize("operation", ["discovery", "advisory", "transport"])
+def test_sync_dns_timeout_prevents_dispatch(monkeypatch, operation):
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def resolve(*args, **kwargs):
+        started.set()
+        release.wait(2)
+        finished.set()
+        return dns_rows(PUBLIC)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", lambda *a, **kw: pytest.fail("Socket opened"))
+    for module in (discovery, advisories):
+        monkeypatch.setattr(module, "resolve_sync", lambda call, _timeout: http_transport.resolve_sync(call, 0.1))
+
+    try:
+        if operation == "discovery":
+            with pytest.raises(ValueError, match="Could not read the model catalog") as error:
+                discovery.list_models({"protocol": "openai", "base_url": "https://provider.example"},
+                                      {"api_key": "fixture-key"})
+            assert isinstance(error.value.__cause__, httpx.ConnectTimeout)
+        elif operation == "advisory":
+            with pytest.raises(httpx.ConnectTimeout, match="Endpoint resolution"):
+                advisories.fetch("CVE-2026-12345")
+        else:
+            with httpx.Client(transport=PinnedHTTPTransport(), timeout=0.1) as client:
+                with pytest.raises(httpx.ConnectTimeout, match="Endpoint resolution"):
+                    client.get("https://provider.example")
+        assert started.is_set() and not finished.is_set()
+    finally:
+        release.set()
+        finished.wait(2)
+
+
+def test_sync_dns_timeout_keeps_stalled_workers_bounded(monkeypatch):
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(http_transport, "_DNS_SLOTS", slots)
+    release = threading.Event()
+
+    try:
+        with pytest.raises(httpx.ConnectTimeout):
+            http_transport.resolve_sync(lambda: release.wait(2), 0.1)
+        with pytest.raises(httpx.ConnectTimeout):
+            http_transport.resolve_sync(lambda: pytest.fail("Started an extra DNS worker"), 0.1)
+    finally:
+        release.set()
+        assert slots.acquire(timeout=2)
+        slots.release()
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

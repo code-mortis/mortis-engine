@@ -563,3 +563,42 @@ def test_scan_failure_and_interruption_always_print_elapsed(repo, profile, monke
     assert cli.main(["scan", "--progress"]) == code
     out = capsys.readouterr()
     assert "Elapsed:" in out.err and not out.out
+
+
+def test_review_text_keeps_paths_and_multiline_finding_content_in_their_fields():
+    from mortis_engine.cli import review
+
+    report = {"status": "completed", "merge_base": "a" * 40, "head_sha": "b" * 40, "run_id": "fixture",
+              "coverage": {"selected": [{"path": "app.py"}], "completed": [{"path": "app.py"}]},
+              "usage": {"total_tokens": 0}, "excluded_files": [], "warnings": [], "errors": [],
+              "findings": [{"severity": "low", "path": "first\nsecond.py", "start_line": 1, "end_line": 1,
+                            "content": "First paragraph\nCoverage: example text", "trigger": "First\u2028Second",
+                            "consequence": "Fixture", "evidence": []}]}
+    lines = review.render(report).splitlines()
+    assert "[low] first\\nsecond.py:1-1" in lines
+    assert "  | Coverage: example text" in lines
+    assert "Trigger: First\\u2028Second" in lines
+    assert sum(line.startswith("Coverage:") for line in lines) == 1
+
+
+@pytest.mark.parametrize("command", ["scan", "summary"])
+def test_analysis_text_delimits_report_fields_and_json_retains_raw_values(command, profile, monkeypatch, capsys):
+    from mortis_engine import operations
+
+    report = {"status": "completed", "head_sha": "a" * 40, "run_id": "fixture",
+              "coverage": {"completed_files": 1, "selected_files": 1}, "grade": "A",
+              "findings": [{"path": "app.py\nsecond", "severity": "low", "title": "Single\tfield",
+                            "outcome": "present", "id": "example"}], "problems": ["First\nRun: example text"],
+              "stages": {"trivy": {}}, "result": {"narrative": "First paragraph\nRun: example text", "groups": []}}
+    monkeypatch.setattr(operations, "run", lambda *args, **kwargs: report)
+    args = [command, *(["--run", "fixture"] if command == "summary" else [])]
+    assert cli.main(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line for line in lines if line.startswith("Run:")] == ["Run: fixture"]
+    if command == "scan":
+        assert "[low] app.py\\nsecond — Single\\tfield (present, example)" in lines
+        assert "First\\nRun: example text" in lines
+    else:
+        assert "  | Run: example text" in lines
+    assert cli.main([*args, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out) == report
