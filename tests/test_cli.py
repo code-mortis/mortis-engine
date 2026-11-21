@@ -205,6 +205,10 @@ def test_ambient_bedrock(setup):
     ["--headers-env", '{"X-Header":123}'],
     ["--api-key-env", "MISSING_MORTIS_KEY"],
     ["--options", '{"extra_body":{"api_key":"synthetic-forbidden-secret"}}'],
+    ["--options", '{"extra_body":{"messages.0.content":"synthetic-forbidden-secret"}}'],
+    ["--options", '{"extra_body":{"text":{"format":{"type":"text"}}}}'],
+    ["--options", '{"extra_body":{"authentication.token":"synthetic-forbidden-secret"}}'],
+    ["--options", '{"extra_body":{"prompt_cache_key":"synthetic-forbidden-secret"}}'],
 ])
 def test_invalid_inputs_do_not_call_provider_or_save(setup, extra, capsys):
     calls, _ = setup

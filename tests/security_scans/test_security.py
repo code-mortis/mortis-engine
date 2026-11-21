@@ -55,6 +55,117 @@ class EmptySession:
         return kwargs["validate"]({"findings": [], "required_paths": []})
 
 
+@pytest.mark.parametrize("path", ["C:/folder/source.py", "D:source.py", "C:\\source.py"])
+def test_security_paths_reject_windows_drive_prefixes(path):
+    with pytest.raises(ValueError, match="invalid repository path"):
+        engine.relative_path(path)
+    assert engine.relative_path("src/source.py") == "src/source.py"
+
+
+def test_unavailable_current_source_is_reported_to_the_next_evidence_pass():
+    def read(path):
+        raise ValueError("Source unavailable")
+
+    class EvidenceSession:
+        async def ask(self, stage, key, *, context, validate, **kwargs):
+            if key.endswith(":0"):
+                return validate({"findings": [], "required_paths": ["helper.py"]})
+            assert context["validation_feedback"]["required_paths"] == ["helper.py"]
+            return validate({"findings": [], "required_paths": []})
+
+    item = SimpleNamespace(redact=lambda text: text, stopped=lambda: False, source=read)
+    context = {"assigned_path": "a.py", "available_paths": ["a.py", "helper.py"],
+               "sources": {"current": {"a.py": "value = 1\n"}}}
+    result, paths, complete = asyncio.run(ask(item, EvidenceSession(), "analysis", context, "paths",
+                                              {"effort": "medium"}, prepared=True))
+    assert result["findings"] == [] and paths == ["a.py"]
+    assert not complete
+
+
+@pytest.mark.parametrize("context", [
+    {"sources": {"current": {"certificate.PEM.txt": "previously retained source"}}},
+    {"sources": {"current": {"a.py": "value = 1"}},
+     "history": [{"path": "a.py", "assessment": {"evidence": [
+         {"path": "certificate.PEM.txt", "quote": "previously retained source"}]}}]},
+    {"prior_candidates": [{"snapshot": {"path": "certificate.PEM.txt", "existing_code": "retained excerpt"}}]},
+])
+def test_pinned_evidence_cannot_resend_source_newly_excluded_by_policy(context):
+    session = EmptySession()
+    with pytest.raises(ValueError, match="Saved assessment source is excluded"):
+        asyncio.run(ask(None, session, "assessment", context, "saved", {"effort": "medium"}, prepared=True))
+    assert session.calls == []
+
+
+def test_saved_source_guard_allows_scanner_metadata_for_excluded_path():
+    from mortis_engine.security_scans.payload import check_saved_sources
+
+    check_saved_sources({"history": [{"path": "package-lock.json", "kind": "dependency", "evidence": {
+        "path": "package-lock.json", "package": "synthetic-package", "version": "1.0"}}]})
+
+
+@pytest.mark.parametrize("retry_succeeds", [False, True])
+def test_scan_retains_validated_proposals_when_a_required_source_is_unreadable(repository, monkeypatch, retry_succeeds):
+    commit(repository, {"helper.md": "Supporting evidence\n"})
+    read = engine.Snapshot.source
+    reads = 0
+
+    def source(item, path, sha=None):
+        nonlocal reads
+        if path == "helper.md":
+            reads += 1
+            if reads == 1 or not retry_succeeds:
+                raise ValueError("Fixture source unavailable.")
+        return read(item, path, sha)
+
+    class EvidenceSession(EmptySession):
+        async def ask(self, stage, key, **kwargs):
+            context, validate = kwargs["context"], kwargs["validate"]
+            if stage == "security_analysis" and context["assigned_path"] != "a.py":
+                return await super().ask(stage, key, **kwargs)
+            reference = next(ref for ref, row in context["citation_sources"].items() if row["path"] == "a.py")
+            citation = {"source_id": reference, "start_line": 1, "end_line": 1}
+            if stage == "security_assessment":
+                return validate({"verdict": "confirmed", "finding_id": None, "explanation": "Fixture confirmed",
+                                 "required_paths": [], "evidence": [citation]})
+            if key.endswith(":0") or retry_succeeds and key.endswith(":1"):
+                assert "helper.md" in context["available_paths"]
+                return validate({"findings": [], "required_paths": ["helper.md"]})
+            proposal = {"title": "Fixture finding", "category": "authorization", "severity": "high", "path": "a.py",
+                        "explanation": "Fixture explanation", "trigger": "Fixture trigger", "impact": "Fixture impact",
+                        "remediation": "Fixture remediation", "verification": "Fixture verification",
+                        "evidence": [citation]}
+            return validate({"findings": [proposal], "required_paths": []})
+
+    monkeypatch.setattr(engine.Snapshot, "source", source)
+    report = asyncio.run(service.scan(repository, session=EvidenceSession(), scanner=scan_result))
+    assert [row["title"] for row in report["findings"]] == ["Fixture finding"]
+    assert report["status"] == ("completed" if retry_succeeds else "partial")
+    assert report["coverage"]["completed_files"] == (2 if retry_succeeds else 1)
+    assert (report["grade"] is not None) == retry_succeeds
+
+
+@pytest.mark.parametrize(("verdict", "has_current", "expected"), [
+    ("fixed", False, "uncertain"),
+    ("still_present", False, "uncertain"),
+    ("still_present", True, "still_present"),
+])
+def test_security_verification_requires_current_evidence(verdict, has_current, expected):
+    class EvidenceSession:
+        async def ask(self, stage, key, *, context, validate, **kwargs):
+            evidence = [{"source_id": identity, "start_line": 1, "end_line": 1}
+                        for identity, row in context["citation_sources"].items()
+                        if row["revision"] == "current" and has_current]
+            return validate({"verdict": verdict, "explanation": "Result", "change_explanation": "Changed",
+                             "original_issue_present": True, "evidence": evidence, "required_paths": []})
+
+    item = SimpleNamespace(redact=lambda text: text, stopped=lambda: False)
+    context = {"available_paths": ["a.py"], "diff": "Changed",
+               "sources": {"original": {"a.py": "value = 1\n"}, "current": {"a.py": "value = 2\n"}}}
+    result, _, _ = asyncio.run(ask(item, EvidenceSession(), "verification", context, "verify",
+                                   {"effort": "medium"}, prepared=True))
+    assert result["verdict"] == expected
+
+
 @pytest.mark.parametrize("findings", [[None], [False], ["finding"], [[]], {}, "findings"])
 def test_history_findings_rejects_malformed_record_containers(findings):
     with pytest.raises(ValueError, match="history"):
@@ -76,7 +187,7 @@ def test_scan_rejects_invalid_previous_before_snapshot(repository, previous):
     {"source_sha": None}, {"evidence": None}, {"evidence": [None]},
     {"evidence": [{"path": []}]}, {"evidence": [{"path": "a.py", "quote": []}]},
     {"locations": None}, {"ai_analysis": None}, {"sources": None}, {"version": "1"},
-    {"state": []}, {"rotation": []},
+    {"state": []}, {"state": "closed"}, {"rotation": []},
     {"state": "false_positive", "fix_verification": None},
     {"state": "false_positive", "fix_verification": []},
     {"state": "false_positive", "fix_verification": "fixed"},

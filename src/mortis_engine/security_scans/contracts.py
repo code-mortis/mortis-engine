@@ -1,5 +1,6 @@
 """Strict portable security analysis contracts."""
 
+from pathlib import PureWindowsPath
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, Field, model_validator
@@ -10,7 +11,7 @@ from mortis_engine.schemas import StrictModel
 
 def relative_path(value):
     if (not isinstance(value, str) or not value or value in {".", ".."} or len(value) > 2000
-            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            or any(ord(c) < 32 or ord(c) == 127 for c in value) or PureWindowsPath(value).drive):
         raise ValueError("Security evidence contains an invalid repository path.")
     return ReviewComment.relative_path(value)
 

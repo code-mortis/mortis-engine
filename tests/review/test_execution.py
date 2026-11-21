@@ -185,6 +185,22 @@ def test_redaction_preserves_line_identity_and_rejects_secrets_in_paths():
         context.sanitize({"path": "secret\nkey"}, credentials)
 
 
+def test_nested_structural_values_with_credentials_are_withheld():
+    from types import SimpleNamespace
+
+    from mortis_engine.review import context
+    from mortis_engine.security_scans.engine import redacted_context
+
+    secret = "fixture-credential"
+    nested = [{"entry": {"name": secret + ".py"}}]
+    item = SimpleNamespace(redact=lambda text: text.replace(secret, "[redacted]"))
+    for sanitize in (lambda value: context.sanitize(value, {"api_key": secret}),
+                     lambda value: redacted_context(item, value)):
+        with pytest.raises(ValueError, match="identifier"):
+            sanitize({"paths": nested})
+        assert sanitize({"source": nested}) == {"source": [{"entry": {"name": "[redacted].py"}}]}
+
+
 def test_recovery_interruption_preserves_completed_units(monkeypatch):
     calls = []
     value = plan(2, same_file=True)

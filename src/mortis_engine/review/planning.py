@@ -327,8 +327,9 @@ class ReviewPlan:
 
 
 def _changes(repo, env, merge_base, head_sha, stopped):
+    revisions = (merge_base, head_sha) if head_sha is not None else ("--cached", merge_base)
     raw = source.git(repo, env, "diff", "--no-ext-diff", "--no-textconv", "--find-renames",
-                     "--name-status", "-z", merge_base, head_sha, stopped=stopped)
+                     "--name-status", "-z", *revisions, stopped=stopped)
     fields, changes, index = raw.rstrip("\0\n").split("\0"), [], 0
     while index < len(fields) and fields[index]:
         status = fields[index]
@@ -457,7 +458,7 @@ def split_units(path, old_path, status, sha, text, patch, rule, maximum, *, sour
 
 def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
                 max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None,
-                full_tree_source_policy=FULL_TREE_SOURCE_POLICY):
+                full_tree_source_policy=FULL_TREE_SOURCE_POLICY, unavailable=None, unavailable_changes=None):
     for sha in (base_sha, head_sha, merge_base):
         if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{40}", sha):
             raise ValueError("PR planning requires exact Git revisions.")
@@ -473,10 +474,26 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
     rules = load_rules(repo, env, trusted_rules_sha or base_sha, options, stopped)
     plan = ReviewPlan(base_sha, head_sha, merge_base, fingerprint({"file_policy": file_policy.policy(options), "rules": rules["digest"]}),
                       rules["digest"], rules, [], [])
+    unavailable = unavailable or {}
+    changes = {path: (old_path, status) for path, old_path, status in _changes(repo, env, merge_base, head_sha, stopped)}
+    omitted_origins = {old_path for old_path, _ in changes.values() if old_path in unavailable}
+    for path, (old_path, status) in (unavailable_changes or {}).items():
+        if changes.get(path) in {None, (None, "D")}:
+            changes[path] = (old_path, status)
+            if status.startswith("R") and changes.get(old_path) == (None, "D"):
+                del changes[old_path]
+    for path in unavailable:
+        changes.setdefault(path, (None, "M" if path in omitted_origins else "A"))
     binary = _binary_paths(repo, env, merge_base, head_sha, stopped)
-    for path, old_path, status in _changes(repo, env, merge_base, head_sha, stopped):
+    for path, (old_path, status) in sorted(changes.items()):
+        if path not in unavailable and old_path in unavailable:
+            old_path, status = None, "A"
         if not all(allowed_path(value, options, rules) for value in (path, old_path) if value):
             plan.exclusions.append({"path": path, "old_path": old_path, "reason": "excluded"})
+        elif path in unavailable:
+            # An omitted worktree file still exists even if the snapshot diff shows a deletion.
+            plan.selected.append(SelectedFile(path, old_path, "M" if status == "D" else status, head_sha,
+                                              error=unavailable[path]))
         elif path in binary or old_path in binary:
             plan.exclusions.append({"path": path, "old_path": old_path, "reason": "binary"})
         elif status == "D":
@@ -491,6 +508,8 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
         return plan
     used = 0
     for selected in plan.selected:
+        if selected.error:
+            continue
         if stopped():
             raise ReviewStopped("The review was cancelled or superseded.")
         try:

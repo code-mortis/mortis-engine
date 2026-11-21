@@ -16,6 +16,7 @@ EXTENSIONS = (
     "woff woff2 ttf otf eot zip tar gz tgz bz2 xz 7z rar pdf doc docx xls xlsx ppt pptx "
     "wasm node so dylib dll exe o obj a lib class jar pyc pyo pem key p12 pfx lock"
 ).split()
+KEY_SUFFIXES = {"pem", "key", "p12", "pfx"}
 NAMES = {
     "agents.md", "claude.md", "gemini.md", ".mcp.json", "copilot-instructions.md",
     "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lockb", "yarn.lock",
@@ -62,6 +63,7 @@ def excluded(path, rules=None):
     if (not parts or path.startswith("/") or PurePosixPath(path).as_posix() != path or "\\" in path
         or ".." in parts or any(ord(c) < 32 or ord(c) == 127 for c in path)):
         return True
-    return (any(matches(value.lower(), pattern) for value in (path, template_source_path(path))
+    return (not KEY_SUFFIXES.isdisjoint(parts[-1].lower().split(".")[1:])
+            or any(matches(value.lower(), pattern) for value in (path, template_source_path(path))
                 for pattern in MANDATORY)
             or any(matches(path, pattern) for pattern in (rules or {}).get("exclusions", [])))

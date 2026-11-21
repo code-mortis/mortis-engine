@@ -9,7 +9,15 @@ from mortis_engine.history import History
 from mortis_engine.review import settings
 
 from .reports import destinations, output_options, write_outputs
-from .review import execution_options, limit_overrides, options, progress_display, selected, terminal
+from .review import (
+    execution_options,
+    limit_overrides,
+    options,
+    progress_display,
+    selected,
+    terminal_block,
+    terminal_line,
+)
 
 
 def run(args):
@@ -54,14 +62,14 @@ def _run(args):
             lines.extend(f"{r['finding_id']} — {r['verdict']}: " + ((r.get("result") or {}).get("explanation") or r.get("error", ""))
                          for r in result["verifications"])
         elif args.command == "summary":
-            lines.append(result["result"]["narrative"])
+            lines.extend(terminal_block(result["result"]["narrative"]))
             lines.extend(f"{g['title']} — {g['description']} ({', '.join(g['paths'])})" for g in result["result"]["groups"])
             if result["result"].get("diagram"):
                 from mortis_engine.review.summary import diagram_section
-                lines.append(diagram_section(result["result"]["diagram"]))
+                lines.extend(diagram_section(result["result"]["diagram"]).split("\n"))
         else:
-            lines.append(result["background"])
-        print(terminal("\n".join(lines)))
+            lines.extend(terminal_block(result["background"]))
+        print("\n".join(map(terminal_line, lines)))
     return 0 if result["status"] == "completed" else 2 if result["status"] == "partial" else 1
 
 
@@ -77,8 +85,8 @@ def runs(args):
             print(json.dumps(value, indent=2))
         else:
             rows = history.list()
-            print(terminal("\n".join(f"{r['id']}  {r['kind']}  {r['scope']}  " +
-                ("finished" if r["finished"] else "unfinished") for r in rows)) or "No saved runs.")
+            print("\n".join(terminal_line(f"{r['id']}  {r['kind']}  {r['scope']}  "
+                f"{'finished' if r['finished'] else 'unfinished'}") for r in rows) or "No saved runs.")
 
 
 def build_graph(args):

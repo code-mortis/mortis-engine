@@ -7,6 +7,7 @@ from review.git_helpers import commit, git
 
 from mortis_engine import cli, config, gateway
 from mortis_engine.code_graph import transport
+from mortis_engine.code_graph.contracts import EXTRACTOR_VERSION, LEGACY_EXTRACTOR_VERSION
 from mortis_engine.history import History
 from mortis_engine.review import engine, review_local, settings
 from mortis_engine.schemas import Response, Usage
@@ -154,6 +155,7 @@ def test_resume_pins_limits_and_legacy_uses_fixed_defaults(repository, monkeypat
             plan["overrides"] = {}
             with history.db:
                 history.db.execute("UPDATE runs SET plan=? WHERE id=?", (json.dumps(plan), run_id))
+                history.db.execute("DELETE FROM review_graphs WHERE run=?", (run_id,))
         saved_plan = history.row(run_id)["plan"]
     assert cli.main(["review", "--resume", run_id, "--graph-max-files", "20"]) == 1
     assert "--resume uses" in capsys.readouterr().err
@@ -164,7 +166,60 @@ def test_resume_pins_limits_and_legacy_uses_fixed_defaults(repository, monkeypat
     assert cli.main(["review", "--resume", run_id, "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["run_id"] == run_id
-    expected = DEFAULTS if legacy else {**CONFIGURED, "max_source_bytes": 300}
-    assert captured == [{**CONFIGURED, "max_source_bytes": 300}, expected]
+    assert captured == [{**CONFIGURED, "max_source_bytes": 300}, *([DEFAULTS] if legacy else [])]
     with History(repository) as history:
         assert history.row(run_id)["plan"] == saved_plan
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_resume_reuses_completed_batches_with_original_graph_inputs(repository, monkeypatch, capsys, legacy):
+    commit(repository, {"app.js": 'import { value } from "./dep.js";\nconsole.log(value);\n',
+                        "dep.js": "export const value = 1;\n"})
+    current_image = transport.DEFAULT_IMAGE
+    old_or_current = transport.LEGACY_IMAGE if legacy else current_image
+    monkeypatch.setattr(transport, "DEFAULT_IMAGE", old_or_current)
+    extracted = []
+
+    def extract(request, *, image, **_kwargs):
+        assert image == old_or_current
+        assert request.extractor_version == (LEGACY_EXTRACTOR_VERSION if legacy else EXTRACTOR_VERSION)
+        extracted.append(image)
+        return parsed(request)
+
+    monkeypatch.setattr(transport, "extract", extract)
+    original_run = engine.run
+
+    def interrupt_after_analysis(*args, **kwargs):
+        assert original_run(*args, **kwargs)[0] == "completed"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(engine, "run", interrupt_after_analysis)
+    assert cli.main(["review", "--all", "--graph"]) == 130
+    capsys.readouterr()
+    with History(repository) as history:
+        run_id = history.list()[0]["id"]
+        attempts = history.attempts(run_id)
+        graphs, _ = history.review_graph(run_id)
+        assert graphs["app.js"]["sources"][0]["path"] == "dep.js"
+        if legacy:
+            with history.db:
+                history.db.execute("DELETE FROM review_graphs WHERE run=?", (run_id,))
+    monkeypatch.setattr(transport, "DEFAULT_IMAGE", current_image)
+    if not legacy:
+        monkeypatch.setattr(transport, "extract", lambda *args, **kwargs: pytest.fail("Resume started the parser"))
+    monkeypatch.setattr(engine, "run", original_run)
+    original_send = gateway.send
+
+    async def send(connection, credentials, request, **kwargs):
+        assert "task_key" not in request.output_schema["properties"], "Resume dispatched completed analysis"
+        return await original_send(connection, credentials, request, **kwargs)
+
+    monkeypatch.setattr(gateway, "send", send)
+    assert cli.main(["review", "--resume", run_id, "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "completed"
+    assert report["code_graph"]["enriched_paths"] == 2
+    assert len(extracted) == (2 if legacy else 1)
+    with History(repository) as history:
+        final = history.attempts(run_id)
+        assert {key: value for key, value in final.items() if key[0] == "analysis"} == attempts

@@ -3,10 +3,13 @@
 import asyncio
 import threading
 import time
+from concurrent.futures import Future
 
 import httpx
 
 from .security import endpoint_addresses
+
+_DNS_SLOTS = threading.BoundedSemaphore(8)
 
 
 class EndpointPolicyError(ValueError):
@@ -18,6 +21,37 @@ def addresses(request):
         return endpoint_addresses(str(request.url.copy_with(query=None, fragment=None)))
     except ValueError as exc:
         raise EndpointPolicyError(str(exc)) from exc
+
+
+def resolve_sync(resolve, timeout):
+    timeout = min(10 if timeout is None else timeout, threading.TIMEOUT_MAX)
+    deadline = time.monotonic() + timeout
+    slots = _DNS_SLOTS
+    if timeout <= 0 or not slots.acquire(timeout=timeout):
+        raise httpx.ConnectTimeout("Endpoint resolution exceeded its deadline")
+    result = Future()
+
+    def lookup():
+        try:
+            result.set_result(resolve())
+        except BaseException as exc:
+            result.set_exception(exc)
+        finally:
+            slots.release()
+
+    # getaddrinfo cannot be interrupted. Keep timed-out work bounded and let the process exit.
+    try:
+        threading.Thread(target=lookup, daemon=True).start()
+    except BaseException:
+        slots.release()
+        raise
+    try:
+        resolved = result.result(timeout=max(0, deadline - time.monotonic()))
+    except TimeoutError as exc:
+        raise httpx.ConnectTimeout("Endpoint resolution exceeded its deadline") from exc
+    if time.monotonic() >= deadline:
+        raise httpx.ConnectTimeout("Endpoint resolution exceeded its deadline")
+    return resolved
 
 
 def pinned_request(request, address, started):
@@ -38,7 +72,7 @@ class PinnedHTTPTransport(httpx.BaseTransport):
 
     def handle_request(self, request):
         started = time.monotonic()
-        resolved = addresses(request)
+        resolved = resolve_sync(lambda: addresses(request), request.extensions.get("timeout", {}).get("connect"))
         origin = (request.url.scheme, request.url.host, request.url.port)
         with self._lock:
             # Separate origins must never reuse a TLS session merely because their IPs match.

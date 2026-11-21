@@ -15,6 +15,7 @@ from mortis_engine.history import encode
 from mortis_engine.llm_http import InferenceError
 from mortis_engine.review import engine, evidence, planning, service, source, verification, workflows
 from mortis_engine.review.settings import RepoSettings
+from mortis_engine.review.snapshots import Snapshot
 from mortis_engine.schemas import Response, ToolCall, Usage
 from mortis_engine.workflow import Session
 
@@ -298,8 +299,8 @@ def test_resumed_review_probes_unmarked_embedded_verification_only(repo, monkeyp
     @contextmanager
     def inputs(*args):
         with source.local_repository(repo) as (isolated, env):
-            yield SimpleNamespace(repo=isolated, env=env, mode="commits", base_sha=sha,
-                                  head_sha=sha, merge_base=sha, settings_sha=sha), saved
+            yield Snapshot(repo=isolated, env=env, mode="commits", base_sha=sha,
+                           head_sha=sha, merge_base=sha, settings_sha=sha), saved
 
     def stop(repo, env, plan, connection, options, credentials, **kwargs):
         assert options.get("_unmarked_verification_policy", False) != explicit_policy

@@ -13,6 +13,7 @@ from . import transport
 from .contracts import (
     APP_EXTRACTOR_VERSION,
     EXTRACTOR_VERSION,
+    LEGACY_EXTRACTOR_VERSION,
     MAX_TREE_ENTRIES,
     CodeGraphLimits,
     CodeGraphRequest,
@@ -25,7 +26,7 @@ MAX_BYTES_PER_PATH = 12 * 1024
 MAX_BYTES_PER_RUN = 48 * 1024
 
 
-def _request(repo, env, plan, options, credentials, stopped, *, image):
+def _request(repo, env, plan, options, credentials, stopped, *, image, legacy):
     limits = CodeGraphLimits.model_validate(options.get("code_graph_limits") or {})
     output = source.git(repo, env, "ls-tree", "-r", "-z", "-l", plan.head_sha, stopped=stopped)
     manifest = []
@@ -72,21 +73,27 @@ def _request(repo, env, plan, options, credentials, stopped, *, image):
         files.append(record)
     policy = hashlib.sha256(json.dumps({"policy": file_policy.policy(options), "rules": plan.rules_digest},
                                       sort_keys=True).encode()).hexdigest()
-    version = APP_EXTRACTOR_VERSION if image == transport.APP_IMAGE else EXTRACTOR_VERSION
+    version = EXTRACTOR_VERSION
+    if image == transport.APP_IMAGE:
+        version = APP_EXTRACTOR_VERSION
+    elif legacy or image == transport.LEGACY_IMAGE:
+        version = LEGACY_EXTRACTOR_VERSION
     return CodeGraphRequest(repository_id=1, commit_sha=plan.head_sha, extractor_version=version,
                             policy_digest=policy, files=files, limits=limits)
 
 
-def enrich(repo, env, plan, options, credentials, stopped=lambda: False):
+def enrich(repo, env, plan, options, credentials, stopped=lambda: False, *, legacy=False):
     """Return bounded one-hop relative imports, with truthful optional omission diagnostics."""
     configuration = options.get("_graph")
     if not configuration:
         return {}, {"status": "disabled"}
     configuration = configuration if isinstance(configuration, dict) else {}
     try:
-        image = configuration.get("image", transport.DEFAULT_IMAGE)
-        request = _request(repo, env, plan, options, credentials, stopped, image=image)
+        image = configuration.get("image", transport.LEGACY_IMAGE if legacy else transport.DEFAULT_IMAGE)
+        request = _request(repo, env, plan, options, credentials, stopped, image=image, legacy=legacy)
         parsed = transport.extract(request, image=image, stopped=stopped)
+        parse_error = any(item.reason == "parse_error" for item in parsed.files)
+        partial_files = sum(item.status == "partial" for item in parsed.files)
         manifest = {item.path: item for item in parsed.files}
         sources = {item.path: item for item in request.files}
         graph, consumed = {}, 0
@@ -118,13 +125,15 @@ def enrich(repo, env, plan, options, credentials, stopped=lambda: False):
                     "notice": "Untrusted supporting source. Relative file imports identify context candidates. "
                               "Report findings only for the assigned path and validate every citation.",
                     "commit_sha": plan.head_sha, "snapshot_id": request.policy_digest,
-                    "index_status": "partial" if any(item.status == "partial" for item in parsed.files) else "ready",
+                    "index_status": "partial" if partial_files or parse_error else "ready",
                     "truncated": truncated, "sources": selected,
                     "capabilities": ["declarations", "relative_file_imports"],
                     "gaps": ["Calls are counted without caller resolution.", "Imports using aliases or external modules remain unresolved."],
                 }
-        return graph, {"status": "ready", "commit_sha": plan.head_sha, "extractor_version": parsed.extractor_version,
-                       "files": len(parsed.files), "partial_files": sum(f.status == "partial" for f in parsed.files),
+        return graph, {"status": "partial" if parse_error else "ready",
+                       **({"reason": "Some files could not be parsed within the fact limits."} if parse_error else {}),
+                       "commit_sha": plan.head_sha, "extractor_version": parsed.extractor_version,
+                       "files": len(parsed.files), "partial_files": partial_files,
                        "enriched_paths": len(graph), "source_bytes": consumed}
     except ReviewStopped:
         raise

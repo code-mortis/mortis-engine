@@ -5,6 +5,41 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+PROTECTED_BODY_FIELDS = {
+    "model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream",
+    "api_key", "max_tokens", "max_completion_tokens", "max_output_tokens", "response_format",
+    "inferenceConfig", "additionalModelRequestFields", "toolConfig", "outputConfig",
+    "store", "prompt_cache_key", "previous_response_id", "conversation", "background", "authorization", "extra_headers", "include",
+}
+
+
+def extra_body_entries(extra):
+    """Flatten configurable body fields and identify engine-managed paths."""
+    if not isinstance(extra, dict):
+        raise ValueError("extra_body must be a JSON object")
+
+    def expand(parts, value):
+        if isinstance(value, dict) and parts[0] in {"text", "output_config", "reasoning"}:
+            for key, item in value.items():
+                if not isinstance(key, str) or not key or "." in key:
+                    raise ValueError("extra_body requires nonempty property names")
+                yield from expand([*parts, key], item)
+            return
+        strict = (len(parts) >= 3 and parts[0] == "tools" and parts[1].isdigit()
+                  and parts[2:] in (["strict"], ["function", "strict"]))
+        if strict and type(value) is not bool:
+            raise ValueError("Tool strict options must be boolean")
+        protected = (not strict and parts[0] in PROTECTED_BODY_FIELDS
+                     or len(parts) == 1 and parts[0] in {"text", "output_config", "reasoning"}
+                     or ".".join(parts).startswith(("text.format", "output_config.format"))
+                     or parts[0].lower() in {"headers", "authentication"})
+        yield parts, value, protected, strict
+
+    for dotted, value in extra.items():
+        if not isinstance(dotted, str) or not dotted or any(not part for part in dotted.split(".")):
+            raise ValueError("extra_body requires nonempty property names")
+        yield from expand(dotted.split("."), value)
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
@@ -28,6 +63,26 @@ class ConnectionInput(StrictModel):
             raise ValueError("Choose a model for this API connection")
         if self.protocol != "anthropic-bedrock" and any(k.startswith("aws_") for k in self.options):
             raise ValueError("AWS options require the Bedrock protocol")
+        budget_aliases = {
+            "openai": {"max_tokens", "max_completion_tokens"},
+            "openai-responses": {"max_output_tokens"},
+            "anthropic": {"max_tokens"}, "anthropic-bedrock": {"max_tokens"},
+        }[self.protocol]
+        extra = self.options.get("extra_body", {})
+        for parts, value, protected, _ in extra_body_entries(extra):
+            if not protected:
+                continue
+            if len(parts) == 1 and parts[0] in budget_aliases and type(value) is int and value > 0:
+                # The encoder checks this against the effective per-request limit.
+                continue
+            if self.protocol == "openai-responses" and (
+                (parts == ["store"] and value is False)
+                or (parts == ["include"] and value == ["reasoning.encrypted_content"])
+            ):
+                continue
+            raise ValueError("extra_body cannot replace protected inference inputs, output limits or authentication")
+        if self.protocol == "openai" and budget_aliases <= extra.keys():
+            raise ValueError("Configure only one protected Chat output budget alias")
         return self
 
     @field_validator("options")
@@ -44,11 +99,6 @@ class ConnectionInput(StrictModel):
             type(value["timeout_sec"]) is not int or not 5 <= value["timeout_sec"] <= 900
         ):
             raise ValueError("timeout_sec must be a whole number from 5 to 900 seconds.")
-        if "extra_body" in value:
-            if not isinstance(value["extra_body"], dict):
-                raise ValueError("extra_body must be a JSON object with keys and values.")
-            if set(value["extra_body"]) & {"messages", "input", "tools", "model", "stream", "api_key"}:
-                raise ValueError("extra_body cannot replace review inputs, tools, or authentication")
         if "retry_codes" in value and (
             not isinstance(value["retry_codes"], list)
             or any(type(code) is not int or not 400 <= code < 500 for code in value["retry_codes"])

@@ -5,12 +5,19 @@ import re
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from itertools import batched
 from pathlib import Path
+
+from mortis_engine.code_graph.contracts import blob_sha
 
 from . import planning, settings, source
 
 MAX_SOURCE_BYTES = 20_000_000
 MAX_SNAPSHOT_BYTES = 100_000_000
+
+
+class OversizedWorktreeSource(ValueError):
+    pass
 
 
 @dataclass
@@ -24,6 +31,8 @@ class Snapshot:
     mode: str
     excluded: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    unavailable: dict[str, str] = field(default_factory=dict)
+    unavailable_changes: dict[str, tuple[str | None, str]] = field(default_factory=dict)
 
 
 def _worktree_root(path):
@@ -55,7 +64,7 @@ def _index(repo, env, git_dir):
 
 
 def _entries(repo, env):
-    values = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z")
+    values = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z", strict_utf8=True)
     result = {}
     for value in values.split("\0"):
         if not value:
@@ -68,18 +77,9 @@ def _entries(repo, env):
     return result
 
 
-def _cached_times(repo, env):
-    output = source.git(repo, env, "ls-files", "--debug", "-z")
-    pattern = (r"([^\0]+)\0  ctime: (\d+):(\d+)\n  mtime: (\d+):(\d+)\n"
-               r"  dev: [^\n]+\n  uid: [^\n]+\n  size: (\d+)\tflags: [^\n]+\n")
-    return {match[1]: (int(match[2]) * 1_000_000_000 + int(match[3]),
-                      int(match[4]) * 1_000_000_000 + int(match[5]), int(match[6]))
-            for match in re.finditer(pattern, output)}
-
-
 def _worktree_stat(root, path):
     parts = source.repository_path(path).split("/")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory = os.open(root, flags)
     try:
         for part in parts[:-1]:
@@ -98,7 +98,7 @@ def _worktree_stat(root, path):
 def _worktree_bytes(root, path):
     """Open every path component without following repository symbolic links."""
     parts = source.repository_path(path).split("/")
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory = os.open(root, directory_flags)
     try:
         for part in parts[:-1]:
@@ -112,8 +112,8 @@ def _worktree_bytes(root, path):
         if not stat.S_ISREG(info.st_mode):
             raise ValueError("Working-tree source must be a regular file or symbolic link.")
         if info.st_size > MAX_SOURCE_BYTES:
-            raise ValueError("Working-tree source exceeds the 20 MB read limit.")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            raise OversizedWorktreeSource("Working-tree source exceeds the 20 MB read limit.")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         with os.fdopen(os.open(parts[-1], flags, dir_fd=directory), "rb") as stream:
             opened = os.fstat(stream.fileno())
             if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
@@ -121,7 +121,7 @@ def _worktree_bytes(root, path):
             value = stream.read(MAX_SOURCE_BYTES + 1)
             after = os.fstat(stream.fileno())
         if len(value) > MAX_SOURCE_BYTES:
-            raise ValueError("Working-tree source exceeds the 20 MB read limit.")
+            raise OversizedWorktreeSource("Working-tree source exceeds the 20 MB read limit.")
         if (opened.st_size, opened.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise ValueError("Working-tree source changed while the snapshot was being created.")
         return "100755" if opened.st_mode & 0o111 else "100644", value
@@ -151,31 +151,34 @@ def _tree(repo, env, entries):
     return source.git(repo, temporary_env, "write-tree").strip()
 
 
-def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
+def _text_paths(repo, env, paths, stopped):
+    # Ask the copied index for declarative EOL attributes without loading filter drivers.
+    records = source.git(repo, env, "check-attr", "--cached", "-z", "--stdin", "text", "eol",
+                         input_bytes=b"".join(path.encode() + b"\0" for path in paths), stopped=stopped,
+                         strict_utf8=True).split("\0")[:-1]
+    return {path for path, _, text, _, _, eol in batched(records, 6, strict=True)
+            if text not in {"unset", "auto"} and (text == "set" or eol in {"lf", "crlf"})}
+
+
+def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target):
     _index(repo, env, git_dir)
     staged = _entries(repo, env)
-    excluded = []
+    excluded, unavailable = [], {}
     if mode == "staged":
-        return _tree(repo, env, staged), excluded
+        return _tree(repo, env, staged), excluded, unavailable, {}
+    if not all(getattr(os, flag, 0) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")) or not {
+        os.open, os.stat, os.readlink
+    }.issubset(os.supports_dir_fd) or os.stat not in os.supports_follow_symlinks:
+        raise ValueError("Working-tree snapshots require platform support for safe no-follow file access. Use --staged.")
     paths = source.git(repo, env, "-c", "core.fsmonitor=false", "--work-tree=" + str(root),
                        "ls-files", "--cached", "--others", "--exclude-standard", "--full-name", "-z",
-                       stopped=stopped).split("\0")
-    flags = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "-v", "-z").split("\0")
+                       stopped=stopped, strict_utf8=True).split("\0")
+    flags = source.git(repo, env, "-c", "core.fsmonitor=false", "ls-files", "-v", "-z", strict_utf8=True).split("\0")
     sparse_paths = {value[2:] for value in flags if value[:2].lower() == "s "}
-    # Validate path traversal before Git inspects worktree stat information.
-    stats = {path: _worktree_stat(root, path) for path in staged}
-    cached_times = _cached_times(repo, env)
-    source.git(repo, env, "--work-tree=" + str(root), "update-index", "--no-assume-unchanged", "-z", "--stdin",
-               input_bytes=b"".join(path.encode() + b"\0" for path in staged), stopped=stopped)
-    changed = set(filter(None, source.git(
-        repo, env, "-c", "core.fsmonitor=false", "--work-tree=" + str(root),
-        "diff-files", "--name-only", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "-z",
-        stopped=stopped).split("\0")))
-    # Some Git builds ignore subsecond stat differences when reporting diff-files.
-    changed.update(path for path, info in stats.items() if info is not None
-                   and cached_times.get(path) != (info.st_ctime_ns, info.st_mtime_ns, info.st_size))
+    paths = sorted(set(filter(None, paths)))
+    text_paths = None
     entries, total = {}, 0
-    for path in sorted(set(filter(None, paths))):
+    for path in paths:
         source.repository_path(path)
         if not planning.allowed_path(path, options, rules):
             excluded.append({"path": path, "reason": "excluded"})
@@ -186,21 +189,45 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
                 continue
         if stopped():
             raise source.ReviewStopped("The review was cancelled.")
-        if path in staged and (path not in changed or staged[path][0] == "160000"):
+        if path in staged and staged[path][0] == "160000":
             entries[path] = staged[path]
             continue
-        value = _worktree_bytes(root, path)
+        try:
+            value = _worktree_bytes(root, path)
+        except OversizedWorktreeSource as exc:
+            # Keep unreadable files out of the pinned source tree and report target gaps to the planner.
+            unavailable[path] = str(exc)
+            continue
         if value is None:
             if path in sparse_paths:
                 entries[path] = staged[path]
             continue
         file_mode, content = value
+        # Cached stat data cannot prove the worktree file still matches the staged object.
+        if path in staged and staged[path] == (file_mode, blob_sha(content)):
+            entries[path] = staged[path]
+            continue
+        if file_mode in {"100644", "100755"} and b"\r\n" in content:
+            if text_paths is None:
+                text_paths = _text_paths(repo, env, paths, stopped)
+            if path in text_paths:
+                content = content.replace(b"\r\n", b"\n")
+                if path in staged and staged[path] == (file_mode, blob_sha(content)):
+                    entries[path] = staged[path]
+                    continue
         total += len(content)
         if total > MAX_SNAPSHOT_BYTES:
             raise ValueError("Working-tree source exceeds the 100 MB snapshot admission limit.")
         sha = source.git(repo, env, "hash-object", "-w", "--stdin", input_bytes=content, stopped=stopped).strip()
         entries[path] = (file_mode, sha)
-    return _tree(repo, env, entries), excluded
+    unavailable_changes = {}
+    if any(path in staged for path in unavailable):
+        # Keep index metadata for omitted files without putting their staged blobs in the snapshot.
+        unavailable_changes = {path: (old_path, status)
+            for path, old_path, status in planning._changes(repo, env, target, None, stopped)
+            if path in unavailable and status != "D"
+            and (not status.startswith("R") or (old_path not in entries and old_path not in unavailable))}
+    return _tree(repo, env, entries), excluded, unavailable, unavailable_changes
 
 
 @contextmanager
@@ -232,8 +259,10 @@ def snapshot(repository, *, mode="commits", base=None, head="HEAD", object_cache
             if overrides:
                 settings.apply_overrides(options, overrides)
             rules = planning.load_rules(repo, env, target, options, stopped)
-            tree, excluded = _local_tree(repo, env, root, source.find_repository(root), mode, stopped, options, rules)
+            tree, excluded, unavailable, unavailable_changes = _local_tree(
+                repo, env, root, source.find_repository(root), mode, stopped, options, rules, target)
             pinned = _commit(repo, env, tree, target)
             if object_cache is not None:
                 source._retain_objects(repo / "objects", source._object_cache(object_cache))
-            yield Snapshot(repo, env, target, pinned, target, target, mode, excluded)
+            yield Snapshot(repo, env, target, pinned, target, target, mode, excluded, unavailable=unavailable,
+                           unavailable_changes=unavailable_changes)

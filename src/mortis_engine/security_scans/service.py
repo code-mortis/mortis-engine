@@ -257,7 +257,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             raise ValueError("Previous security finding history contains invalid source evidence.")
         engine.relative_path(old["path"])
         engine.relative_path(evidence.get("path"))
-        if (not isinstance(old.get("state", "open"), str)
+        if (old.get("state", "open") not in ("open", "resolved", "false_positive", "accepted_risk")
                 or type(old.get("version", 0)) is not int or old.get("version", 0) < 0
                 or old.get("rotation") is not None and not isinstance(old["rotation"], dict)
                 or not isinstance(old.get("fix_verification", {}), dict)
@@ -363,12 +363,14 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             try:
                 context = {"assigned_path": path, "head_sha": sha, "diff": "",
                            "sources": {"current": {path: item.source(path)}}}
-                value, context_paths = await ask(item, session, "analysis", context, "analysis:" + path, options)
+                value, context_paths, complete = await ask(item, session, "analysis", context, "analysis:" + path, options)
                 if not continuous:
                     # Recover the original field order after replaying cached JSON.
                     value = SecurityAnalysis.model_validate(value, strict=True).model_dump()
                 proposals_by_path[path] = [(proposal, context_paths) for proposal in value["findings"]]
-                units.append({"task": "analysis:" + path, "status": "completed"})
+                units.append({"task": "analysis:" + path, "status": "completed" if complete else "failed"})
+                if not complete:
+                    problems.append(f"Security analysis incomplete for {path}: required source remains unavailable.")
             except Exception as exc:
                 units.append({"task": "analysis:" + path, "status": "failed"})
                 problems.append(f"Security analysis incomplete for {path}: {item.redact(str(exc))[:1000]}")
@@ -437,7 +439,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     return _legacy_assessment_contexts(supplied, (
                         finding_positions.get(old["id"]) for old in context["history"]), legacy_completed)
 
-                assessed, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options,
+                assessed, _, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options,
                     prepared=saved is not None, pin=pin if saved_history else None,
                     legacy_contexts=legacy_contexts if legacy_completed else None)
                 if not continuous:
@@ -517,7 +519,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     current_source = item.current_source(current_path, model_context=True)
                     if current_source is not None:
                         context["sources"]["current"][current_path] = current_source
-                    verdict, _ = await ask(item, session, "verification", context, "verification:" + old["id"], options)
+                    verdict, _, _ = await ask(item, session, "verification", context, "verification:" + old["id"], options)
                 else:
                     checking = asyncio.create_task(asyncio.to_thread(deterministic_fix, item, old, result,
                         advisory_lookup=lambda evidence, packages: advisories.dependency_advisory(evidence, packages, item.stopped, advisory_cache)))

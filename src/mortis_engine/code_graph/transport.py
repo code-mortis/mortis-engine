@@ -14,7 +14,8 @@ from mortis_engine.review.errors import ReviewStopped
 from .contracts import EXTRACTION_SECONDS, MAX_REQUEST_BYTES, MAX_RESULT_BYTES, CodeGraphResult
 from .validation import validate_result
 
-DEFAULT_IMAGE = "mortis-engine-parser:0.1.1"
+DEFAULT_IMAGE = "mortis-engine-parser:0.1.2"
+LEGACY_IMAGE = "mortis-engine-parser:0.1.1"
 APP_IMAGE = "code-mortis-code-graph:0.1.0"
 
 

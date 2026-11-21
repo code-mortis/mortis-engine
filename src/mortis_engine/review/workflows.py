@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from mortis_engine.assessment_dispatch import dispatch, replay_order
 from mortis_engine.llm_http import InferenceError
+from mortis_engine.security_scans.payload import check_saved_sources
 
 from . import assessment, background, evidence, planning, policy, summary, verification
 from . import context as review_context
@@ -92,6 +93,8 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
                 context = prepared
     else:
         context = copy.deepcopy(pinned_context)
+    if pinned_context is not None:
+        check_saved_sources(context)
     # Same-head history does not establish attribution against this review's merge base.
     result = None if context.get("attribution", {}).get("version") == 1 else assessment.exact_repeat(context)
     if result is not None:
@@ -175,7 +178,8 @@ async def _verify_one(repo, env, original, original_sha, head_sha, options, sess
                             instructions, verification.output_schema(), verification.validate_response, options)
         requested = result.pop("required_sources", [])
         if not requested:
-            return result
+            # Resumed tasks can return a verdict saved by an earlier validator.
+            return verification.validate_verdict(result, context)
         if round == 2:
             return {**result, "verdict": "uncertain",
                     "explanation": "Verification still needs evidence after three passes. " + result["explanation"]}

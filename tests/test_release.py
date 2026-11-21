@@ -6,11 +6,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from textwrap import dedent
 from unittest.mock import patch
 
 import pytest
 
-SPEC = importlib.util.spec_from_file_location("release_check", Path(__file__).resolve().parents[1] / "scripts/release_check.py")
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github/workflows/release.yml"
+SPEC = importlib.util.spec_from_file_location("release_check", ROOT / "scripts/release_check.py")
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 SHA = "a" * 40
@@ -76,7 +79,11 @@ def test_release_requires_main_ancestry(tmp_path):
 
 
 @pytest.mark.parametrize("annotated", [False, True])
-def test_release_resolves_real_tags_and_rejects_off_main_commits(tmp_path, monkeypatch, annotated):
+@pytest.mark.parametrize("workflow", [
+    False,
+    pytest.param(True, marks=pytest.mark.skipif(not WORKFLOW.is_file(), reason="Workflow is outside the source archive")),
+])
+def test_release_resolves_real_tags_and_rejects_off_main_commits(tmp_path, monkeypatch, annotated, workflow):
     for name in os.environ:
         if name.startswith("GIT_"):
             monkeypatch.delenv(name)
@@ -97,10 +104,24 @@ def test_release_resolves_real_tags_and_rejects_off_main_commits(tmp_path, monke
     git("update-ref", "refs/remotes/origin/main", main)
     tag_args = ("-a", "-m", "fixture") if annotated else ()
     git("tag", *tag_args, "v0.1.0")
-    release.check_release("v0.1.0", main, tmp_path)
+    def check(sha):
+        if not workflow:
+            release.check_release("v0.1.0", sha, tmp_path)
+            return
+        step = WORKFLOW.read_text().split("name: Verify main ancestry before loading the release checkout\n", 1)[1]
+        guard = dedent(step.split("run: |\n", 1)[1].split("      - ", 1)[0])
+        subprocess.run(["bash", "-e", "-o", "pipefail", "-c", guard], cwd=tmp_path,
+                       env={**os.environ, "RELEASE_TAG": "v0.1.0", "RELEASE_SHA": sha}, capture_output=True, check=True)
+
+    check(main)
+    assert git("rev-parse", "HEAD") == main
     git("checkout", "-qb", "unmerged")
     git("commit", "--allow-empty", "-qm", "unmerged fixture")
     git("tag", "-d", "v0.1.0")
     git("tag", *tag_args, "v0.1.0")
+    unmerged = git("rev-parse", "HEAD")
+    if workflow:
+        git("checkout", "-q", "main")
     with pytest.raises(subprocess.CalledProcessError):
-        release.check_release("v0.1.0", git("rev-parse", "HEAD"), tmp_path)
+        check(unmerged)
+    assert git("rev-parse", "HEAD") == (main if workflow else unmerged)

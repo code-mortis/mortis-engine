@@ -7,7 +7,7 @@ import time
 from mortis_engine import config, operations
 from mortis_engine.history import History
 
-from .review import progress_display, select_profile, terminal
+from .review import progress_display, select_profile, terminal_block, terminal_line
 
 
 def assessments(args):
@@ -15,10 +15,13 @@ def assessments(args):
     if args.format == "json":
         print(json.dumps(result, indent=2))
     else:
-        lines = [f"{row['candidate_id']}  {row['path']}  {row['status']}  "
-                 + ("retry eligible" if row["retry_eligible"] else row["blocked_reason"])
-                 + ("\n  " + row["error"] if row.get("error") else "") for row in result["candidates"]]
-        print(terminal("\n".join(lines) or result.get("blocked_reason", "No saved assessment candidates.")))
+        lines = []
+        for row in result["candidates"]:
+            decision = "retry eligible" if row["retry_eligible"] else row["blocked_reason"]
+            lines.append(f"{row['candidate_id']}  {row['path']}  {row['status']}  {decision}")
+            if row.get("error"):
+                lines.extend(terminal_block(row["error"]))
+        print("\n".join(map(terminal_line, lines or [result.get("blocked_reason", "No saved assessment candidates.")])))
     return 0
 
 
@@ -47,7 +50,7 @@ def assess(args):
                 finding = result["finding"]
                 lines.append(f"{finding['path']}: {finding.get('title') or finding.get('content', '')} ({finding['id']})")
             lines.append((result.get("result") or {}).get("explanation", result.get("error", "")))
-            print(terminal("\n".join(lines)))
+            print("\n".join(map(terminal_line, lines)))
         return 0 if result["status"] == "completed" else 1
     finally:
         print(f"Elapsed: {time.monotonic() - started:.1f}s", file=sys.stderr, flush=True)

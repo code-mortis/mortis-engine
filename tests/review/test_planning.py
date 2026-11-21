@@ -53,6 +53,19 @@ def test_rename_from_excluded_path_cannot_restore_access(repo):
     assert result.exclusions[0]["reason"] == "excluded"
 
 
+@pytest.mark.parametrize(("status", "old_path"), [("A", None), ("R100", "old.py"), ("C100", "old.py")])
+def test_unavailable_change_keeps_git_status_and_origin(repo, monkeypatch, status, old_path):
+    commit(repo, {"old.py": "value = 1\n"})
+    git(repo, "checkout", "-qb", "feature")
+    commit(repo, {"new.py": "value = 1\n"})
+    monkeypatch.setattr(planning, "_changes", lambda *_: [("new.py", old_path, status)])
+    result = plan(repo, unavailable={"new.py": "Source unavailable"})
+    selected, = result.selected
+    assert (selected.path, selected.old_path, selected.status, selected.error) == (
+        "new.py", old_path, status, "Source unavailable")
+    assert not selected.units
+
+
 def test_symlink_and_oversized_line_fail_coverage(repo):
     commit(repo, {"app.py": "x=1\n"})
     git(repo, "checkout", "-qb", "feature")
@@ -235,6 +248,7 @@ def test_language_template_admission_preserves_trusted_rules_and_exclusions(repo
 
 
 @pytest.mark.parametrize("path", ["tls.pem.in", "tls.key.in", "tls.pem.in.in", "tls.KEY.IN",
+                                  "tls.PEM.backup.in", "fixture.p12.txt", "downloads/archive.tar.in",
                                   ".env.in", ".env.production.in", "config/.env.in",
                                   "config/credentials.rb.in", "AGENTS.md.in"])
 def test_template_include_cannot_bypass_mandatory_exclusions(path):
@@ -243,8 +257,9 @@ def test_template_include_cannot_bypass_mandatory_exclusions(path):
 
 
 @pytest.mark.parametrize("path", ["service.py.in", "packaging/homebrew/noodle.rb.in",
-                                  "workflow.yml.in", "frontend/app.ts.in"])
-def test_known_source_templates_admitted(path):
+                                  "workflow.yml.in", "frontend/app.ts.in", "config.node.ts",
+                                  "frontend/format.svg.tsx", "downloads/archive.tar.json"])
+def test_known_source_and_templates_admitted(path):
     rules = {"layers": [{"include": [], "exclude": [], "rules": []}]}
     assert planning.allowed_path(path, {}, rules)
 
@@ -289,3 +304,14 @@ def test_git_metadata_permission_error_is_not_treated_as_disappearance(tmp_path,
     monkeypatch.setattr(Path, "lstat", unreadable_entry)
     with pytest.raises(PermissionError):
         source._regular_tree(objects)
+
+
+def test_git_metadata_limit_counts_directories_and_files_before_visiting(tmp_path):
+    objects = tmp_path / "objects"
+    objects.mkdir()
+    (objects / "nested").mkdir()
+    (objects / "nested" / "entry").touch()
+    visited = []
+    with pytest.raises(ValueError, match="entry or time limit"):
+        source._regular_tree(objects, limit=1, visit=visited.append)
+    assert visited == []

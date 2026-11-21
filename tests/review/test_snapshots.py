@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from mortis_engine.review import engine, planning, preview, settings, snapshots, source
@@ -70,14 +72,17 @@ def test_worktree_supporting_test_renames_preserve_both_endpoint_exclusions(repo
         assert [row["text"] for row in sources] == (["assert child_count == 0"] if permitted else [])
 
 
-@pytest.mark.parametrize("limit,message", [("MAX_SOURCE_BYTES", "20 MB read limit"),
-                                        ("MAX_SNAPSHOT_BYTES", "100 MB snapshot admission limit")])
-def test_worktree_supporting_tests_keep_snapshot_admission_limits(repo, monkeypatch, limit, message):
+def test_worktree_supporting_tests_keep_snapshot_admission_limits(repo, monkeypatch):
     commit(repo, {"app.py": "value = 1\n"})
     (repo / "test_new.py").write_text("assert True\n")
-    monkeypatch.setattr(snapshots, limit, 8)
-    with pytest.raises(ValueError, match=message), snapshots.snapshot(repo, mode="worktree"):
+    monkeypatch.setattr(snapshots, "MAX_SNAPSHOT_BYTES", 8)
+    with pytest.raises(ValueError, match="100 MB snapshot admission limit"), snapshots.snapshot(repo, mode="worktree"):
         pass
+    monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 11)
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert "20 MB read limit" in value.unavailable["test_new.py"]
+        plan, _notice, sources = supporting_sources(value, ["test_new.py"])
+        assert not plan.selected and not sources
 
 
 def test_worktree_includes_staged_unstaged_and_untracked_with_immutable_sources(repo, tmp_path):
@@ -209,6 +214,26 @@ def test_symlink_directory_components_reject(repo, tmp_path):
         pass
 
 
+def test_worktree_requires_no_follow_support_but_staged_remains_available(repo, monkeypatch):
+    commit(repo, {"app.py": "value = 1\n"})
+    monkeypatch.delattr(snapshots.os, "O_NOFOLLOW", raising=False)
+    with pytest.raises(ValueError, match="safe no-follow file access"), snapshots.snapshot(repo, mode="worktree"):
+        pass
+    with snapshots.snapshot(repo, mode="staged") as value:
+        assert contents(value, "app.py") == "value = 1\n"
+
+
+def test_snapshot_cache_rejects_symlinked_parent(tmp_path):
+    destination = tmp_path / "destination"
+    destination.mkdir(mode=0o700)
+    alias = tmp_path / "alias"
+    alias.symlink_to(destination, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="parent directories without symbolic links"):
+        source._object_cache(alias / "objects")
+    assert list(destination.iterdir()) == []
+
+
 def test_worktree_subdirectory_and_linked_worktree_use_correct_root(repo, tmp_path):
     commit(repo, {"dir/app.py": "initial\n"})
     linked = tmp_path / "linked"
@@ -279,21 +304,29 @@ def test_invalid_mode_combinations_fail_before_snapshot(repo, arguments):
         pass
 
 
-def test_unchanged_tracked_bodies_are_not_reingested(repo, monkeypatch):
+def test_only_changed_tracked_bodies_are_written_to_the_snapshot(repo, monkeypatch):
     commit(repo, {"unchanged.py": "same\n", "changed.py": "old\n"})
     (repo / "changed.py").write_text("new\n")
-    seen = []
-    read = snapshots._worktree_bytes
+    seen, read_paths = [], []
+    run_git = source.git
+    read_file = snapshots._worktree_bytes
 
-    def observed(root, path):
-        seen.append(path)
-        return read(root, path)
+    def observed(*args, **kwargs):
+        if "hash-object" in args:
+            seen.append(kwargs["input_bytes"])
+        return run_git(*args, **kwargs)
 
-    monkeypatch.setattr(snapshots, "_worktree_bytes", observed)
+    def read(root, path):
+        read_paths.append(path)
+        return read_file(root, path)
+
+    monkeypatch.setattr(source, "git", observed)
+    monkeypatch.setattr(snapshots, "_worktree_bytes", read)
     with snapshots.snapshot(repo, mode="worktree") as value:
         assert contents(value, "unchanged.py") == "same\n"
         assert contents(value, "changed.py") == "new\n"
-    assert seen == ["changed.py"]
+    assert read_paths == ["changed.py", "unchanged.py"]
+    assert seen == [b"new\n"]
 
 
 def test_excluded_file_rename_preserves_origin_for_planner_scope(repo):
@@ -360,25 +393,68 @@ def test_trusted_custom_exclusions_block_reads_and_snapshot_cache_ingestion(repo
                    for path in cache.glob("??/*") if path.is_file())
 
 
-def test_subsecond_worktree_change_is_retained_when_git_stat_diff_omits_it(repo, monkeypatch):
-    commit(repo, {"app.py": "initial\n", "same.py": "unchanged\n"})
-    (repo / "app.py").write_text("working\n")
-    git_command = source.git
-    reads = []
-    read = snapshots._worktree_bytes
-
-    def git_without_stat_changes(directory, env, *args, **kwargs):
-        if "diff-files" in args:
-            return ""
-        return git_command(directory, env, *args, **kwargs)
-
-    def observed(root, path):
-        reads.append(path)
-        return read(root, path)
-
-    monkeypatch.setattr(source, "git", git_without_stat_changes)
-    monkeypatch.setattr(snapshots, "_worktree_bytes", observed)
+def test_worktree_snapshot_detects_same_size_content_change(repo):
+    commit(repo, {"app.py": "value = 1\n"})
+    (repo / "app.py").write_text("value = 2\n")
     with snapshots.snapshot(repo, mode="worktree") as value:
-        assert contents(value, "app.py") == "working\n"
-        assert contents(value, "same.py") == "unchanged\n"
-    assert reads == ["app.py"]
+        assert contents(value, "app.py") == "value = 2\n"
+
+
+def test_oversized_tracked_file_keeps_unrelated_review_units(repo, monkeypatch):
+    commit(repo, {"large.py": "# " + "x" * 60 + "\n", "small.py": "port = 1\n"})
+    (repo / "small.py").write_text("port = 2\n")
+    monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 32)
+    report = preview.preview_local(repo)
+    assert [unit["path"] for unit in report["units"]] == ["small.py"]
+    assert report["selected_files"][0]["status"] == "M"
+    assert report["errors"] == [{"path": "large.py", "message": "Working-tree source exceeds the 20 MB read limit."}]
+    assert not report["excluded_files"]
+    with snapshots.snapshot(repo, mode="worktree") as value, pytest.raises(ValueError, match="missing"):
+        contents(value, "large.py")
+
+
+@pytest.mark.parametrize("old_path", ["old.py", "private-key.py"])
+def test_oversized_staged_rename_retains_origin_for_preview_and_exclusions(repo, monkeypatch, old_path):
+    commit(repo, {old_path: "# " + "x" * 60 + "\n"})
+    git(repo, "mv", old_path, "renamed.py")
+    (repo / "new.py").write_text("# " + "x" * 60 + "\n")
+    monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 32)
+    report = preview.preview_local(repo)
+    assert not report["units"]
+    assert [(row["path"], row["old_path"], row["status"]) for row in report["selected_files"]] == (
+        [("new.py", None, "A"), ("renamed.py", old_path, "R100")] if old_path == "old.py" else [("new.py", None, "A")])
+    assert report["excluded_files"] == ([] if old_path == "old.py" else [
+        {"path": "renamed.py", "old_path": old_path, "reason": "mandatory_exclusion"}])
+
+
+def test_worktree_snapshot_respects_text_line_endings_and_preserves_raw_bytes(repo):
+    commit(repo, {".gitattributes": "app.py text eol=crlf\nraw.py -text\n",
+                  "app.py": "port = 1\nkeep = 3\n", "raw.py": "raw = 1\n"})
+    (repo / "app.py").unlink()
+    git(repo, "checkout", "--", "app.py")
+    assert (repo / "app.py").read_bytes().endswith(b"\r\n")
+    assert not git(repo, "status", "--porcelain")
+    assert not preview.preview_local(repo)["selected_files"]
+    (repo / "app.py").write_bytes(b"port = 2\r\nkeep = 3\r\n")
+    (repo / "raw.py").write_bytes(b"raw = 1\r\n")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        assert contents(value, "app.py") == "port = 2\nkeep = 3\n"
+        assert contents(value, "raw.py") == "raw = 1\r\n"
+
+
+@pytest.mark.parametrize(("mode", "flag"), [("worktree", "--others"), ("worktree", "--stage"), ("staged", "--stage")])
+def test_local_snapshot_rejects_non_utf8_filenames(repo, monkeypatch, mode, flag):
+    commit(repo, {"app.py": "value = 1\n"})
+    run = source.subprocess.Popen
+
+    def git_with_non_utf8_path(command, **kwargs):
+        if "ls-files" in command and flag in command:
+            record = b"invalid-\xff.py\0"
+            if flag == "--stage":
+                record = b"100644 " + b"a" * 40 + b" 0\t" + record
+            command = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({record!r})"]
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(source.subprocess, "Popen", git_with_non_utf8_path)
+    with pytest.raises(ValueError, match="path that is not valid UTF-8"), snapshots.snapshot(repo, mode=mode):
+        pass

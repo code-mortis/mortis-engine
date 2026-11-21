@@ -80,7 +80,7 @@ def validate_result(value, context):
             for error in exc.errors(include_input=False, include_url=False)[:8]
         )
         raise ValueError("The AI returned a fix verification result in an unsupported format. The finding remains open. Result details: " + problems) from exc
-    revisions, problems = set(), []
+    problems = []
     for index, item in enumerate(result["evidence"]):
         source = context["sources"].get(item["revision"], {}).get(item["path"])
         feedback = {"field": f"evidence[{index}]", **{
@@ -98,16 +98,21 @@ def validate_result(value, context):
                     feedback.update(reason="quote is not verbatim text within the cited source lines", source_lines=source_lines)
         if "reason" in feedback:
             problems.append({**feedback, "quote": item["quote"]})
-        else:
-            revisions.add(item["revision"])
     if problems:
         feedback = {**problems[0], "errors": problems}
         raise ResultValidationError("Verification evidence does not match the supplied code. " + json.dumps(feedback), feedback)
+    return validate_verdict(result, context)
+
+
+def validate_verdict(result, context):
+    finding = context.get("finding", {})
+    paths = {"original": finding.get("path"), "current": context.get("current_path")}
+    revisions = {item["revision"] for item in result["evidence"] if item["path"] == paths[item["revision"]]}
     if result["verdict"] == "fixed" and (
         not result["original_issue_present"] or result["dismissal_recommended"]
         or not result["explanation"].strip() or not result["change_explanation"].strip() or not context.get("diff", "").strip()
         or revisions != {"original", "current"}
-        or context.get("finding", {}).get("reviewed_sha", context.get("original_sha")) != context.get("original_sha")
+        or finding.get("reviewed_sha", context.get("original_sha")) != context.get("original_sha")
     ):
         result["verdict"] = "uncertain"
         result["explanation"] = "Fix confirmation was unsupported. " + result["explanation"]
