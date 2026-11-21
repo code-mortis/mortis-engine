@@ -32,6 +32,7 @@ class Snapshot:
     excluded: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     unavailable: dict[str, str] = field(default_factory=dict)
+    unavailable_changes: dict[str, tuple[str | None, str]] = field(default_factory=dict)
 
 
 def _worktree_root(path):
@@ -159,12 +160,12 @@ def _text_paths(repo, env, paths, stopped):
             if text not in {"unset", "auto"} and (text == "set" or eol in {"lf", "crlf"})}
 
 
-def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
+def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target):
     _index(repo, env, git_dir)
     staged = _entries(repo, env)
     excluded, unavailable = [], {}
     if mode == "staged":
-        return _tree(repo, env, staged), excluded, unavailable
+        return _tree(repo, env, staged), excluded, unavailable, {}
     if not all(getattr(os, flag, 0) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")) or not {
         os.open, os.stat, os.readlink
     }.issubset(os.supports_dir_fd) or os.stat not in os.supports_follow_symlinks:
@@ -219,7 +220,14 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules):
             raise ValueError("Working-tree source exceeds the 100 MB snapshot admission limit.")
         sha = source.git(repo, env, "hash-object", "-w", "--stdin", input_bytes=content, stopped=stopped).strip()
         entries[path] = (file_mode, sha)
-    return _tree(repo, env, entries), excluded, unavailable
+    unavailable_changes = {}
+    if any(path in staged for path in unavailable):
+        # Keep index metadata for omitted files without putting their staged blobs in the snapshot.
+        unavailable_changes = {path: (old_path, status)
+            for path, old_path, status in planning._changes(repo, env, target, None, stopped)
+            if path in unavailable and status != "D"
+            and (not status.startswith("R") or (old_path not in entries and old_path not in unavailable))}
+    return _tree(repo, env, entries), excluded, unavailable, unavailable_changes
 
 
 @contextmanager
@@ -251,9 +259,10 @@ def snapshot(repository, *, mode="commits", base=None, head="HEAD", object_cache
             if overrides:
                 settings.apply_overrides(options, overrides)
             rules = planning.load_rules(repo, env, target, options, stopped)
-            tree, excluded, unavailable = _local_tree(repo, env, root, source.find_repository(root), mode, stopped,
-                                                      options, rules)
+            tree, excluded, unavailable, unavailable_changes = _local_tree(
+                repo, env, root, source.find_repository(root), mode, stopped, options, rules, target)
             pinned = _commit(repo, env, tree, target)
             if object_cache is not None:
                 source._retain_objects(repo / "objects", source._object_cache(object_cache))
-            yield Snapshot(repo, env, target, pinned, target, target, mode, excluded, unavailable=unavailable)
+            yield Snapshot(repo, env, target, pinned, target, target, mode, excluded, unavailable=unavailable,
+                           unavailable_changes=unavailable_changes)

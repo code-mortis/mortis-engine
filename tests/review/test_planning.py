@@ -53,6 +53,19 @@ def test_rename_from_excluded_path_cannot_restore_access(repo):
     assert result.exclusions[0]["reason"] == "excluded"
 
 
+@pytest.mark.parametrize(("status", "old_path"), [("A", None), ("R100", "old.py"), ("C100", "old.py")])
+def test_unavailable_change_keeps_git_status_and_origin(repo, monkeypatch, status, old_path):
+    commit(repo, {"old.py": "value = 1\n"})
+    git(repo, "checkout", "-qb", "feature")
+    commit(repo, {"new.py": "value = 1\n"})
+    monkeypatch.setattr(planning, "_changes", lambda *_: [("new.py", old_path, status)])
+    result = plan(repo, unavailable={"new.py": "Source unavailable"})
+    selected, = result.selected
+    assert (selected.path, selected.old_path, selected.status, selected.error) == (
+        "new.py", old_path, status, "Source unavailable")
+    assert not selected.units
+
+
 def test_symlink_and_oversized_line_fail_coverage(repo):
     commit(repo, {"app.py": "x=1\n"})
     git(repo, "checkout", "-qb", "feature")

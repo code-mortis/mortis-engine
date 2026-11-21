@@ -68,7 +68,8 @@ def plan_snapshot(snap, options, stopped=lambda: False, *, prompt_token_ceiling=
                   full_tree_source_policy=planning.FULL_TREE_SOURCE_POLICY):
     return planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
         options, stopped, max_unit_bytes=unit_byte_limit(prompt_token_ceiling), trusted_rules_sha=snap.settings_sha,
-        full_tree_source_policy=full_tree_source_policy, unavailable=snap.unavailable)
+        full_tree_source_policy=full_tree_source_policy, unavailable=snap.unavailable,
+        unavailable_changes=snap.unavailable_changes)
 
 
 def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,

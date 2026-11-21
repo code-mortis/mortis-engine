@@ -406,10 +406,25 @@ def test_oversized_tracked_file_keeps_unrelated_review_units(repo, monkeypatch):
     monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 32)
     report = preview.preview_local(repo)
     assert [unit["path"] for unit in report["units"]] == ["small.py"]
+    assert report["selected_files"][0]["status"] == "M"
     assert report["errors"] == [{"path": "large.py", "message": "Working-tree source exceeds the 20 MB read limit."}]
     assert not report["excluded_files"]
     with snapshots.snapshot(repo, mode="worktree") as value, pytest.raises(ValueError, match="missing"):
         contents(value, "large.py")
+
+
+@pytest.mark.parametrize("old_path", ["old.py", "private-key.py"])
+def test_oversized_staged_rename_retains_origin_for_preview_and_exclusions(repo, monkeypatch, old_path):
+    commit(repo, {old_path: "# " + "x" * 60 + "\n"})
+    git(repo, "mv", old_path, "renamed.py")
+    (repo / "new.py").write_text("# " + "x" * 60 + "\n")
+    monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 32)
+    report = preview.preview_local(repo)
+    assert not report["units"]
+    assert [(row["path"], row["old_path"], row["status"]) for row in report["selected_files"]] == (
+        [("new.py", None, "A"), ("renamed.py", old_path, "R100")] if old_path == "old.py" else [("new.py", None, "A")])
+    assert report["excluded_files"] == ([] if old_path == "old.py" else [
+        {"path": "renamed.py", "old_path": old_path, "reason": "mandatory_exclusion"}])
 
 
 def test_worktree_snapshot_respects_text_line_endings_and_preserves_raw_bytes(repo):
