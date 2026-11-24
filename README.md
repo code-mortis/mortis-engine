@@ -500,13 +500,17 @@ mortis connect aws \
 
 Coding-agent guidance and the project Codex roles are documented in [AGENTS.md](AGENTS.md).
 
+The project-local [benchmark and evaluation skill](.agents/skills/mortis-benchmark/SKILL.md)
+covers experiment design, suite layout, and recorded results in the companion
+`mortis-benchmarks` repository. Invoke `$mortis-benchmark` in Codex.
+
 The project-local [release preparation skill](.agents/skills/mortis-release/SKILL.md)
 synchronizes versions, changelog, repository and site documentation, and maintained
 skills before a release. Invoke `$mortis-release` in Codex. In other agents, ask
-them to follow `.agents/skills/mortis-release/SKILL.md` from this checkout.
-Both skill sources live in `.agents/skills/`; only `mortis-engine-use` is bundled
-with the Python package. Release preparation validates changes; publication remains
-a separate maintainer action.
+them to follow the skill instructions from this checkout. Release preparation
+validates changes. Maintainers handle publication separately.
+
+The Python package bundles the end-user `mortis-engine-use` skill.
 
 GitHub Actions runs the test suite on Python 3.13, 3.14 and 3.15 for pushes to `main`
 (including merges), pull requests targeting `main` and manual dispatches.

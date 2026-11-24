@@ -1,14 +1,13 @@
 ---
 name: mortis-release
-description: Prepare the next Mortis Engine release by reviewing changes since the previous release, synchronizing versions, changelog, repository documentation, the mortis-site documentation site, and every maintained skill including mortis-engine-use, then validating code and installable distributions. Use for development release preparation and release-readiness audits in this project. Preparation does not authorize commits, tags, pushes, publication or deployment.
+description: Prepare or audit a Mortis Engine release. Reconcile package versions, changelog, repository and site documentation, and maintained skills with the release diff, then validate the wheel and source distribution. Use for Engine release preparation and readiness checks. Publication requires separate authorization.
 ---
 
 # Mortis Engine release preparation
 
 Prepare a reviewable release across this engine checkout and the documentation
-site. Both maintained skill sources live directly in `.agents/skills/`. Only
-`mortis-engine-use` is packaged for engine users; this release skill stays local
-to development.
+site. The maintained skills live directly in `.agents/skills/`. The engine
+package bundles the end-user `mortis-engine-use` skill.
 
 ## Establish the release scope
 
@@ -20,7 +19,7 @@ to development.
    supplied. If the request only says "next release", recommend a version from
    the verified changes and state the assumption. Ask only if breaking changes
    or multiple release lines make that choice materially ambiguous. The current
-   release workflow accepts stable versions, not prerelease or local suffixes.
+   release guard accepts stable versions of the form `vMAJOR.MINOR.PATCH`.
 3. Inspect local tags, history, the diff from the preceding release to HEAD, and
    staged, unstaged and untracked changes. Do not equate the highest tag with the
    last published release without checking its provenance. Use available hosted
@@ -59,13 +58,22 @@ to development.
   guides and release instructions. Follow the surface map rather than rewriting
   every document. Keep source exclusions, private state, pinned revisions,
   partial coverage and unknown usage accurately described.
-- Synchronize the affected site guides, landing examples and navigation with the
-  engine. Include new commands such as skill installation in the CLI guide and
-  changed public entry points in the library guide. Audit comparison claims and
-  their sources without relabeling historical evidence as current. Preserve
-  coming-soon App and GitHub Action labels unless those products actually ship.
-  Use an existing release article surface if present; do not create blog
-  infrastructure solely to mirror Noodle.
+- Synchronize the affected guides under `src/content/docs/docs/engine/` in
+  `mortis-site`. Review the checked-release references in the docs index and
+  the Engine setup example on the homepage. Preserve existing guide URLs and
+  heading bookmarks. Update the navigation and bookmark mapping when a route or
+  heading moves. The surface map identifies the owning files.
+- Treat the Engine, Action and App versions independently. If an Engine change
+  affects the Action's pinned Engine, scan prerequisites or report consumption,
+  verify compatibility against the Action revision that its guide recommends.
+  Keep that guide tied to the version it documents. Record any required Action
+  follow-up and preserve the App's own version and evidence links. Keep links
+  and availability claims for a prepared release out of the deployed site until
+  the referenced release and assets exist.
+- Audit affected comparison claims against their cited versions and evidence.
+  Evaluation suites live in `../mortis-benchmarks`. Use the recorded evidence for
+  the matching revision and scope. Refer separately requested benchmark work
+  to `mortis-benchmark` when available.
 
 ## Audit every maintained skill
 
@@ -80,7 +88,9 @@ and this release skill.
   `references/configuration.md` and `references/python.md` against current CLI
   parsing, public Python signatures, configuration, recovery and output contracts.
   Cover new flags, requirements, exit codes and saved-run limitations when those
-  changed. Audit this release skill against the current release process too.
+  changed. Audit this release skill against the current workflows and site
+  structure. If `mortis-benchmark` is present, verify its checkout and suite
+  references when evaluation layout changes.
 - Keep `.agents/skills/` as the single source. Package only `mortis-engine-use`
   through the build configuration. Inspect `src/mortis_engine/cli/skills.py`,
   `scripts/check_dist.py`, `tests/test_skill_cli.py` and `tests/smoke_test.py` when
@@ -112,6 +122,9 @@ uv run --locked python scripts/check_dist.py "$release_check_dir/dist"
 Use Python 3.15 for development and preserve Python 3.13–3.15 compatibility.
 Use fresh build output instead of deleting prior artifacts. Run focused
 regressions first when behavior changes, then the complete release checks.
+CI tests native graph extraction on Python 3.13 with the parser's pinned
+dependencies. Reproduce that check from `.github/workflows/ci.yml` for extraction
+changes and record the status of each hosted Python job when available.
 
 Install the wheel and source archive into separate temporary environments with
 the locked runtime dependencies, then run `tests/smoke_test.py` with each installed
@@ -133,8 +146,8 @@ bun test
 ```
 
 Build before the site tests, which inspect generated `dist/` pages. Check links,
-rendered code examples and relevant pages; visually inspect material layout or
-navigation changes using the available browser workflow. Do not deploy the site.
+rendered examples and preserved bookmarks in affected pages. Visually inspect
+material layout or navigation changes using the available browser workflow.
 
 The real `scripts/release_check.py TAG SHA` guard requires an existing tag naming
 the exact checkout commit and ancestry in `origin/main`. It is a publication
@@ -151,11 +164,11 @@ probes, model discovery and paid evaluations are not routine release validation.
 ## Finish with a handoff
 
 Provide the proposed package version/tag and preceding release, a concise summary
-of changed engine and site files, the changed/unchanged decision for every skill,
-the commands actually run and their results, and any remaining blockers. Include
-a draft of the release notes or point to the prepared changelog section. Separate
-"prepared locally" from "published"; mention that pushing a `v*` tag triggers
-the production release workflow.
+of changed engine and site files, the status of each maintained skill, the checks
+and results, and any pending compatibility or publication work. Link the prepared
+changelog section. State whether the release is prepared locally or published.
+Pushing a `v*` tag triggers the workflow that validates, publishes to PyPI and
+creates a GitHub Release.
 
 Stop at the prepared diff unless the maintainer has separately authorized further
 actions. This skill alone does not authorize commits, PR submission, tags, pushes,
