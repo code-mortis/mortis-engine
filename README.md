@@ -124,6 +124,16 @@ mortis review --base main --head HEAD --connection opencode-go --format json
 
 Mortis compares the common ancestor of the two commits with the head commit. Local edits and untracked files are outside this comparison. Branches, tags and commit IDs must be available in the local clone. Use `--repo` to select another repository. GitHub access and a running Code Mortis instance are unnecessary.
 
+### Ask about or describe the changes
+
+```sh
+mortis ask --base main --head HEAD --question-file question.txt --format json
+mortis ask --base main --head HEAD --question-file question.txt --path app.py --line 4:6 --side right --format json
+mortis describe --base main --head HEAD --format json
+```
+
+Both commands use the selected connection and the base revision's review settings. Ask answers from the eligible diff and returns citations anchored to the exact commits. Use `left` for lines on the merge-base side or `right` for lines on the head side. Describe returns a title and a structured summary. A result with `status: insufficient_context` explains why the diff could not support the request.
+
 ### Review subsequent commits
 
 Branch comparisons can reuse coverage from the last compatible review of the same

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from mortis_engine import __version__
 from mortis_engine.llm_http import InferenceError
 
-from . import analysis, config, connect, findings, followups, reports, review, skills
+from . import analysis, config, connect, findings, followups, pr_commands, reports, review, skills
 
 
 def main(argv=None):
@@ -18,6 +18,7 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     connect.add_parser(commands)
     review.add_parser(commands)
+    pr_commands.add_parser(commands)
     config.add_parser(commands)
     analysis.add_parser(commands)
     findings.add_parser(commands)
