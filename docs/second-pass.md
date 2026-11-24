@@ -24,22 +24,11 @@ becomes complete because of the second pass. `second_pass` is absent when disabl
 
 ## Offline experiment
 
-The frozen baseline, corpus and grader under `evals/review_improvements` are
-unchanged. `fixtures/second-pass.json` supplies additional scripted discovery of
-c03 and repeats c01 deliberately to exercise duplicate suppression. It retains
-c05's unknown consumption. The evaluator never calls providers or executes source.
-
-Reproduce the offline experiment with:
-
-```sh
-PYTHONPATH=src /path/to/.venv/bin/python evals/review_improvements/run.py replay \
-  --second-pass --recording evals/review_improvements/fixtures/second-pass.json \
-  --output /tmp/second-pass-result.json
-python evals/review_improvements/run.py compare \
-  --baseline evals/review_improvements/baseline-result.json \
-  --experiment /tmp/second-pass-result.json \
-  --acceptance evals/review_improvements/acceptance.json
-```
+The `review-improvements` suite in the companion `mortis-benchmarks` project
+contains the frozen baseline, corpus, grader and replay instructions.
+`fixtures/second-pass.json` supplies additional scripted discovery of c03 and
+repeats c01 to exercise duplicate suppression. It retains c05's unknown
+consumption. Replay uses a mocked provider and reads source as data.
 
 The scripted experiment is expected to increase discovery recall from 0.5 to 1.0,
 confirm c03 only after normal assessment reads its unchanged dependency, and add
@@ -50,6 +39,6 @@ acceptance requires additional confirmed true defects and checks precision, cove
 duplicates, total tokens and measured spend on an independent frozen holdout with
 human adjudication. The default token and spend ceilings are each twice the baseline.
 
-Dedicated regressions: `tests/review/test_second_discovery.py` and
-`tests/evals/test_second_discovery.py`. Live-provider quality, cost and latency
-are unmeasured. This is an opt-in experiment, not a recommended default.
+The engine regression is `tests/review/test_second_discovery.py`. The replay
+regressions live with the suite. Live-provider quality, cost and latency remain
+unmeasured, and the feature remains opt-in.

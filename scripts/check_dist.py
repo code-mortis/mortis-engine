@@ -14,7 +14,7 @@ FORBIDDEN = {".git", ".github", ".codex", ".claude", ".local", ".venv", ".aws", 
              ".coverage", "__pycache__", "dist", "reports", "PLAN.md", "REVIEW_IMPROVEMENTS.md", "mortis-release"}
 PRIVATE_SUFFIXES = {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key", ".p12", ".pfx"}
 SDIST_ROOTS = {
-    "src", "tests", "evals", "docs", "scripts", "README.md", "LICENSE", "AGENTS.md",
+    "src", "tests", "docs", "scripts", "README.md", "LICENSE", "AGENTS.md",
     "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md", "uv.lock", "mortis.toml", "pyproject.toml",
     "PKG-INFO", ".gitignore", ".agents",
 }
@@ -66,10 +66,9 @@ def check_dist(directory, root):
         names = {member.name.removeprefix(prefix) for member in members}
         check_names(names, wheel=False)
         for name in ("README.md", "LICENSE", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md",
-                     "CHANGELOG.md", "uv.lock", "mortis.toml", "pyproject.toml", "tests/smoke_test.py",
-                     "evals/review_improvements/run.py", "evals/review_improvements/baseline-result.json"):
+                     "CHANGELOG.md", "uv.lock", "mortis.toml", "pyproject.toml", "tests/smoke_test.py"):
             assert name in names, f"Missing source archive file: {name}"
-        for tree in ("src/mortis_engine", ".agents/skills/mortis-engine-use", "tests", "evals/review_improvements", "docs", "scripts"):
+        for tree in ("src/mortis_engine", ".agents/skills/mortis-engine-use", "tests", "docs", "scripts"):
             for source in (root / tree).rglob("*"):
                 relative = source.relative_to(root).as_posix()
                 if (source.is_file() and not (set(source.parts) & FORBIDDEN)

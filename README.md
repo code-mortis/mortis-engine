@@ -241,8 +241,8 @@ The optional `--second-pass` experiment searches for additional candidates throu
 same analysis budget and normal assessment. It is disabled by default and can also be
 configured with `[review].second_pass = true`; resume retains the saved choice. A failed
 second pass preserves validated first-pass results and reports incomplete analysis.
-See [the experiment](docs/second-pass.md) and the [offline evaluation](evals/review_improvements/README.md)
-for limits and the evidence required before considering default enablement.
+See [the experiment](docs/second-pass.md) for limits. The offline replay suite and
+recorded results are in the companion `mortis-benchmarks` project.
 
 The report includes commit IDs, findings, evidence, file and unit coverage, errors and token usage. A file counts as fully reviewed in the current run only when all assigned units pass validation. Incremental and unchanged reviews identify reused coverage in `coverage.reused` and link to the prior run in `comparison`. Missing token usage is reported as unknown. JSON on stdout uses `mortis.review/v1`. Progress goes to stderr. Exit status 0 indicates completed analysis, no eligible changes or an unchanged comparison. Exit status 2 indicates partial coverage or a file-limit skip, and 1 indicates failure. Findings are available even in a partial report.
 

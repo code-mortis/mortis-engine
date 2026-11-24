@@ -60,7 +60,6 @@ include = [
   "/.agents/skills/mortis-engine-use",
   "/src/mortis_engine",
   "/tests",
-  "/evals/review_improvements",
   "/docs",
   "/scripts/*.py",
   "/README.md",
