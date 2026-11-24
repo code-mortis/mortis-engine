@@ -1,6 +1,6 @@
 ---
 name: mortis-engine-use
-description: "Operate the Mortis Engine CLI or Python library for local Git code reviews, security scans, scope previews, saved reports, verification, assessment retries, and finding triage. Use when the user asks to use Mortis Engine. Hosted Code Mortis GitHub/MCP workflows and developing the engine itself are separate tasks."
+description: "Operate the Mortis Engine CLI or Python library for local Git code reviews, security scans, scope previews, diff questions and descriptions, saved reports, verification, assessment retries, and finding triage. Use when the user asks to use Mortis Engine. Hosted Code Mortis GitHub/MCP workflows and developing the engine itself are separate tasks."
 ---
 
 # Mortis Engine Use
@@ -113,6 +113,29 @@ coverage. An unchanged skip links to the earlier report without new findings.
 Do not label partial coverage as clean, unknown usage as zero, an unavailable
 scan grade as a pass, or a finding absent from a later run as fixed. Report the
 run ID, scope, actionable findings and material coverage/usage limits to the user.
+
+## Ask about or describe a branch comparison
+
+Use the local base and head refs and the user's selected connection. `ask`
+requires a nonempty UTF-8 question file of at most 8,000 characters. `describe`
+prints a draft title, narrative and grouped changes for the user to review.
+
+```sh
+mortis ask --repo /path/to/repo --base main --head HEAD --question-file /path/to/question.txt --format json
+mortis ask --repo /path/to/repo --base main --head HEAD --question-file /path/to/question.txt --path app.py --line 4:6 --side right --format json
+mortis describe --repo /path/to/repo --base main --head HEAD --format json
+```
+
+For a location, supply all three flags. Use `left` for merge-base lines and
+`right` for head lines. Mortis uses whole eligible hunks that overlap the
+selection within the context budget. Answer citations identify a path, commit
+and line range. Both commands send eligible diff context to the connection.
+
+Read `status` in `mortis.ask/v1` and `mortis.describe/v1`. Exit code 0 also
+covers `insufficient_context`. Report its `message` or read `result` on
+`completed`, and report `limited_context` if true. Use `mortis runs RUN_ID`
+when a `run_id` is present. Both commands start fresh comparisons and have no
+`--resume` option. Publish a draft only when separately requested.
 
 ## Read, save and recover results
 

@@ -58,6 +58,9 @@ with the strategy and prior run ID, alongside `coverage["reused"]` for earlier
 coverage. Unchanged comparisons return `status="skipped"` with zero model
 requests. Resume preserves the original selection.
 
+For diff questions or a branch description, use the
+[CLI commands](../SKILL.md#ask-about-or-describe-a-branch-comparison).
+
 ## Other public workflows
 
 `mortis_engine.operations.run` accepts `kind="scan"`, `"verify"`, `"summary"` or

@@ -53,7 +53,7 @@ not change configuration read from an already committed revision:
 
 | Workflow | Configuration source |
 | --- | --- |
-| `review --base BASE --head HEAD` | Selected base commit |
+| `review`, `ask` or `describe` with `--base BASE --head HEAD` | Selected base commit |
 | Working-tree or staged review | HEAD |
 | `review --all --head REF` | Selected committed REF |
 | `scan --ref REF` | Selected committed REF |
@@ -97,6 +97,11 @@ Reviews accept `--max-files`, `--token-budget`, `--timeout-seconds`,
 flags except file and summary limits. Other workflows expose only relevant
 stage limits; consult their help. Budgets apply to their individual stages, not
 a single aggregate run budget.
+
+`ask` uses the base commit's review analysis budget and timeout
+(`token_budget` and `timeout_seconds`). `describe` uses the review summary
+budget and timeout (`summary_token_budget` and `summary_timeout_seconds`).
+Both use the committed review file and output limits.
 
 `0` means no Mortis limit for total token budgets, overall timeouts and review
 file limits. Preserve finite limits unless the user requests a change.

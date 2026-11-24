@@ -132,7 +132,11 @@ mortis ask --base main --head HEAD --question-file question.txt --path app.py --
 mortis describe --base main --head HEAD --format json
 ```
 
-Both commands use the selected connection and the base revision's review settings. Ask answers from the eligible diff and returns citations anchored to the exact commits. Use `left` for lines on the merge-base side or `right` for lines on the head side. Describe returns a title and a structured summary. A result with `status: insufficient_context` explains why the diff could not support the request.
+Both commands compare the common ancestor with the head revision, use the base commit's review settings, and send eligible diff context to the selected connection. Use `--connection NAME` when you have several saved connections.
+
+`ask` takes a UTF-8 question file with 1–8,000 characters and returns citations pinned to exact commits. To focus on a location, pass `--path`, `--line START[:END]` and `--side` together. A range can overlap multiple hunks on the `left` (merge base) or `right` (head) side. `describe` drafts a local title, narrative and groups of changes.
+
+JSON uses `mortis.ask/v1` or `mortis.describe/v1`. Both `completed` and `insufficient_context` return exit code 0. Check `status` before reading `result`, and check `limited_context` when present for hunks omitted by the context budget. Use `mortis runs RUN_ID` when the result includes a `run_id`. These commands start a new comparison each time.
 
 ### Review subsequent commits
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.5 - 2026-11-24
+
+- Use `mortis ask --base main --question-file question.txt` to ask about a local Git comparison. Answers cite eligible diff hunks by path, commit and line range. Use `--path`, `--line` and `--side` together to select lines across one or more hunks.
+- Use `mortis describe --base main` to draft a title, narrative and grouped changes from the same comparison. The draft stays local.
+- Both commands use the selected connection and the base commit's review settings. JSON uses `mortis.ask/v1` or `mortis.describe/v1`. Inspect `status` for `insufficient_context` and `limited_context` when present for hunks omitted by the context budget.
+
 ## 0.1.4 - 2026-11-24
 
 - Use `mortis review --base main --incremental` to analyze files changed since a compatible, fully covered branch review. The summary still covers the branch comparison, and reports distinguish new analysis from reused coverage.

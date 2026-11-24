@@ -1,6 +1,6 @@
 [project]
 name = "mortis-engine"
-version = "0.1.4"
+version = "0.1.5"
 description = "Review local Git changes and scan repository security with your AI connection"
 readme = "README.md"
 license = "Apache-2.0"
