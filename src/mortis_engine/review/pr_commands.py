@@ -100,7 +100,7 @@ def diff_context(snap, options, connection, command, question, location, stopped
             left, right = line_range(*match.groups()[:2]), line_range(*match.groups()[2:])
             if location:
                 span = left if side == "left" else right
-                if not (span and span[0] <= first <= last <= span[1]):
+                if not (span and span[0] <= last and first <= span[1]):
                     continue
             end = headers[position + 1].start() if position + 1 < len(headers) else len(patch)
             hunk = {"id": len(supplied["hunks"]) + 1, "path": path, "old_path": old_path,

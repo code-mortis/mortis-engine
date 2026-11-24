@@ -67,6 +67,26 @@ def test_ask_about_deleted_lines_uses_the_left_revision(repo, monkeypatch):
     assert unavailable["status"] == "insufficient_context"
 
 
+def test_ask_includes_all_hunks_overlapping_the_selected_lines(repo, monkeypatch):
+    lines = [f"value_{line} = 0\n" for line in range(1, 31)]
+    base = commit(repo, {"app.py": "".join(lines)})
+    for line in (5, 15, 25):
+        lines[line - 1] = f"value_{line} = 1\n"
+    head = commit(repo, {"app.py": "".join(lines)})
+
+    async def send(connection, credentials, request, **kwargs):
+        supplied = json.loads(request.messages[0].content)
+        assert [hunk["right"] for hunk in supplied["hunks"]] == [[2, 8], [12, 18]]
+        return Response(output={"answer": "The selected values changed to one.",
+                                "citations": [{"hunk": 1, "side": "right"}, {"hunk": 2, "side": "right"}]},
+                        usage=Usage(total_tokens=10))
+
+    monkeypatch.setattr(gateway, "send", send)
+    result = pr_commands.run(repo, command="ask", base=base, head=head, question="What changed in these lines?",
+                             location=("app.py", 5, 15, "right"), connection=CONNECTION, get_credentials=lambda: {})
+    assert result["status"] == "completed"
+
+
 def test_describe_rejects_a_diff_location(repo):
     base = commit(repo, {"app.py": "value = 1\n"})
     head = commit(repo, {"app.py": "value = 2\n"})
