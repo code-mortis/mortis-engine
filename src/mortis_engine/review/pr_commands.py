@@ -149,6 +149,8 @@ def run(repository, *, command, base, head, connection, get_credentials, questio
         raise ValueError("Choose ask or describe.")
     if command == "ask" and (not isinstance(question, str) or not question.strip() or len(question) > 8000):
         raise ValueError("Supply a question of 1–8000 characters.")
+    if location is not None and command != "ask":
+        raise ValueError("Supply a location only with ask.")
     if location:
         path, first, last, side = location
         source.repository_path(path)

@@ -67,6 +67,16 @@ def test_ask_about_deleted_lines_uses_the_left_revision(repo, monkeypatch):
     assert unavailable["status"] == "insufficient_context"
 
 
+def test_describe_rejects_a_diff_location(repo):
+    base = commit(repo, {"app.py": "value = 1\n"})
+    head = commit(repo, {"app.py": "value = 2\n"})
+
+    with pytest.raises(ValueError, match="Supply a location only with ask"):
+        pr_commands.run(repo, command="describe", base=base, head=head,
+                        location=("app.py", 1, 1, "right"), connection=CONNECTION,
+                        get_credentials=lambda: pytest.fail("Describe must reject a location before loading credentials"))
+
+
 def test_cli_describe_returns_a_grounded_title_and_structured_summary(repo, capsys, monkeypatch):
     base = commit(repo, {"app.py": "value = 1\n"})
     head = commit(repo, {"app.py": "value = 2\n"})
