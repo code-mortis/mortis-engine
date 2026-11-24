@@ -49,9 +49,10 @@ mortis review --repo /path/to/repo --base main --head HEAD --preview --format js
 Replace the scope flags for the other modes. Inspect `selected_files`,
 `excluded_files`, `limit_reason` and `errors` before analysis when scope is unclear
 or large. Unreadable files, including files over 20 MB, can appear as per-file
-errors alongside planned files. A preview estimates scope and initial batches.
-Do not combine it with `--connection`, `--resume`, `--graph`, `--progress`,
-`--output`, `--concurrency` or `--second-pass`.
+errors alongside planned files. A preview estimates the full scope and initial
+batches without consulting previous runs. It rejects `--connection`, `--resume`,
+`--graph`, `--progress`, `--output`, `--concurrency`, `--second-pass` and the
+incremental or unchanged-review flags.
 
 ## Run an authorized analysis
 
@@ -78,6 +79,12 @@ context, read [configuration.md](references/configuration.md). For Python caller
 read [python.md](references/python.md). Use the CLI rather than private engine
 modules for ordinary agent operations.
 
+For a follow-up on the same local branch, use `--incremental` to analyze files
+changed since a compatible saved review. Add `--skip-unchanged` to skip model
+calls when a compatible run covered the same Git tree. These opt-in flags require
+`--base`. See [branch review settings](references/configuration.md#subsequent-branch-reviews)
+for saved coverage, fallbacks and overriding the repository defaults.
+
 ### Interpret results
 
 Capture stdout and stderr separately. `--format json` puts the versioned report on
@@ -87,7 +94,7 @@ or treating every nonzero exit as an empty result.
 
 | Exit | Meaning for review/scan |
 | --- | --- |
-| `0` | Completed analysis, or no eligible review changes; findings may still exist |
+| `0` | Completed analysis, no eligible review changes, or an unchanged comparison; inspect available findings |
 | `2` | Partial analysis or review file-limit/waived coverage; inspect retained results |
 | `1` | Failure; inspect stderr and any returned report |
 | `130` | CLI cancellation |
@@ -100,6 +107,9 @@ Check `schema_version`, `run_id`, `status`, pinned revisions, findings, coverage
 errors and usage. Review JSON uses `mortis.review/v1`; scan JSON uses
 `mortis.security/v1`; preview JSON uses `mortis.review-preview/v1`. Review errors
 include `errors` and `stage_errors`; scans expose `problems` and stage details.
+For branch review reuse, read `comparison` for the strategy and previous run ID.
+`coverage.completed` counts new analysis and `coverage.reused` records prior
+coverage. An unchanged skip links to the earlier report without new findings.
 Do not label partial coverage as clean, unknown usage as zero, an unavailable
 scan grade as a pass, or a finding absent from a later run as fixed. Report the
 run ID, scope, actionable findings and material coverage/usage limits to the user.
@@ -135,7 +145,7 @@ mortis assess --repo /path/to/repo --resume RETRY_RUN_ID --format json --progres
 
 Resume retains pinned inputs, connection, overrides and the original assessment
 policy. Older reviews and scans resume with batched assessment. Omit new scope,
-effort, concurrency, graph and limit flags. Inspect unfinished runs before deciding to
+effort, concurrency, graph, limit and branch comparison flags. Inspect unfinished runs before deciding to
 resume. Retry an assessment only when its listing says it is eligible; it uses
 the original evidence and saves a separate `mortis.assessment/v1` result without
 repeating analysis, Trivy or summaries. Unknown consumption retains its

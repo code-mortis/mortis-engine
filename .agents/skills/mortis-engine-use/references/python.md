@@ -17,6 +17,7 @@ assert plan["schema_version"] == "mortis.review-preview/v1"
 Modes are `worktree` (default), `staged`, `commits` and `all`. Optional preview
 arguments include `effort`, `overrides` and `prompt_token_ceiling`. Preview does
 not read profiles, credentials or saved history and does not invoke inference.
+It shows the full scope and rejects `incremental` and `skip_unchanged` overrides.
 Inspect `errors` for files the snapshot could not read. Their `selected_files`
 entries can retain Git change status and the original rename path when available.
 
@@ -50,7 +51,12 @@ and settings; do not combine it with new overrides or concurrency.
 
 `review_commits(repository, *, base, head="HEAD", connection, get_credentials, ...)`
 is the narrower comparison entry point. Use `review_local` when the caller needs
-a saved profile name, other modes or resume.
+a saved profile name, other modes or resume. Both accept
+`overrides={"incremental": True, "skip_unchanged": True}` for commit comparisons.
+Use `False` to override a committed setting. Reports can include `comparison`
+with the strategy and prior run ID, alongside `coverage["reused"]` for earlier
+coverage. Unchanged comparisons return `status="skipped"` with zero model
+requests. Resume preserves the original selection.
 
 ## Other public workflows
 

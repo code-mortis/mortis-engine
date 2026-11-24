@@ -64,6 +64,23 @@ controls rules, exclusions, background and an optional model override. The
 profile supplies the provider endpoint and credentials. Use one-run flags for
 requested overrides; do not commit configuration just to run an analysis.
 
+## Subsequent branch reviews
+
+`[review].incremental` and `[review].skip_unchanged` are independent booleans
+that default to `false`. For a comparison with `--base`, use a branch name or
+its checked-out `HEAD` to keep a consistent history scope. `--incremental` and
+`--skip-unchanged` enable the corresponding setting for one run.
+`--no-incremental` and `--no-skip-unchanged` disable them. Use both negative
+flags to force a full comparison.
+
+Incremental analysis uses the cumulative branch diff for files changed since
+the last compatible, fully covered head. The summary and `max_files` still
+cover the eligible branch comparison. Missing or incomplete history, a changed
+base or configuration, and unavailable ancestry can trigger a full comparison.
+`--graph` and `--second-pass` always use the full comparison. With unchanged
+skipping enabled, a compatible review of the same head tree can be reused even
+when the commit SHA changed.
+
 ## Bounds and costs
 
 Reviews default to two concurrent AI batches; scans default to four concurrent

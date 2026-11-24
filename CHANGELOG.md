@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.4 - 2026-11-24
+
+- Use `mortis review --base main --incremental` to analyze files changed since a compatible, fully covered branch review. The summary still covers the branch comparison, and reports distinguish new analysis from reused coverage.
+- Use `--skip-unchanged` to skip model calls when a compatible review already covered the same Git tree. The saved report links to the previous run. Both options are off by default and can be set independently in `[review]` or passed as Python `overrides`.
+- Keep the chosen scope when resuming a review. Incomplete or incompatible history triggers a full comparison, and previews continue to show the full scope without reading history.
+
 ## 0.1.3 - 2026-11-21
 
 - Harden local snapshots and private history. Working-tree reviews read files without following symlinks or running Git filters. Files that cannot be read remain visible as coverage gaps, with Git change and rename metadata when available. Private key files remain excluded even with backup suffixes.
