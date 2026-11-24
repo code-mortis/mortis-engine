@@ -321,6 +321,7 @@ class ReviewPlan:
     units: list[ReviewUnit] = field(default_factory=list)
     batches: list[list[ReviewUnit]] = field(default_factory=list)
     limit_reason: str | None = None
+    reused: list[str] = field(default_factory=list)
 
     def snapshot(self):
         return asdict(self)
@@ -458,7 +459,8 @@ def split_units(path, old_path, status, sha, text, patch, rule, maximum, *, sour
 
 def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
                 max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None,
-                full_tree_source_policy=FULL_TREE_SOURCE_POLICY, unavailable=None, unavailable_changes=None):
+                full_tree_source_policy=FULL_TREE_SOURCE_POLICY, unavailable=None, unavailable_changes=None,
+                reused_paths=()):
     for sha in (base_sha, head_sha, merge_base):
         if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{40}", sha):
             raise ValueError("PR planning requires exact Git revisions.")
@@ -506,9 +508,13 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
     if maximum is not None and len(plan.selected) > maximum:
         plan.limit_reason = f"{len(plan.selected)} reviewable files exceeds the maximum of {maximum}."
         return plan
+    reused = set(reused_paths)
     used = 0
     for selected in plan.selected:
         if selected.error:
+            continue
+        if selected.path in reused:
+            plan.reused.append(selected.path)
             continue
         if stopped():
             raise ReviewStopped("The review was cancelled or superseded.")

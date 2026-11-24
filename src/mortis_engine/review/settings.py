@@ -9,6 +9,8 @@ from mortis_engine.code_graph.contracts import CodeGraphLimits
 from mortis_engine.review import file_policy, planning, source
 from mortis_engine.schemas import StrictModel
 
+COMPARISON_FLAGS = ("incremental", "skip_unchanged")
+
 
 class RunLimits(StrictModel):
     timeout_seconds: int | None = Field(default=None, ge=60, le=3600, strict=True)
@@ -34,6 +36,8 @@ class RepoSettings(RunLimits):
     include_bot_prs: bool = False
     auto_resolve: bool = False
     second_pass: bool = Field(default=False, strict=True)
+    incremental: bool = Field(default=False, strict=True)
+    skip_unchanged: bool = Field(default=False, strict=True)
     model: str = Field(default="", max_length=150)
     effort: Literal["low", "medium", "high"] = "medium"
     review_sensitivity: Literal["low_noise", "balanced", "broad"] = "balanced"

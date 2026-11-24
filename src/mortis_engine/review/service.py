@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields
 
 from mortis_engine.assessment_dispatch import ASSESSMENT_DISPATCH_POLICY, continuous_assessment
@@ -14,7 +14,18 @@ from mortis_engine.history import History
 from mortis_engine.security_scans.payload import excluded_source_paths
 from mortis_engine.workflow import Session
 
-from . import assessment, context, engine, file_policy, planning, settings, snapshots, source, workflows
+from . import (
+    assessment,
+    comparison,
+    context,
+    engine,
+    file_policy,
+    planning,
+    settings,
+    snapshots,
+    source,
+    workflows,
+)
 
 
 def scope_ref(repo, env, ref):
@@ -65,11 +76,11 @@ def unit_byte_limit(prompt_token_ceiling=None):
 
 
 def plan_snapshot(snap, options, stopped=lambda: False, *, prompt_token_ceiling=None,
-                  full_tree_source_policy=planning.FULL_TREE_SOURCE_POLICY):
+                  full_tree_source_policy=planning.FULL_TREE_SOURCE_POLICY, reused_paths=()):
     return planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
         options, stopped, max_unit_bytes=unit_byte_limit(prompt_token_ceiling), trusted_rules_sha=snap.settings_sha,
         full_tree_source_policy=full_tree_source_policy, unavailable=snap.unavailable,
-        unavailable_changes=snap.unavailable_changes)
+        unavailable_changes=snap.unavailable_changes, reused_paths=reused_paths)
 
 
 def review_commits(repository, *, base, head="HEAD", connection, get_credentials, on_plan=None,
@@ -88,6 +99,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
     started = time.time()
     if resume and (concurrency is not None or overrides):
         raise ValueError("--resume uses the inputs and options of the saved run.")
+    if mode != "commits" and overrides and any(key in overrides for key in settings.COMPARISON_FLAGS):
+        raise ValueError("Incremental and unchanged-review overrides require a commit comparison.")
     if not graph and overrides and "code_graph_limits" in overrides:
         raise ValueError("Graph limit overrides require --graph.")
     if resume is None:
@@ -128,6 +141,14 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             connection = effective_connection(connection, options)
             connection_identity = planning.fingerprint({key: value for key, value in connection.items()
                                                         if key != "_admission_key"})
+            timeout = options["timeout_seconds"]
+            deadline = time.monotonic() + started + timeout - time.time() if timeout else None
+
+            def stopped():
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("The review reached its configured time limit.")
+                return False
+
             if saved:
                 if connection_identity != saved["connection"]:
                     raise ValueError("The selected connection changed since this run began.")
@@ -135,12 +156,19 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 previous = saved["history"]
                 decisions = saved.get("triage_versions", {})
                 assessment_runs = saved.get("assessment_runs", [])
+                selection = saved.get("comparison", {})
+                if selection and selection.get("version") != comparison.VERSION:
+                    raise ValueError("The saved branch comparison policy is unsupported.")
             else:
                 branch = scope_ref(snap.repo, snap.env, head)
                 scope = (scope_ref(snap.repo, snap.env, base) + "..." if snap.mode == "commits" else snap.mode + " ") + branch
                 previous = history.previous_ids("review", scope)
                 decisions = triage_snapshot(history, "review", scope)
                 assessment_runs = history.previous_ids("assessment")
+                selection = comparison.decide(snap, options, history, previous,
+                    connection=[connection_identity, connection.get("_admission_key")], profile=profile,
+                    graph=graph, decisions=decisions, assessments=assessment_runs, stopped=stopped
+                ) if snap.mode == "commits" else {}
                 manifest = {f.name: getattr(snap, f.name) for f in fields(snap) if f.name not in {"env", "repo"}}
                 run_id = history.begin("review", scope, {"connection": connection_identity, "profile": profile,
                     "snapshot": manifest, "history": previous, "effort": effort, "graph": graph, "concurrency": concurrency,
@@ -149,27 +177,24 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "assessment_dispatch": ASSESSMENT_DISPATCH_POLICY,
                     "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution,
                     "source_tool_policy": source_tool_policy, "evidence_policy": options["_evidence_policy"],
-                    "discovery_result_policy": options["_discovery_result_policy"]})
+                    "discovery_result_policy": options["_discovery_result_policy"],
+                    **({"comparison": selection} if selection else {})})
             options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)
-                timeout = options["timeout_seconds"]
-                deadline = time.monotonic() + started + timeout - time.time() if timeout else None
-
-                def stopped():
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise TimeoutError("The review reached its configured time limit.")
-                    return False
-
                 plan = plan_snapshot(snap, options, stopped,
                     prompt_token_ceiling=connection["options"].get("prompt_token_ceiling"),
-                    full_tree_source_policy=full_tree_source_policy)
+                    full_tree_source_policy=full_tree_source_policy, reused_paths=selection.get("reused_paths", ()))
+                unchanged = selection.get("strategy") == "skipped_unchanged"
+                if unchanged and (plan.limit_reason or not plan.selected or len(plan.reused) != len(plan.selected)):
+                    raise ValueError("The saved review coverage does not match the pinned comparison.")
                 if on_plan is not None and plan.batches:
-                    on_plan(len(plan.selected), connection["model"])
+                    on_plan(len(plan.selected) - len(plan.reused), connection["model"])
                 # An empty diff needs neither a model nor credentials unless there are prior fixes to verify.
                 verify_previous = options["auto_resolve"] and previous and not plan.limit_reason
-                credentials = credentials_for_history(history, get_credentials) if plan.batches or verify_previous or plan.limit_reason else {}
+                needs_credentials = not unchanged and (plan.batches or verify_previous or plan.limit_reason or plan.reused)
+                credentials = credentials_for_history(history, get_credentials) if needs_credentials else {}
                 session = Session(connection, credentials, history=history, run_id=run_id, deadline=deadline,
                                   progress=progress)
                 graphs, graph_status = {}, None
@@ -189,9 +214,12 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                         if any(file_policy.excluded(path) for path in graphs) or excluded_source_paths(graphs):
                             graphs, graph_status = {}, {"status": "unavailable",
                                 "reason": "Saved graph context includes source excluded by the current file policy."}
-                status, raw, findings = engine.run(snap.repo, snap.env, plan, connection, options, credentials,
-                    deadline=deadline, session=session, graph_by_path=graphs, progress=progress,
-                    source_tool_policy=source_tool_policy)
+                if unchanged:
+                    status, raw, findings = engine._report(plan, [], {}, tokens=0, status="skipped")
+                else:
+                    status, raw, findings = engine.run(snap.repo, snap.env, plan, connection, options, credentials,
+                        deadline=deadline, session=session, graph_by_path=graphs, progress=progress,
+                        source_tool_policy=source_tool_policy)
                 result = {"schema_version": "mortis.review/v1", "run_id": run_id, "status": status,
                     "base_sha": snap.base_sha, "head_sha": snap.head_sha, "merge_base": snap.merge_base,
                     "settings_sha": snap.settings_sha, "revision": (snap.settings_sha if snap.mode == "all" else snap.head_sha),
@@ -201,6 +229,9 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "excluded_files": list({i["path"]: i for i in [*snap.excluded, *raw["excluded_files"]]}.values()),
                     "errors": raw["errors"], "warnings": raw["warnings"] + [{"message": w} for w in snap.warnings],
                     "usage": session.usage()}
+                if selection and selection["reason"] != "disabled":
+                    result["comparison"] = {key: selection[key] for key in (
+                        "strategy", "reason", "baseline_run_id", "baseline_head_sha") if key in selection}
                 if "second_pass" in raw:
                     result["second_pass"] = raw["second_pass"]
                 if graph_status is not None:
@@ -209,7 +240,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     options["_graph"] = graphs
 
                 async def finish():
-                    async with session:
+                    async with (nullcontext() if unchanged else session):
                         return await workflows.postprocess(snap.repo, snap.env, result, options, session,
                             history=[effective_report(history, row, triage_snapshot=decisions,
                                                       assessment_runs=assessment_runs) for row in previous],

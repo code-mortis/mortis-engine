@@ -43,7 +43,7 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                 "selected_units": len(plan.units),
                 "possible_findings": sum(len(value.get("comments", [])) for value in outcomes.values()
                                          if value["status"] == "completed"),
-                "selected_files": len(plan.selected),
+                "selected_files": len(plan.selected) - len(plan.reused),
                 "completed_files": sum(not item.error and bool(item.units) and all(
                     outcomes.get(unit.key, {}).get("status") == "completed" for unit in item.units)
                     for item in plan.selected),

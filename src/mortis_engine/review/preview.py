@@ -30,6 +30,8 @@ def preview_local(repository, *, mode="worktree", base=None, head="HEAD", effort
     The optional explicit ceiling reproduces a connection's unit bound without reading
     that connection. Batch counts exclude provider-envelope splitting and follow-ups.
     """
+    if overrides and any(key in overrides for key in settings.COMPARISON_FLAGS):
+        raise ValueError("Incremental and unchanged-review overrides are unsupported in a preview.")
     maximum = unit_byte_limit(prompt_token_ceiling)
     effort = settings.effort_override(effort)
     with snapshots.snapshot(repository, mode=mode, base=base, head=head, overrides=overrides) as snap:
@@ -63,6 +65,7 @@ def preview_local(repository, *, mode="worktree", base=None, head="HEAD", effort
                 "limit_reason": plan.limit_reason,
                 "errors": [{"path": row.path, "message": row.error} for row in plan.selected if row.error],
                 "warnings": [*snap.warnings, *plan.rules["warnings"]],
-                "assumptions": ["No saved connection was read; unit sizing uses only the explicit ceiling or the default bound.",
+                "assumptions": ["No review history was read; the preview shows the full comparison scope.",
+                                "No saved connection was read; unit sizing uses only the explicit ceiling or the default bound.",
                                 "Bytes describe assigned source, diff and unit JSON, not tokens or a complete provider request.",
                                 "Planned batches exclude provider-envelope splitting, graph context, source follow-ups and later stages."]}
