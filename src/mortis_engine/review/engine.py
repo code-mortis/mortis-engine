@@ -567,7 +567,10 @@ def _completed_outcomes(result, batch):
 def _report(plan, prepared, outcomes, *, tokens, status=None):
     report_units = [unit for batch in prepared for unit in batch.units] or plan.units
     completed, failed, comments = [], [], []
+    reused = set(plan.reused)
     for item in plan.selected:
+        if item.path in reused:
+            continue
         units = item.units
         if not item.error and units and all(outcomes.get(unit.key, {}).get("status") == "completed" for unit in units):
             completed.append(item.path)
@@ -578,13 +581,13 @@ def _report(plan, prepared, outcomes, *, tokens, status=None):
                 comments.extend(outcomes[unit.key].get("comments", []))
     if status is None:
         status = ("skipped" if plan.limit_reason or not plan.selected
-                  else "partial" if failed and any(value["status"] == "completed" for value in outcomes.values())
+                  else "partial" if failed and (reused or any(value["status"] == "completed" for value in outcomes.values()))
                   else "failed" if failed else "completed")
     def entries(paths):
         return [{"item_id": fingerprint(path), "path": path} for path in paths]
     report = {"manifest": {"schema_version": "code-mortis.pr-analysis/v1", "terminal_state": status,
                 "coverage": {"selected": entries([item.path for item in plan.selected]),
-                    "completed": entries(completed), "failed": entries(failed), "reused": [], "waived": []}},
+                    "completed": entries(completed), "failed": entries(failed), "reused": entries(plan.reused), "waived": []}},
               "engine": "mortis", "engine_version": VERSION, "excluded_files": plan.exclusions,
               "errors": [{"path": item.path, "message": item.error or next((outcomes.get(unit.key, {}).get("error")
                     for unit in item.units if outcomes.get(unit.key, {}).get("error")), "incomplete_analysis")}

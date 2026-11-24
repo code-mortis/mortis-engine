@@ -124,6 +124,36 @@ mortis review --base main --head HEAD --connection opencode-go --format json
 
 Mortis compares the common ancestor of the two commits with the head commit. Local edits and untracked files are outside this comparison. Branches, tags and commit IDs must be available in the local clone. Use `--repo` to select another repository. GitHub access and a running Code Mortis instance are unnecessary.
 
+### Review subsequent commits
+
+Branch comparisons can reuse coverage from the last compatible review of the same
+base and head refs. Use a branch name or its checked-out `HEAD` to keep a stable
+history scope as new commits arrive. Both options default to `false`.
+
+```toml
+[review]
+incremental = true
+skip_unchanged = true
+```
+
+`incremental` analyzes files that changed since the last fully covered head. Those
+files use their cumulative diff from the current comparison's common ancestor. The
+summary still covers the eligible changes in the branch, and previous findings stay
+in history. Reused coverage describes prior analysis of unchanged files. A first run,
+an incomplete review, a changed base or review configuration, or unavailable
+ancestry triggers a full comparison. `--graph` and `--second-pass` also use the full
+comparison. `max_files` applies to the cumulative scope.
+
+`skip_unchanged` skips model calls when the compatible prior review covered the
+same head tree, even with a new commit SHA. The skipped report exits successfully
+and links to the prior run. Review flags `--incremental` / `--no-incremental` and
+`--skip-unchanged` / `--no-skip-unchanged` override the committed settings. Use both
+negative flags to force a full review. The Python API accepts the same booleans in
+`overrides`. `--resume` keeps the saved choice. `--preview` shows the full scope
+without reading history and rejects the comparison-specific flags.
+
+### Configure a branch review
+
 Create an optional `mortis.toml` on the base branch to configure the review:
 
 ```toml

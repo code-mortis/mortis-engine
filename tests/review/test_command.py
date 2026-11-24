@@ -125,6 +125,41 @@ def test_no_eligible_work_does_not_read_credentials_and_file_limit_is_visible(
     assert len(result["coverage"]["waived"]) == 2 and result["usage"]["total_tokens"] == 7
 
 
+def test_branch_comparison_toml_flags_and_exports(repo, profile, workflow_provider, monkeypatch, capsys):
+    monkeypatch.chdir(repo)
+    commit(repo, {"a.py": "a = 0\n", "b.py": "b = 0\n",
+                  "mortis.toml": "[review]\nincremental = true\nskip_unchanged = true\n"})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {"a.py": "a = 1\n", "b.py": "b = 1\n"})
+    command = ["review", "--base", "main"]
+    markdown = repo.parent / "comparison.md"
+
+    assert cli.main([*command, "--format", "json"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["comparison"]["strategy"] == "full"
+    assert cli.main([*command, "--output", str(markdown)]) == 0
+    assert "skipped unchanged" in capsys.readouterr().out
+    exported = markdown.read_text()
+    assert "## Review comparison" in exported and r"skipped\_unchanged" in exported
+
+    commit(repo, {"b.py": "b = 2\n"})
+    assert cli.main([*command, "--no-incremental", "--no-skip-unchanged", "--format", "json"]) == 0
+    assert [row["path"] for row in json.loads(capsys.readouterr().out)["coverage"]["completed"]] == ["a.py", "b.py"]
+    assert cli.main([*command, "--no-skip-unchanged", "--incremental", "--format", "json"]) == 0
+    incremental = json.loads(capsys.readouterr().out)
+    assert incremental["comparison"]["strategy"] == "incremental"
+    assert incremental["usage"]["total_tokens"] > 0
+
+    assert cli.main([*command, "--preview", "--format", "json"]) == 0
+    assert [row["path"] for row in json.loads(capsys.readouterr().out)["selected_files"]] == ["a.py", "b.py"]
+    assert cli.main([*command, "--preview", "--incremental"]) == 1
+    assert "--preview" in capsys.readouterr().err
+    assert cli.main(["review", "--all", "--skip-unchanged"]) == 1
+    assert "--base" in capsys.readouterr().err
+    assert cli.main(["review", "--resume", first["run_id"], "--no-incremental"]) == 1
+    assert "saved run" in capsys.readouterr().err
+
+
 def test_ambiguous_profile_requires_selection(repo, profile, monkeypatch, capsys):
     monkeypatch.chdir(repo)
     commit(repo, {"app.py": "value = 3\n"})

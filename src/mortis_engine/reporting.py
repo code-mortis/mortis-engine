@@ -109,6 +109,8 @@ def _markdown(report) -> str:
     if security:
         metadata.update(grade=report.get("grade") or "unavailable", rating_policy=report.get("rating_policy", "unavailable"))
     lines.extend(_details(metadata))
+    if comparison := report.get("comparison"):
+        _section(lines, "Review comparison", comparison)
     coverage = report.get("coverage", {})
     if report.get("summary"):
         _summary(lines, report["summary"], coverage)

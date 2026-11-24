@@ -1,5 +1,6 @@
 """Terminal workflow selection and versioned report rendering."""
 
+import argparse
 import json
 import re
 import sys
@@ -138,6 +139,12 @@ def render(result):
     ]
     if result.get("mode") == "all":
         lines[0] = f"Review {result['status']}  full tree at {result['revision'][:12]}"
+    if comparison := result.get("comparison"):
+        strategy = comparison["strategy"].replace("_", " ")
+        reason = comparison["reason"].replace("_", " ")
+        baseline = comparison.get("baseline_run_id")
+        lines.append(f"Comparison: {strategy} ({reason}). Reused coverage: {len(coverage['reused'])} files."
+                     + (f" Previous run: {baseline}." if baseline else ""))
     if not selected:
         lines.append("No eligible files in the selected changes.")
     for item in result["warnings"]:
@@ -196,6 +203,10 @@ def run(args):
         raise ValueError("--preview shows primary scope only; omit --second-pass.")
     if args.second_pass:
         overrides["second_pass"] = True
+    comparison = {key: value for key in settings.COMPARISON_FLAGS if (value := getattr(args, key)) is not None}
+    if comparison and (args.preview or not (args.base or args.resume)):
+        raise ValueError("Incremental and unchanged-review flags require --base and cannot be used with --preview.")
+    overrides.update(comparison)
     settings.apply_overrides({}, overrides)
     graph_limits = {key: getattr(args, "graph_" + key) for key in GRAPH_LIMIT_FLAGS
                     if getattr(args, "graph_" + key, None) is not None}
@@ -276,6 +287,10 @@ def add_parser(commands):
     mode.add_argument("--all", action="store_true", help="Review all eligible tracked files at --head")
     parser.add_argument("--head", help="Branch, tag or commit (default: HEAD)")
     parser.add_argument("--second-pass", action="store_true", help="Opt into a bounded complementary discovery pass after primary analysis")
+    parser.add_argument("--incremental", action=argparse.BooleanOptionalAction,
+                        help="Review files changed since the previous complete branch review")
+    parser.add_argument("--skip-unchanged", action=argparse.BooleanOptionalAction,
+                        help="Skip inference when a compatible branch review already covered identical content")
     parser.add_argument("--preview", action="store_true", help="Show local files, exclusions, bytes, units and planned batches without a connection or saved run")
     parser.add_argument("--prompt-token-ceiling", type=int, help="Explicit preview-only sizing assumption (4096–2000000); never reads a saved connection")
     parser.add_argument("--graph", action="store_true", help="Include related source from the isolated local code graph parser")

@@ -335,6 +335,11 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
     result["settings"] = {key: value for key, value in options.items() if not key.startswith("_")}
     run, previous = _run(result, options, session), _history(history)
     result["candidates"], result["findings"], result["stage_errors"] = [], [], []
+    if result.get("comparison", {}).get("strategy") == "skipped_unchanged":
+        result["history"] = [{**item, "observation": "not_observed"} for item in previous["findings"]]
+        result["summary"] = {"status": "skipped", "reason": "A compatible review already covered identical content."}
+        result["workflow_status"] = "completed"
+        return result
     if options.get("auto_resolve") and not report.get("coverage", {}).get("waived"):
         original = {"head_sha": report["head_sha"], "findings": [
             item["snapshot"] for item in previous["findings"]
