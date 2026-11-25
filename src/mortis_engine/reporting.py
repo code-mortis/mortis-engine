@@ -50,7 +50,7 @@ def _section(lines, title, value):
     lines.extend(_details(value) if value else ["None recorded."])
 
 
-def _summary(lines, summary, coverage):
+def _summary(lines, summary, coverage, affected):
     lines.extend(["", "## Change summary", ""])
     result = summary.get("result") or {}
     lines.extend(_details({key: value for key, value in summary.items() if key != "result"}))
@@ -65,6 +65,7 @@ def _summary(lines, summary, coverage):
             validated = SummaryDiagram.model_validate(diagram)
             ids = {node.id for node in validated.nodes}
             allowed = {row["path"] for row in coverage.get("selected", [])}
+            allowed.update(row["path"] for row in affected.get("triggers", []))
             if (len(ids) != len(validated.nodes)
                     or any(edge.source not in ids or edge.target not in ids for edge in validated.edges)
                     or any(path not in allowed for node in validated.nodes for path in node.paths)):
@@ -112,8 +113,11 @@ def _markdown(report) -> str:
     if comparison := report.get("comparison"):
         _section(lines, "Review comparison", comparison)
     coverage = report.get("coverage", {})
+    affected = report.get("affected_callers", {})
+    if not isinstance(affected, dict):
+        affected = {}
     if report.get("summary"):
-        _summary(lines, report["summary"], coverage)
+        _summary(lines, report["summary"], coverage, affected)
 
     findings = report.get("findings", [])
     lines.extend(["", f"## Findings ({len(findings)})", ""])
@@ -147,6 +151,8 @@ def _markdown(report) -> str:
         counts["incomplete_units"] = [{key: value for key, value in row.items() if key not in {"key", "comments"}}
                                       for row in units if row.get("status") not in {"completed", "reused"}]
     _section(lines, "Coverage", counts)
+    if affected:
+        _section(lines, "Affected callers", affected)
     if "excluded_files" in report:
         _section(lines, "Excluded files", report["excluded_files"])
     if "history" in report:

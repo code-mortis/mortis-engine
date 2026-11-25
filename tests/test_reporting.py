@@ -140,6 +140,19 @@ def test_invalid_saved_diagram_is_not_rendered(diagram):
     assert "```mermaid" not in rendered
 
 
+@pytest.mark.parametrize("affected", [None, ["untrusted.py"]])
+@pytest.mark.parametrize(("path", "renders_diagram"), [("pricing.py", True), ("untrusted.py", False)])
+def test_malformed_caller_scope_does_not_break_diagram_export(affected, path, renders_diagram):
+    report = review_report()
+    report["affected_callers"] = affected
+    report["summary"] = {"result": {"narrative": "Change summary", "diagram": {
+        "nodes": [{"id": "A", "label": "Node", "paths": [path]}], "edges": []}}}
+    rendered = markdown(report)
+    assert "Change summary" in rendered and "## Findings" in rendered
+    assert ("```mermaid" in rendered) == renders_diagram
+    assert ("Diagram unavailable" in rendered) != renders_diagram
+
+
 @pytest.mark.parametrize("schema", [None, "mortis.summary/v1", "mortis.review/v2"])
 def test_unsupported_report_contract_fails_explicitly(schema):
     with pytest.raises(ValueError, match="mortis.review/v1 and mortis.security/v1 only"):

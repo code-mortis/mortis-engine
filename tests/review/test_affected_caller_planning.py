@@ -1,0 +1,188 @@
+"""Connection-free discovery of callers affected by pinned deletions and renames."""
+
+import pytest
+
+from mortis_engine.review import affected_callers, planning, preview_local, settings, snapshots
+
+from .git_helpers import commit, git
+
+
+@pytest.mark.parametrize("mode", ["commits", "worktree", "staged"])
+def test_deleted_executable_with_spaces_plans_cross_language_caller(repo, mode):
+    executable = "tools/legacy runner"
+    caller = "jobs/start.py"
+    base = commit(repo, {executable: "#!/bin/sh\nexit 0\n",
+                         caller: 'import subprocess\nsubprocess.run(["../tools/legacy runner"])\n'})
+    if mode == "worktree":
+        (repo / executable).unlink()
+    else:
+        git(repo, "rm", executable)
+        if mode == "commits":
+            git(repo, "commit", "-qm", "remove executable")
+    preview = preview_local(repo, mode=mode, base=base if mode == "commits" else None)
+    scope = preview["affected_callers"]
+    trigger, = scope["triggers"]
+    site, = scope["sites"]
+    unit, = preview["units"]
+    assert trigger["path"] == executable and trigger["source_sha"] == base
+    assert site["path"] == caller and site["start_line"] <= 2 <= site["end_line"]
+    assert site["unit_key"] == unit["key"]
+    assert not preview["selected_files"]
+    assert not scope["limits_reached"]
+
+
+def test_explicit_paths_can_resolve_from_repository_root_without_leaving_it(repo):
+    executable = "scripts/charge.sh"
+    base = commit(repo, {executable: "#!/bin/sh\nexit 0\n",
+                         "backend/run.py": 'subprocess.run(["./scripts/charge.sh"])\n',
+                         "backend/outside.py": 'subprocess.run(["../../scripts/charge.sh"])\n'})
+    git(repo, "rm", executable)
+    git(repo, "commit", "-qm", "remove executable")
+    preview = preview_local(repo, mode="commits", base=base)
+    site, = preview["affected_callers"]["sites"]
+    assert site["path"] == "backend/run.py" and site["triggers"] == [executable]
+
+
+@pytest.mark.parametrize(("suffix", "unavailable"), [(b"\xff", True), (b"\0", False)])
+def test_caller_discovery_omits_undecodable_and_binary_blobs(repo, suffix, unavailable):
+    (repo / "caller.py").write_bytes(b'run("tool.sh")  # ' + suffix + b"\n")
+    base = commit(repo, {"tool.sh": "exit 0\n"})
+    git(repo, "rm", "tool.sh")
+    git(repo, "commit", "-qm", "remove tool")
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert scope["sites"] == []
+    assert scope["limits_reached"] == (["source_unavailable"] if unavailable else [])
+
+
+def test_literal_replacement_character_preserves_saved_plan_scope(repo):
+    base = commit(repo, {"tool.sh": "exit 0\n", "caller.py": 'run("tool.sh")\n'})
+    git(repo, "rm", "tool.sh")
+    commit(repo, {"caller.py": 'run("tool.sh")  # \ufffd\n'})
+    with snapshots.snapshot(repo, mode="commits", base=base) as snap:
+        args = (snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base)
+        options = settings.load(snap.repo, snap.env, snap.settings_sha)
+        current = planning.plan_review(*args, options, lambda: False)
+        legacy = planning.plan_review(*args, {**options, "_affected_caller_policy": "affected-callers/v2"}, lambda: False)
+    assert current.selected[0].error is None
+    assert current.affected_callers["sites"][0]["unit_key"] == current.selected[0].units[0].key
+    assert legacy.selected[0].error and not legacy.units
+    assert legacy.affected_callers["limits_reached"] == ["source_unavailable"]
+
+
+def test_callers_across_languages_share_one_discovery_pass(repo):
+    callers = {
+        "client.ts": ("lib/old_client.ts", "import { send } from './lib/old_client';"),
+        "main.rs": ("support/legacy.rs", "use crate::support::legacy;"),
+        "worker.c": ("headers/retired.h", '#include "headers/retired.h"'),
+        "job.rb": ("tasks/old_job.rb", "require_relative 'tasks/old_job'"),
+        "launch.go": ("bin/old-helper", 'cmd := exec.Command("bin/old-helper")'),
+        "script.custom": ("assets/retired.dat", 'read("assets/retired.dat")'),
+    }
+    files = {path: line + "\n" for path, (_, line) in callers.items()}
+    files.update({target: "retired\n" for target, _ in callers.values()})
+    files["mortis.toml"] = '[review.rules]\ninclude = ["**/*.custom", "**/*.dat"]\n'
+    base = commit(repo, files)
+    git(repo, "rm", *(target for target, _ in callers.values()))
+    git(repo, "commit", "-qm", "retire dependencies")
+    preview = preview_local(repo, mode="commits", base=base)
+    scope = preview["affected_callers"]
+    assert {site["path"]: site["triggers"] for site in scope["sites"]} == {
+        path: [target] for path, (target, _) in callers.items()
+    }
+    assert not scope["limits_reached"]
+
+
+def test_rename_updates_relative_import_of_same_basename(repo):
+    base = commit(repo, {"legacy/tool.py": "def apply():\n    return 1\n",
+                         "backend/run.py": "from ..legacy.tool import apply\napply()\n"})
+    git(repo, "mv", "legacy/tool.py", "backend/tool.py")
+    commit(repo, {"backend/run.py": "from .tool import apply\napply()\n"})
+    preview = preview_local(repo, mode="commits", base=base)
+    assert not preview["affected_callers"]["sites"]
+
+
+@pytest.mark.parametrize("binding", ["import new as replacement\nreplacement.apply()", "from new import apply\napply()"])
+def test_bare_import_of_renamed_sibling_rebinds_only_in_its_directory(repo, binding):
+    original = "from src.old import apply\napply()\n"
+    base = commit(repo, {"src/old.py": "def apply():\n    return 1\n", "src/caller.py": original,
+                         "other/caller.py": original, "other/new.py": "other = 1\n"})
+    git(repo, "mv", "src/old.py", "src/new.py")
+    commit(repo, {"src/caller.py": binding + "\n", "other/caller.py": binding + "\n"})
+    preview = preview_local(repo, mode="commits", base=base)
+    assert {site["path"] for site in preview["affected_callers"]["sites"]} == {"other/caller.py"}
+    with snapshots.snapshot(repo, mode="commits", base=base) as snap:
+        options = {**settings.load(snap.repo, snap.env, snap.settings_sha), "_affected_caller_policy": "affected-callers/v1"}
+        legacy = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
+                                      options, lambda: False)
+    assert legacy.affected_callers["policy"] == "affected-callers/v1"
+    assert {site["path"] for site in legacy.affected_callers["sites"]} == {"src/caller.py", "other/caller.py"}
+
+
+@pytest.mark.parametrize("stale_symbol", [False, True])
+def test_rename_rebinds_only_the_symbol_actually_imported(repo, stale_symbol):
+    module = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
+    base = commit(repo, {"old/tool.py": module,
+                         "checkout.py": "from old.tool import foo, bar\nfoo()\nbar()\n",
+                         "unrelated.rs": "fn main() { foo(); bar(); }\n"})
+    (repo / "new").mkdir()
+    git(repo, "mv", "old/tool.py", "new/tool.py")
+    commit(repo, {"checkout.py": "from new.tool import foo\nfoo()\n" + ("bar()\n" if stale_symbol else "")})
+    preview = preview_local(repo, mode="commits", base=base)
+    scope = preview["affected_callers"]
+    assert scope["triggers"][0]["new_path"] == "new/tool.py"
+    assert not scope["limits_reached"]
+    if stale_symbol:
+        site, = scope["sites"]
+        assert site["path"] == "checkout.py"
+        checkout = next(row for row in preview["selected_files"] if row["path"] == "checkout.py")
+        assert site["unit_key"] in checkout["unit_keys"]
+    else:
+        assert not scope["sites"]
+
+
+def test_legacy_policy_keeps_primary_unit_identity_and_disabled_scope(repo):
+    base = commit(repo, {"old.sh": "#!/bin/sh\nexit 0\n", "main.py": 'command = "old.sh"\n'})
+    git(repo, "rm", "old.sh")
+    commit(repo, {"main.py": 'command = "old.sh"\nrun(command)\n'})
+    with snapshots.snapshot(repo, mode="commits", base=base) as snap:
+        options = settings.load(snap.repo, snap.env, snap.settings_sha)
+        args = (snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base)
+        current = planning.plan_review(*args, options, lambda: False)
+        legacy = planning.plan_review(*args, {**options, "_affected_caller_policy": None}, lambda: False)
+    unit, = current.units
+    original, = legacy.units
+    assert current.affected_callers["sites"][0]["unit_key"] == unit.key
+    assert unit.key != original.key and unit.path == original.path
+    assert unit.affected_triggers[0]["evidence"]["revision"] == base
+    assert legacy.affected_callers is None and not original.affected_triggers
+
+
+def test_discovery_limit_preserves_primary_units_and_marks_omission(repo, monkeypatch):
+    base = commit(repo, {"old.sh": "#!/bin/sh\nexit 0\n", "a.py": "value = 1\n", "z.py": 'run("old.sh")\n'})
+    git(repo, "rm", "old.sh")
+    commit(repo, {"a.py": "value = 2\n"})
+    monkeypatch.setattr(affected_callers, "MAX_FILES", 1)
+    preview = preview_local(repo, mode="commits", base=base)
+    assert [unit["path"] for unit in preview["units"]] == ["a.py"]
+    assert preview["affected_callers"]["limits_reached"] == ["scanned_files"]
+
+
+def test_deleted_symlink_does_not_enable_caller_discovery(repo):
+    (repo / "old.sh").symlink_to("tool.sh")
+    base = commit(repo, {"tool.sh": "#!/bin/sh\nexit 0\n", "job.py": 'run("old.sh")\n'})
+    git(repo, "rm", "old.sh")
+    git(repo, "commit", "-qm", "remove symlink")
+    preview = preview_local(repo, mode="commits", base=base)
+    assert "affected_callers" not in preview
+    assert not preview["units"]
+
+
+def test_file_limit_retains_matched_unassigned_caller_location(repo):
+    base = commit(repo, {"old.sh": "exit 0\n", "caller.py": 'run("old.sh")\n', "app.py": "version = 1\n"})
+    git(repo, "rm", "old.sh")
+    commit(repo, {"app.py": "version = 2\n"})
+    preview = preview_local(repo, mode="commits", base=base, overrides={"max_files": 1})
+    site, = preview["affected_callers"]["sites"]
+    assert (site["path"], site["start_line"], site["status"]) == ("caller.py", 1, "incomplete")
+    assert site["unit_key"] is None and site["error"] == "max_files"
+    assert [unit["path"] for unit in preview["units"]] == ["app.py"]

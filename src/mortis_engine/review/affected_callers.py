@@ -1,0 +1,302 @@
+"""Bounded discovery of surviving references to removed or renamed Git paths."""
+
+import posixpath
+import re
+from collections import defaultdict
+from pathlib import PurePosixPath
+
+from . import source
+from .errors import ReviewStopped
+
+POLICY = "affected-callers/v3"
+LEGACY_TEXT_POLICIES = (None, "affected-callers/v1", "affected-callers/v2")
+MAX_TRIGGERS = 64
+MAX_FILES = 512
+MAX_INVENTORY_ENTRIES = 4096
+MAX_OBJECT_READS = 512
+MAX_BYTES = 8 * 1024 * 1024
+MAX_FILE_BYTES = 256 * 1024
+MAX_MATCHES = 256
+MAX_SYMBOLS = 64
+CONTEXT_LINES = 3
+
+_TOKEN = re.compile(r"[\w$@./:\-]+")
+_IDENTIFIER = re.compile(r"[\w$]+")
+_QUOTED = re.compile(r"""(["'])([^\r\n]{1,2000}?)\1""")
+_MODULE_CONTEXT = re.compile(r"\b(?:from|import|include|load|mod|require(?:_relative)?|source|use|using)\b")
+_MODULE_BINDING = re.compile(r"^[ \t]*(?:(?:pub|export)[ \t]+)?(?:from|import|use|using)\b")
+_FROM_IMPORT = re.compile(r"\bfrom[ \t]+([.\w/]+)[ \t]+import[ \t]+([\w$]+)")
+_IMPORT_ALIAS = re.compile(r"\bas[ \t]+([\w$]+)")
+_QUALIFIER = re.compile(r"([\w$]+)(?:\.|::)$")
+# shortcut: common declaration forms cover literal discovery. Add resolvers when measured misses justify them.
+_DECLARATION = re.compile(
+    r"(?m)^[ \t]*(?:(?:async|export|default|pub|public|private|protected|internal|static|final|abstract|"
+    r"virtual|override|inline|extern)[ \t]+)*(?:class|const|def|enum|fn|func|function|interface|let|module|"
+    r"namespace|object|record|struct|sub|trait|type|val|var)[ \t]+([^\W\d][\w$]*)"
+)
+
+
+def _module_paths(path):
+    file_path = PurePosixPath(path)
+    paths = {path, str(file_path.with_suffix(""))}
+    if file_path.stem in {"__init__", "index", "mod"} and file_path.parent.parts:
+        paths.add(str(file_path.parent))
+    return paths
+
+
+def _spellings(path):
+    return {spelling for name in _module_paths(path)
+            for spelling in (name, name.replace("/", "."), name.replace("/", "::"), PurePosixPath(name).name)}
+
+
+def _relative_spellings(token, parent):
+    if token.startswith(("./", "../")):
+        # Imports generally start at the caller, while invocations may start at the repository root.
+        candidates = [posixpath.join(parent, token)]
+        if token.startswith("./"):
+            candidates.append(token)
+    elif token.startswith(".") and "/" not in token:
+        name = token.lstrip(".")
+        parents = [".."] * (len(token) - len(name) - 1)
+        candidates = [posixpath.join(parent, *parents, name.replace(".", "/"))]
+    else:
+        return None
+    normalized = dict.fromkeys(posixpath.normpath(candidate) for candidate in candidates)
+    return [path for path in normalized if path not in {".", ".."} and not path.startswith(("../", "/"))]
+
+
+def _references(line, path, labels, relative_paths, file_names, *, binding_policy=None):
+    parent = str(PurePosixPath(path).parent)
+    sibling_bindings = binding_policy not in (None, "affected-callers/v1")
+    in_module_context = bool(_MODULE_CONTEXT.search(line))
+    tokens = [(match.group().rstrip(".:"), False) for match in _TOKEN.finditer(line)]
+    tokens.extend((match[2], True) for match in _QUOTED.finditer(line))
+    tokens.extend((f"{match[1]}{'' if match[1].endswith('.') else '.'}{match[2]}", False)
+                  for match in _FROM_IMPORT.finditer(line))
+    for token, quoted in tokens:
+        if not token or len(token) > 2000:
+            continue
+        relative = _relative_spellings(token, parent)
+        if relative is not None:
+            for spelling in relative:
+                yield from relative_paths.get(spelling, ())
+            continue
+        # Qualified paths can be followed by a symbol, as in `crate::old::function`.
+        spellings = {token}
+        if "::" in token and in_module_context:
+            qualified = token.removeprefix("::")
+            scope, _, tail = qualified.partition("::")
+            if scope in {"crate", "self", "super"}:
+                qualified = tail
+            spellings.update((qualified, qualified.rpartition("::")[0]))
+        for spelling in spellings:
+            candidates = relative_paths.get(spelling) or labels.get(spelling, ())
+            if not candidates and not sibling_bindings:
+                continue
+            local = labels.get(posixpath.join(parent, spelling), ()) if parent != "." else ()
+            resolved_module = spelling in relative_paths or (sibling_bindings and bool(local))
+            qualified = (any(separator in spelling for separator in ("/", ".", "::"))
+                         or (in_module_context and resolved_module))
+            if qualified or (quoted and spelling in file_names) or (in_module_context and binding_policy is None):
+                yield from local or candidates
+
+
+def _inventory(repo, env, sha, stopped, limits):
+    output = source.git(repo, env, "ls-tree", "-r", "-z", "-l", sha, stopped=stopped, strict_utf8=True)
+    entries = {}
+    for index, row in enumerate(output.split("\0", MAX_INVENTORY_ENTRIES + 1)):
+        if stopped():
+            raise ReviewStopped("Caller discovery was cancelled.")
+        if index == MAX_INVENTORY_ENTRIES and row:
+            limits.add("inventory_entries")
+            break
+        match = re.fullmatch(r"100(?:644|755) blob ([0-9a-f]{40})\s+(\d+)\t([^\0]+)", row)
+        if match:
+            try:
+                path = source.repository_path(match[3])
+            except ValueError:
+                limits.add("invalid_path")
+                continue
+            entries[path] = (match[1], int(match[2]))
+    return entries
+
+
+def _excerpt(path, sha, text):
+    lines = text.splitlines()
+    start = next((index for index, line in enumerate(lines) if 0 < len(line.encode()) <= 400 and line.strip()), None)
+    if start is None:
+        return None
+    end = start + 1
+    while end < min(len(lines), start + 3) and len("\n".join(lines[start:end + 1]).encode()) <= 400:
+        end += 1
+    return {"revision": sha, "path": path, "start_line": start + 1, "end_line": end,
+            "text": "\n".join(lines[start:end])}
+
+
+def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POLICY):
+    """Return public scope and pinned source for the planner's focused units."""
+    limits = set()
+    scope = {"policy": policy, "triggers": [], "sites": [], "scanned_files": 0, "scanned_bytes": 0,
+             "limits_reached": []}
+    source_by_trigger, labels, replacements, symbols, matches = {}, defaultdict(set), defaultdict(set), defaultdict(set), {}
+    old_paths, replacement_paths = defaultdict(set), defaultdict(set)
+    file_names, replacement_names = set(), set()
+    if len(triggers) > MAX_TRIGGERS:
+        limits.add("trigger_count")
+    triggers = triggers[:MAX_TRIGGERS]
+    base = {}
+    try:
+        base = _inventory(repo, env, plan.merge_base, stopped, limits)
+        head = _inventory(repo, env, plan.head_sha, stopped, limits)
+    except ReviewStopped:
+        raise
+    except ValueError:
+        scope["limits_reached"] = sorted(limits | {"source_inventory"})
+        scope["triggers"] = [_trigger(path, new_path, base.get(path, (None,))[0], plan.merge_base)
+                             for path, new_path in triggers]
+        return scope, source_by_trigger, matches
+
+    cached, object_bytes = {}, 0
+
+    def read(entry):
+        nonlocal object_bytes
+        blob, size = entry
+        if blob in cached:
+            return cached[blob]
+        if size > MAX_FILE_BYTES:
+            limits.add("file_bytes")
+            return None
+        if object_bytes + size > MAX_BYTES:
+            limits.add("object_bytes")
+            return None
+        if len(cached) == MAX_OBJECT_READS:
+            limits.add("object_reads")
+            return None
+        object_bytes += size
+        try:
+            text = source.git(repo, env, "cat-file", "blob", blob, stopped=stopped, strict_utf8=True)
+        except ReviewStopped:
+            raise
+        except ValueError:
+            limits.add("source_unavailable")
+            cached[blob] = None
+            return None
+        if len(text.encode()) != size or (policy in LEGACY_TEXT_POLICIES and "\ufffd" in text):
+            limits.add("source_unavailable")
+            text = None
+        cached[blob] = None if text is None or "\0" in text else text
+        return cached[blob]
+
+    for path, new_path in triggers:
+        if path not in base or (new_path and new_path not in head):
+            if "inventory_entries" in limits:
+                scope["triggers"].append(_trigger(path, new_path, base.get(path, (None,))[0], plan.merge_base))
+            continue
+        text = read(base[path])
+        item = _trigger(path, new_path, base[path][0], plan.merge_base)
+        scope["triggers"].append(item)
+        evidence = _excerpt(path, plan.merge_base, text) if text else None
+        source_by_trigger[path] = {**item, **({"evidence": evidence} if evidence else {})}
+        old_spellings = _spellings(path)
+        file_names.add(PurePosixPath(path).name)
+        for label in old_spellings:
+            labels[label].add(path)
+        for spelling in _module_paths(path):
+            old_paths[spelling].add(path)
+        if new_path:
+            replacement_names.add(PurePosixPath(new_path).name)
+            for label in _spellings(new_path) - old_spellings:
+                replacements[label].add(path)
+            for spelling in _module_paths(new_path) - _module_paths(path):
+                replacement_paths[spelling].add(path)
+        if text:
+            declarations = sorted(set(_DECLARATION.findall(text)))
+            if len(declarations) > MAX_SYMBOLS:
+                limits.add("symbol_count")
+            for symbol in declarations[:MAX_SYMBOLS]:
+                symbols[symbol].add(path)
+
+    count = 0
+    for path in sorted(head):
+        if not labels:
+            break
+        if not allowed(path):
+            continue
+        if scope["scanned_files"] == MAX_FILES:
+            limits.add("scanned_files")
+            break
+        scope["scanned_files"] += 1
+        if scope["scanned_bytes"] + head[path][1] > MAX_BYTES:
+            limits.add("scanned_bytes")
+            continue
+        text = read(head[path])
+        if not text:
+            continue
+        scope["scanned_bytes"] += head[path][1]
+        lines = text.splitlines(keepends=True)
+        direct, rebound_symbols, rebound_modules = [], defaultdict(set), defaultdict(set)
+        for line in lines:
+            if stopped():
+                raise ReviewStopped("Caller discovery was cancelled.")
+            linked = set(_references(line, path, labels, old_paths, file_names))
+            if replacements and _MODULE_BINDING.match(line):
+                replacement = set(_references(line, path, replacements, replacement_paths, replacement_names,
+                                              binding_policy=policy))
+                if replacement:
+                    linked -= replacement - set(_references(line, path, labels, old_paths, file_names,
+                                                            binding_policy=policy))
+                    for name in _IDENTIFIER.findall(line):
+                        rebound_symbols[name].update(replacement.intersection(symbols.get(name, ())))
+                    aliases = _IMPORT_ALIAS.findall(line)
+                    for dependency in replacement:
+                        module = PurePosixPath(source_by_trigger[dependency]["new_path"]).stem
+                        for name in aliases or [module]:
+                            rebound_modules[name].add(dependency)
+            direct.append(linked)
+        existing = set().union(*direct)
+        original_refs = None
+        sites = []
+        for index, line in enumerate(lines):
+            if stopped():
+                raise ReviewStopped("Caller discovery was cancelled.")
+            linked = direct[index].copy()
+            used = set()
+            for word in _IDENTIFIER.finditer(line):
+                name = word.group()
+                if name not in symbols:
+                    continue
+                qualifier = _QUALIFIER.search(line[max(0, word.start() - 128):word.start()])
+                rebound = rebound_modules.get(qualifier[1], set()) if qualifier else rebound_symbols.get(name, set())
+                used.update(symbols[name] - (rebound - existing))
+            if used - linked:
+                near = set().union(*direct[max(0, index - CONTEXT_LINES):index + CONTEXT_LINES + 1])
+                if used - linked - near and original_refs is None:
+                    old_path, status = changes.get(path, (None, ""))
+                    original_path = old_path if status.startswith("R") else path
+                    original = base.get(original_path) if allowed(original_path) else None
+                    if original and original == head[path] and original_path == path:
+                        original_refs = existing
+                    else:
+                        old_text = read(original) if original else None
+                        original_refs = {reference for old_line in (old_text or "").splitlines()
+                                         for reference in _references(old_line, original_path, labels,
+                                                                      old_paths, file_names)}
+                linked.update(used & (near | (original_refs or set())))
+            if not linked:
+                continue
+            if count == MAX_MATCHES:
+                limits.add("match_count")
+                break
+            sites.append((index + 1, sorted(linked)))
+            count += 1
+        if sites:
+            matches[path] = (lines, sites)
+        if "match_count" in limits:
+            break
+    scope["limits_reached"] = sorted(limits)
+    return scope, source_by_trigger, matches
+
+
+def _trigger(path, new_path, blob_sha, merge_base):
+    return {"path": path, "new_path": new_path, "blob_sha": blob_sha,
+            "status": "renamed" if new_path else "deleted", "source_sha": merge_base}

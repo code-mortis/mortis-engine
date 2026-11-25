@@ -68,7 +68,7 @@ def progress_display(enabled, *, scan=False):
     display = Progress(SpinnerColumn(), TextColumn("{task.description}", markup=False), TimeElapsedColumn(),
                        console=console, auto_refresh=False)
     task = display.add_task("Preparing security scan…" if scan else "Preparing review…", total=None)
-    coverage = ""
+    coverage, caller_coverage = "", ""
     possible, scanner = "", ""
     assessment = []
     capacity, current = "", None
@@ -77,7 +77,7 @@ def progress_display(enabled, *, scan=False):
           if console.is_interactive else nullcontext()) as live:
 
         def update(value):
-            nonlocal coverage, possible, scanner, assessment, capacity, current, waiting
+            nonlocal coverage, caller_coverage, possible, scanner, assessment, capacity, current, waiting
             if value["phase"] == "connection_capacity":
                 waiting = value["waiting_requests"]
                 capacity = f"Connection requests: {value['active_requests']} active, {value['waiting_requests']} waiting"
@@ -100,6 +100,8 @@ def progress_display(enabled, *, scan=False):
                     assessment.append(f"Duplicate confirmations: {duplicates}")
             if phase == "analysis":
                 coverage = f"Files {'scanned' if scan else 'reviewed'}: {value['completed_files']}/{value['selected_files']}    Failed: {value['failed_files']}"
+                if affected := value.get("affected_sites"):
+                    caller_coverage = f"Affected caller sites reviewed: {affected['completed']}/{affected['selected']}"
                 description = "Scanning code" if scan else "Reviewing code"
                 paths = [terminal_line(path) for path in value["active_paths"]]
                 lines.append(f"AI requests running: {value['active_requests']}")
@@ -116,7 +118,7 @@ def progress_display(enabled, *, scan=False):
                     "report": "Preparing security report…", "connection_capacity": "Preparing AI request…"}[phase]
             if waiting:
                 description = "Waiting for connection capacity…"
-            lines = [line for line in (coverage, possible, scanner, *assessment) if line] + lines
+            lines = [line for line in (coverage, caller_coverage, possible, scanner, *assessment) if line] + lines
             display.update(task, description=description)
             if live is not None:
                 live.update(Group(display, Text("\n".join(lines))), refresh=True)
@@ -124,6 +126,21 @@ def progress_display(enabled, *, scan=False):
                 print("\n".join([description, *lines]), file=sys.stderr, flush=True)
 
         yield update
+
+
+def _affected_caller_lines(affected):
+    if not affected:
+        return []
+    lines = [f"Affected callers ({affected['status']}) across {len(affected['triggers'])} deleted or renamed files"]
+    for trigger in affected["triggers"]:
+        replacement = f" → {trigger['new_path']}" if trigger["new_path"] else " (deleted)"
+        lines.append(f"  {trigger['path']}{replacement}")
+    for site in affected["sites"]:
+        detail = f" — {site['error']}" if site.get("error") else ""
+        lines.append(f"  {site['path']}:{site['start_line']}-{site['end_line']} ({site['status']}){detail}")
+    if affected["limits_reached"]:
+        lines.append("Affected caller discovery incomplete — " + ", ".join(affected["limits_reached"]))
+    return lines
 
 
 def render(result):
@@ -145,8 +162,9 @@ def render(result):
         baseline = comparison.get("baseline_run_id")
         lines.append(f"Comparison: {strategy} ({reason}). Reused coverage: {len(coverage['reused'])} files."
                      + (f" Previous run: {baseline}." if baseline else ""))
-    if not selected:
+    if not selected and not result.get("affected_callers"):
         lines.append("No eligible files in the selected changes.")
+    lines.extend(_affected_caller_lines(result.get("affected_callers")))
     for item in result["warnings"]:
         lines.append(item["message"])
     for item in result["errors"]:
@@ -187,6 +205,7 @@ def render_preview(result):
         lines.append(f"Excluded: {row['path']} ({row['reason']})")
     for batch in result["batches"]:
         lines.append(f"Batch {batch['number']}: {len(batch['unit_keys'])} units; " + ", ".join(batch["paths"]))
+    lines.extend(_affected_caller_lines(result.get("affected_callers")))
     if result["limit_reason"]:
         lines.append("Blocked: " + result["limit_reason"])
     for row in result["errors"]:
@@ -226,7 +245,8 @@ def run(args):
         result = preview_local(args.repo, mode=mode, base=args.base, head=args.head or "HEAD",
                                effort=args.effort, overrides=overrides, prompt_token_ceiling=args.prompt_token_ceiling)
         print(json.dumps(result, indent=2) if args.format == "json" else render_preview(result))
-        return 2 if result["limit_reason"] or result["errors"] else 0
+        partial_callers = result.get("affected_callers", {}).get("status") == "partial"
+        return 2 if result["limit_reason"] or result["errors"] or partial_callers else 0
     if args.prompt_token_ceiling is not None:
         raise ValueError("--prompt-token-ceiling is a preview sizing assumption and requires --preview.")
     name, profile = selected(args)

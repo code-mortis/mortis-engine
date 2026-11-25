@@ -39,7 +39,7 @@ def sanitize(value, credentials, stopped=lambda: False):
                 raise ValueError("Credential material in a structural identifier; request withheld")
             return text
         if isinstance(item, Mapping):
-            identifiers = {"path", "assigned_path", "head_sha", "original_sha", "id", "source_id", "revision",
+            identifiers = {"path", "new_path", "assigned_path", "head_sha", "original_sha", "id", "source_id", "revision",
                            "finding_id", "available_paths", "required_paths", "paths", "changed_paths", "current_path",
                            "base_sha", "source_sha"}
             return {redact(key, True): redact(child, structural or key in identifiers) for key, child in item.items()}

@@ -54,6 +54,8 @@ def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=N
             try:
                 return output.read(20_000_000).decode("utf-8", "strict" if strict_utf8 else "replace")
             except UnicodeDecodeError:
+                if args[:2] == ("cat-file", "blob"):
+                    raise ValueError("Required source is binary or is not UTF-8 text.") from None
                 raise ValueError("Git returned a path that is not valid UTF-8.") from None
         finally:
             if process.poll() is None:
@@ -73,7 +75,7 @@ def repository_path(value):
     return value
 
 
-def read_source(repo, env, sha, path, stopped=lambda: False):
+def read_source(repo, env, sha, path, stopped=lambda: False, *, reject_replacement=False):
     repository_path(path)
     entry = git(repo, env, "ls-tree", "-z", "-l", sha, "--", path, stopped=stopped)
     match = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40})\s+(\d+)\t([^\0]+)\0\n?", entry)
@@ -81,8 +83,8 @@ def read_source(repo, env, sha, path, stopped=lambda: False):
         raise ValueError("Source is missing or is not a regular file at the pinned revision.")
     if int(match[3]) > 20_000_000:
         raise ValueError("Source exceeds the 20 MB read limit.")
-    content = git(repo, env, "cat-file", "blob", match[2], stopped=stopped)
-    if "\x00" in content or "\ufffd" in content:
+    content = git(repo, env, "cat-file", "blob", match[2], stopped=stopped, strict_utf8=True)
+    if "\x00" in content or (reject_replacement and "\ufffd" in content):
         raise ValueError("Required source is binary or is not UTF-8 text.")
     return content
 

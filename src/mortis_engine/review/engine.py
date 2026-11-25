@@ -5,13 +5,14 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 
 from pydantic import ConfigDict, Field, ValidationError, model_validator
 
 from mortis_engine import gateway as llm
 from mortis_engine.schemas import Message, Request, StrictModel, Tool
 
-from . import context, policy, source_navigation
+from . import affected_callers, context, planning, policy, source_navigation
 from . import source as git_source
 from .contracts import ReviewComment
 from .errors import ReviewStopped
@@ -143,7 +144,7 @@ def read_tool(*, source_code_policy=SOURCE_CODE_POLICY, source_tool_policy=SOURC
 class PreparedBatch:
     key: str
     units: list
-    request: Request
+    request: Request | None
     sources: list[dict]
     options: dict
     connection: dict
@@ -152,6 +153,8 @@ class PreparedBatch:
     source_code_policy: str | None = SOURCE_CODE_POLICY
     prompt_version: str = PROMPT_VERSION
     source_tool_policy: str | None = SOURCE_TOOL_POLICY
+    affected_sites: dict[str, list[dict]] = field(default_factory=dict)
+    affected_omission: str | None = None
 
 
 def _source(revision, path, start, end, text):
@@ -161,7 +164,7 @@ def _source(revision, path, start, end, text):
 
 def prepare_batches(plan, connection, options, credentials, *, graph_by_path=None, stopped=lambda: False,
                     output_token_policy="mortis-completion/v1", source_code_policy=SOURCE_CODE_POLICY,
-                    prompt_version=PROMPT_VERSION, source_tool_policy=SOURCE_TOOL_POLICY):
+                    prompt_version=PROMPT_VERSION, source_tool_policy=SOURCE_TOOL_POLICY, repo=None, env=None):
     """Freeze requests before persisting their task identities; optional graph never crowds out source."""
     if source_code_policy not in {None, SOURCE_CODE_POLICY}:
         raise ValueError("The saved source-code policy is unsupported")
@@ -169,16 +172,92 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
         raise ValueError("The saved PR prompt version is unsupported")
     if source_tool_policy not in {None, "remaining-rounds/v1", "bounded-reads/v2", SOURCE_TOOL_POLICY}:
         raise ValueError("The saved source-tool policy is unsupported")
+
+    @lru_cache(maxsize=8)
+    def redacted_source(revision, path):
+        if (repo is None or env is None or revision not in {plan.merge_base, plan.head_sha}
+                or not planning.allowed_path(path, options, plan.rules)):
+            raise ValueError("Affected-caller evidence needs permitted pinned source.")
+        entry = planning._entry(repo, env, revision, path, stopped)
+        if not entry or entry["size"] > affected_callers.MAX_FILE_BYTES:
+            raise ValueError("Affected-caller evidence exceeds its pinned source bounds.")
+        original = git_source.git(repo, env, "cat-file", "blob", entry["blob_sha"], stopped=stopped, strict_utf8=True)
+        if "\0" in original:
+            raise ValueError("Affected-caller evidence needs regular UTF-8 source.")
+        # Multiline credentials may cross a planned excerpt boundary.
+        redacted = context.sanitize(original, credentials, stopped)
+        if len(redacted.splitlines()) != len(original.splitlines()):
+            raise ValueError("Affected-caller evidence lost its pinned line boundaries during redaction.")
+        return redacted
+
+    def source_context(units):
+        assigned = []
+        sources = []
+        trigger_sources = {}
+        for unit in units:
+            payload = assigned_unit(unit)
+            if unit.caller_only:
+                lines = redacted_source(unit.source_sha, unit.path).splitlines(keepends=True)
+                payload["source"] = "".join(lines[unit.start_line - 1:unit.end_line])
+            sources.append(_source(unit.source_sha, unit.path, unit.start_line, unit.end_line, payload["source"]))
+            triggers = []
+            for trigger in unit.affected_triggers:
+                if evidence := trigger.get("evidence"):
+                    location = (evidence["revision"], evidence["path"], evidence["start_line"], evidence["end_line"])
+                    if location not in trigger_sources:
+                        lines = redacted_source(*location[:2]).splitlines()
+                        redacted = "\n".join(lines[location[2] - 1:location[3]])
+                        trigger_sources[location] = _source(*location, redacted)
+                    trigger = {**trigger, "evidence": {**evidence, "text": trigger_sources[location]["text"]}}
+                triggers.append(trigger)
+            if triggers:
+                payload["affected_triggers"] = triggers
+            assigned.append(payload)
+        sources.extend(trigger_sources.values())
+        return assigned, sources
+
     batches = []
-    pending = deque(plan.batches)
+    pending = deque((units, None) for units in plan.batches)
+    affected_sites = {}
+    for site in (plan.affected_callers or {}).get("sites", []):
+        affected_sites.setdefault(site["unit_key"], []).append(site)
+
+    def retry_smaller(units, reason):
+        if len(units) > 1:
+            midpoint = len(units) // 2
+            pending.extendleft(((units[midpoint:], None), (units[:midpoint], None)))
+        elif len(units) == 1 and units[0].affected_triggers:
+            pending.appendleft((units, reason))
+        else:
+            return False
+        return True
+
     while pending:
-        units = pending.popleft()
-        key = "pr:" + fingerprint([unit.key for unit in units])[:32]
-        sources = [_source(unit.source_sha, unit.path, unit.start_line, unit.end_line, unit.source) for unit in units]
+        units, omission = pending.popleft()
+        identity = [unit.key for unit in units]
+        if omission:
+            units = [replace(units[0], affected_triggers=[])]
+            identity.append({"affected_callers": "omitted"})
+        key = "pr:" + fingerprint(identity)[:32]
+        if omission and units[0].caller_only:
+            error = "required_context_limit" if omission == "provider_context" else "source_unavailable"
+            batches.append(PreparedBatch(key, units, None, [], dict(options), dict(connection),
+                                         error=error, affected_omission=omission))
+            continue
+        has_affected = any(unit.affected_triggers for unit in units)
+        try:
+            assigned, sources = source_context(units)
+        except ReviewStopped:
+            raise
+        except (ValueError, OSError):
+            if has_affected and retry_smaller(units, "source_unavailable"):
+                continue
+            raise
+        required_source_count = len(sources)
         payload = {"task_key": key, "language": options["language"], "reporting_policy": policy.instructions(options),
                    "background": options.get("background", ""), "base_sha": plan.base_sha,
                    "merge_base": plan.merge_base, "head_sha": plan.head_sha,
-                   "assigned_units": [assigned_unit(unit) for unit in units]}
+                   "assigned_units": assigned}
         graphs = {unit.path: graph_by_path[unit.path] for unit in units if graph_by_path and graph_by_path.get(unit.path)}
         if graphs:
             payload["code_graph"] = graphs
@@ -188,8 +267,22 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
                                            len(item["text"].splitlines()), item["text"]))
         payload["citation_sources"] = [{key: value for key, value in source.items() if key != "text"}
                                        for source in sources]
-        supplied = context.sanitize(payload, credentials, stopped)
+        try:
+            supplied = context.sanitize(payload, credentials, stopped)
+        except ReviewStopped:
+            raise
+        except ValueError:
+            if has_affected and retry_smaller(units, "source_unavailable"):
+                continue
+            raise
         instructions = INSTRUCTIONS
+        if has_affected:
+            instructions += (
+                " affected_triggers describe pinned deletions or renames linked to possible caller sites. "
+                "For caller_only units, report only failures introduced by those changes. A textual match "
+                "alone does not establish a dependency. Check surviving replacements and fallbacks, "
+                "and cite the relevant merge-base source when supplied."
+            )
         if options.get("review_mode") == "all":
             instructions = instructions.replace("introduced by this PR", "present at this revision")
             if all(unit.source_only for unit in units):
@@ -225,22 +318,22 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
             if graphs:
                 omitted = sorted(graphs)
                 supplied.pop("code_graph", None)
-                supplied["citation_sources"] = supplied["citation_sources"][:len(units)]
-                sources = sources[:len(units)]
+                supplied["citation_sources"] = supplied["citation_sources"][:required_source_count]
+                sources = sources[:required_source_count]
                 request = request.model_copy(update={"messages": [Message(role="user", content=json.dumps(supplied, ensure_ascii=False))]})
         error = None
         try:
             llm.reservation(connection, request)
         except ValueError:
-            if len(units) > 1:
-                midpoint = len(units) // 2
-                pending.extendleft((units[midpoint:], units[:midpoint]))
+            if retry_smaller(units, "provider_context"):
                 continue
             error = "required_context_limit"
         # Store exactly the redacted source sent to the provider, including optional graph source.
         sources = context.sanitize(sources, credentials, stopped)
         batches.append(PreparedBatch(key, units, request, sources, dict(options), dict(connection), omitted, error,
-                                     source_code_policy, prompt_version, source_tool_policy))
+                                     source_code_policy, prompt_version, source_tool_policy,
+                                     {unit.key: affected_sites[unit.key] for unit in units
+                                      if not omission and unit.key in affected_sites}, omission))
     return batches
 
 
@@ -316,8 +409,24 @@ def validate_result(data, batch, sources, credentials, stopped=lambda: False):
         source_inline = (unit.source_only and batch.options.get("_discovery_result_policy", DISCOVERY_RESULT_POLICY)
                          == DISCOVERY_RESULT_POLICY)
         comment.update(source_sha=unit.source_sha,
-                       inline_line=finding.end_line if source_inline or finding.end_line in _diff_lines(unit.patch) else None)
+                       inline_line=finding.end_line if not unit.caller_only
+                       and (source_inline or finding.end_line in _diff_lines(unit.patch)) else None)
         comment["evidence"] = citations
+        if unit.affected_triggers:
+            related_paths = {citation["path"] for citation in citations if citation["revision"] != unit.source_sha}
+            spans = [(finding.start_line, finding.end_line)] + [
+                (citation["start_line"], citation["end_line"]) for citation in citations
+                if citation["path"] == unit.path and citation["revision"] == unit.source_sha
+            ]
+            for site in batch.affected_sites.get(unit.key, []):
+                if any(start <= site["end_line"] and site["start_line"] <= end for start, end in spans):
+                    related_paths.update(site["triggers"])
+            triggers = [{key: value for key, value in trigger.items() if key != "evidence"}
+                        for trigger in unit.affected_triggers if unit.caller_only or trigger["path"] in related_paths]
+            if triggers:
+                comment["affected_triggers"] = triggers
+        if unit.caller_only:
+            comment["caller_only"] = True
         comments.append(comment)
     return context.sanitize({"kind": "final", "completed_units": value.completed_units, "comments": comments}, credentials, stopped)
 
@@ -325,7 +434,6 @@ def validate_result(data, batch, sources, credentials, stopped=lambda: False):
 def read_sources(calls, *, repo, env, plan, options, credentials, authorize, stopped,
                  source_tool_policy=SOURCE_TOOL_POLICY):
     """Only bounded, policy-approved exact-head Git blob reads; tool names are never executable."""
-    from . import planning
 
     def check_access():
         try:
@@ -576,13 +684,37 @@ def _report(plan, prepared, outcomes, *, tokens, status=None):
             completed.append(item.path)
         else:
             failed.append(item.path)
-        for unit in units:
-            if outcomes.get(unit.key, {}).get("status") == "completed":
-                comments.extend(outcomes[unit.key].get("comments", []))
+    for unit in plan.units:
+        if outcomes.get(unit.key, {}).get("status") == "completed":
+            comments.extend(outcomes[unit.key].get("comments", []))
+    affected = plan.affected_callers
+    reused_affected = bool(affected and status == "skipped" and not plan.limit_reason)
+    if affected:
+        omitted = {batch.units[0].key: batch.affected_omission for batch in prepared if batch.affected_omission}
+        limits = sorted(set(affected["limits_reached"]) | set(omitted.values()))
+        sites = []
+        for site in affected["sites"]:
+            outcome = ({"status": "reused"} if reused_affected else
+                       outcomes.get(site["unit_key"], {"status": "incomplete"}))
+            if reason := omitted.get(site["unit_key"]):
+                outcome = {**outcome, "status": "failed" if outcome["status"] == "failed" else "incomplete",
+                           "error": reason}
+            sites.append({**site, **{key: value for key, value in outcome.items() if key != "comments"}})
+        incomplete = bool(limits) or any(
+            site["status"] not in {"completed", "reused"} for site in sites)
+        affected_status = "partial" if incomplete else "reused" if reused_affected else "completed"
+        affected = {**affected, "status": affected_status, "sites": sites, "limits_reached": limits}
     if status is None:
-        status = ("skipped" if plan.limit_reason or not plan.selected
-                  else "partial" if failed and (reused or any(value["status"] == "completed" for value in outcomes.values()))
-                  else "failed" if failed else "completed")
+        failed_sites = affected and any(site["status"] != "completed" for site in affected["sites"])
+        any_completed = reused or any(value["status"] == "completed" for value in outcomes.values())
+        if plan.limit_reason or not (plan.selected or affected):
+            status = "skipped"
+        elif (affected and affected["limits_reached"]) or ((failed or failed_sites) and any_completed):
+            status = "partial"
+        elif failed or failed_sites:
+            status = "failed"
+        else:
+            status = "completed"
     def entries(paths):
         return [{"item_id": fingerprint(path), "path": path} for path in paths]
     report = {"manifest": {"schema_version": "code-mortis.pr-analysis/v1", "terminal_state": status,
@@ -594,8 +726,11 @@ def _report(plan, prepared, outcomes, *, tokens, status=None):
                     for item in plan.selected if item.path in failed],
               "warnings": [], "summary": {"findings": len(comments), "total_tokens": tokens, "budget_exceeded": any(value.get("error") == "budget" for value in outcomes.values())},
               "units": [{"key": unit.key, "path": unit.path, "start_line": unit.start_line,
-                         "end_line": unit.end_line, **outcomes.get(unit.key, {"status": "incomplete"})}
+                         "end_line": unit.end_line, **({"status": "reused"} if reused_affected else
+                         outcomes.get(unit.key, {"status": "incomplete"}))}
                         for unit in report_units]}
+    if affected:
+        report["affected_callers"] = affected
     if plan.limit_reason:
         selected = report["manifest"]["coverage"]["selected"]
         report["manifest"] = {"schema_version": "code-mortis.file-limit/v1", "terminal_state": "skipped",
@@ -620,7 +755,7 @@ def run(repo, env, plan, connection, options, credentials, *, stopped=lambda: Fa
 
     try:
         prepared = prepare_batches(plan, connection, options, credentials, stopped=preparing_stopped,
-                                   graph_by_path=graph_by_path, source_tool_policy=source_tool_policy)
+                                   graph_by_path=graph_by_path, source_tool_policy=source_tool_policy, repo=repo, env=env)
     except (TimeoutError, ReviewStopped) as exc:
         code = "deadline" if isinstance(exc, TimeoutError) else "cancelled"
         outcomes = {unit.key: {"status": "failed", "error": code} for unit in plan.units}
