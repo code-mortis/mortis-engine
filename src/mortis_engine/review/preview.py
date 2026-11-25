@@ -50,6 +50,7 @@ def preview_local(repository, *, mode="worktree", base=None, head="HEAD", effort
                     "paths": list(dict.fromkeys(unit.path for unit in batch)), **_sizes(batch)}
                    for number, batch in enumerate(plan.batches, 1)]
         exclusions = _exclusions(snap, plan, options)
+        affected = plan.affected_callers
         return {"schema_version": VERSION, "plan_version": planning.VERSION,
                 "mode": snap.mode, "base_sha": snap.base_sha, "head_sha": snap.head_sha,
                 "merge_base": snap.merge_base, "settings_sha": snap.settings_sha,
@@ -63,6 +64,10 @@ def preview_local(repository, *, mode="worktree", base=None, head="HEAD", effort
                            "max_batch_bytes": 98304, "max_source_bytes": 20_000_000,
                            "max_files": options["max_files"]},
                 "limit_reason": plan.limit_reason,
+                **({"affected_callers": {**affected,
+                    "status": "partial" if affected["limits_reached"] else "planned",
+                    "sites": [{**site, "status": "planned" if site["unit_key"] else "incomplete"}
+                              for site in affected["sites"]]}} if affected else {}),
                 "errors": [{"path": row.path, "message": row.error} for row in plan.selected if row.error],
                 "warnings": [*snap.warnings, *plan.rules["warnings"]],
                 "assumptions": ["No review history was read; the preview shows the full comparison scope.",

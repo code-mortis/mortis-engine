@@ -102,6 +102,10 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
     instructions = assessment.INSTRUCTIONS + "\n\n" + policy.instructions(options)
     if context.get("attribution", {}).get("version") == 1:
         instructions += "\n\n" + assessment.ATTRIBUTION_INSTRUCTIONS
+    if snapshot.get("affected_triggers"):
+        instructions += (" The finding concerns a possible dependency on a deleted or renamed file. "
+                         "Check reachability, replacement modules, aliases and working fallbacks. A matching "
+                         "name alone is insufficient. Request original or current evidence if needed.")
     if options.get("review_mode") == "all":
         instructions = instructions.replace("introduced by the change", "present in the supplied snapshot")
     identity = planning.fingerprint(snapshot)
@@ -252,9 +256,24 @@ async def verify(repo, env, original_report, current_sha, options, session):
 
 async def generate_summary(repo, env, report, options, session):
     run = _run(report, options, session)
-    context = summary.build_context(repo, env, run, lambda: False)
+    affected = report.get("affected_callers")
+    caller_only = affected and not report["coverage"]["selected"]
+    if caller_only and not any(site.get("unit_key") for site in affected["sites"]):
+        return review_context.sanitize(summary.caller_summary(affected), session.credentials)
+    try:
+        context = summary.build_context(repo, env, run, lambda: False, affected=affected)
+    except summary.SummaryUnavailable:
+        if caller_only:
+            return review_context.sanitize(summary.caller_summary(affected), session.credentials)
+        raise
+    if caller_only and not context["paths"]:
+        return review_context.sanitize(summary.caller_summary(affected), session.credentials)
     context["diagram_enabled"] = options.get("summary_diagram_enabled", False)
     instructions = summary.INSTRUCTIONS
+    if affected:
+        instructions += (" Identify the removed or renamed dependency and the examined caller sites. "
+                         "Caller ranges describe limited review scope. A discovered reference alone "
+                         "does not establish breakage.")
     if options.get("review_mode") == "all":
         instructions = instructions.replace("pull request changes", "repository snapshot").replace("changed paths", "paths")
     if context["diagram_enabled"]:
@@ -440,7 +459,7 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
     prior_ids = {item["id"] for item in _history(history)["findings"]}
     result["history"] = [{**item, "observation": "observed" if item["id"] in observed else "not_observed"}
                          for item in previous["findings"] if item["id"] in prior_ids]
-    if result.get("coverage", {}).get("selected"):
+    if result.get("coverage", {}).get("selected") or result.get("affected_callers"):
         report_progress("summary")
         try:
             result["summary"] = await generate_summary(repo, env, report, options, session)
@@ -468,6 +487,8 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
         result["fix_prompts"] = summary.fix_section(list(prompts.values()))
     incomplete = bool(result["stage_errors"]) or any(
         row.get("result", {}).get("verdict") == "uncertain" for row in result["candidates"] if row.get("result"))
+    if result.get("affected_callers", {}).get("status") in {"partial", "failed"}:
+        incomplete = True
     if result.get("verification", {}).get("status") == "partial":
         incomplete = True
     result["workflow_status"] = "partial" if incomplete else "completed"

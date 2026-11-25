@@ -7,10 +7,11 @@ from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 
-from mortis_engine.review import file_policy, source
+from mortis_engine.review import affected_callers, file_policy, source
 from mortis_engine.review.errors import ReviewStopped
 
 VERSION = "mortis-pr-plan/v1"
+AFFECTED_CALLER_POLICY = affected_callers.POLICY
 RULES_VERSION = "mortis-rules/v1"
 FULL_TREE_SOURCE_POLICY = "source-only/v1"
 EVIDENCE_POLICY = "supporting-tests/v1"
@@ -281,6 +282,8 @@ class ReviewUnit:
     rule: str
     input_hash: str
     source_only: bool = False
+    caller_only: bool = False
+    affected_triggers: list[dict] = field(default_factory=list)
 
 
 def assigned_unit(unit):
@@ -290,6 +293,9 @@ def assigned_unit(unit):
     if not unit.source_only:
         value["diff"] = unit.patch
     value["rules"] = unit.rule
+    if unit.affected_triggers:
+        value["affected_triggers"] = unit.affected_triggers
+        value["caller_only"] = unit.caller_only
     return value
 
 
@@ -322,6 +328,7 @@ class ReviewPlan:
     batches: list[list[ReviewUnit]] = field(default_factory=list)
     limit_reason: str | None = None
     reused: list[str] = field(default_factory=list)
+    affected_callers: dict | None = None
 
     def snapshot(self):
         return asdict(self)
@@ -362,6 +369,22 @@ def _binary_paths(repo, env, merge_base, head_sha, stopped):
         if values[0] == "-" or values[1] == "-":
             result.add(path)
     return result
+
+
+def affected_changes(changes, options, rules, *, unavailable=(), binary=()):
+    """Return eligible old paths and their surviving rename destinations."""
+    policy = options.get("_affected_caller_policy", AFFECTED_CALLER_POLICY)
+    if policy not in {None, AFFECTED_CALLER_POLICY}:
+        raise ValueError("The saved affected-caller policy is unsupported.")
+    if policy is None or options.get("review_mode") == "all":
+        return []
+    return sorted(
+        (old_path or path, path if old_path else None)
+        for path, old_path, status in changes
+        if (status == "D" or status.startswith("R"))
+        and all(value not in unavailable and value not in binary and allowed_path(value, options, rules)
+                for value in (path, old_path) if value)
+    )
 
 
 def _patch_rows(patch, total_lines):
@@ -457,6 +480,95 @@ def split_units(path, old_path, status, sha, text, patch, rule, maximum, *, sour
     return units
 
 
+def _caller_ranges(hits, first, last):
+    ranges = []
+    for line, paths in hits:
+        start = max(first, line - affected_callers.CONTEXT_LINES)
+        end = min(last, line + affected_callers.CONTEXT_LINES)
+        if ranges and ranges[-1][1] >= start:
+            previous_start, _, previous_paths = ranges[-1]
+            ranges[-1] = (previous_start, end, previous_paths | set(paths))
+        else:
+            ranges.append((start, end, set(paths)))
+    return ranges
+
+
+def _plan_callers(repo, env, plan, options, changes, triggers, unavailable, binary, stopped, *,
+                  used, max_unit_bytes, max_source_bytes):
+    def eligible(path):
+        previous, _ = changes.get(path, (None, ""))
+        return all(value not in unavailable and value not in binary and allowed_path(value, options, plan.rules)
+                   for value in (path, previous) if value)
+
+    scope, evidence, matches = affected_callers.discover(repo, env, plan, changes, triggers, eligible, stopped)
+    if not scope["triggers"] and not scope["limits_reached"]:
+        return
+    plan.affected_callers = scope
+    limits = set(scope["limits_reached"])
+    selected_by_path = {item.path: item for item in plan.selected}
+    used_files = len(selected_by_path)
+    max_files = options.get("max_files")
+
+    def record(path, ranges, *, unit_key=None, error=None):
+        if error:
+            limits.add(error)
+        for start, end, origins in ranges:
+            scope["sites"].append({"path": path, "start_line": start, "end_line": end,
+                                   "unit_key": unit_key, "triggers": sorted(origins),
+                                   **({"error": error} if error else {})})
+
+    def attach(unit, ranges):
+        nonlocal used
+        old_paths = sorted(set().union(*(paths for _, _, paths in ranges)))
+        original_bytes = 0 if unit.caller_only else _unit_bytes(unit)
+        unit.affected_triggers = [evidence[path] for path in old_paths]
+        unit_bytes = _unit_bytes(unit)
+        extra = unit_bytes - original_bytes
+        if unit_bytes > max_unit_bytes or used + extra > max_source_bytes:
+            unit.affected_triggers = []
+            record(unit.path, ranges, error="review_context")
+            return False
+        used += extra
+        unit.input_hash = fingerprint([AFFECTED_CALLER_POLICY, unit.path, unit.input_hash, plan.merge_base, plan.head_sha,
+                                       [(start, end, sorted(paths)) for start, end, paths in ranges],
+                                       unit.affected_triggers])
+        unit.key = f"pr-{unit.input_hash}"
+        record(unit.path, ranges, unit_key=unit.key)
+        return True
+
+    for path, (lines, sites) in matches.items():
+        selected = selected_by_path.get(path)
+        if path in plan.reused:
+            record(path, _caller_ranges(sites, 1, len(lines)), error="reused_caller")
+            continue
+        if selected is None and max_files is not None and used_files >= max_files:
+            record(path, _caller_ranges(sites, 1, len(lines)), error="max_files")
+            continue
+        units = selected.units if selected else []
+        if units:
+            by_unit = {}
+            for hit in sites:
+                index = next((i for i, unit in enumerate(units) if unit.start_line <= hit[0] <= unit.end_line), None)
+                if index is None:
+                    record(path, _caller_ranges([hit], 1, len(lines)), error="review_context")
+                else:
+                    by_unit.setdefault(index, []).append(hit)
+            for index, hits in by_unit.items():
+                unit = units[index]
+                attach(unit, _caller_ranges(hits, unit.start_line, unit.end_line))
+            continue
+        old_path = selected.old_path if selected else None
+        count_before = len(plan.units)
+        for start, end, paths in _caller_ranges(sites, 1, len(lines)):
+            unit = ReviewUnit("pr-" + "0" * 64, path, old_path, "affected", plan.head_sha, start, end,
+                              "".join(lines[start - 1:end]), "", rule_for(path, plan.rules), "", caller_only=True)
+            if attach(unit, [(start, end, paths)]):
+                plan.units.append(unit)
+        if selected is None and len(plan.units) > count_before:
+            used_files += 1
+    scope["limits_reached"] = sorted(limits)
+
+
 def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
                 max_unit_bytes=49152, max_batch_bytes=98304, max_source_bytes=20_000_000, trusted_rules_sha=None,
                 full_tree_source_policy=FULL_TREE_SOURCE_POLICY, unavailable=None, unavailable_changes=None,
@@ -544,9 +656,15 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
             plan.units.extend(units)
         except ValueError as exc:
             selected.error = str(exc)
+    triggers = affected_changes(((path, old_path, status) for path, (old_path, status) in changes.items()),
+                                options, rules, unavailable=unavailable, binary=binary)
+    if triggers:
+        _plan_callers(repo, env, plan, options, changes, triggers, unavailable, binary, stopped,
+                      used=used, max_unit_bytes=max_unit_bytes, max_source_bytes=max_source_bytes)
     batch, size = [], 0
     for unit in plan.units:
-        unit_size = _unit_bytes(unit) + 2 if unit.source_only else len((unit.source + unit.patch + unit.rule).encode()) + 512
+        unit_size = (_unit_bytes(unit) + 2 if unit.source_only or unit.affected_triggers
+                     else len((unit.source + unit.patch + unit.rule).encode()) + 512)
         if batch and size + unit_size > max_batch_bytes:
             plan.batches.append(batch)
             batch, size = [], 0

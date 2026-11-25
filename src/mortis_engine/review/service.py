@@ -121,6 +121,9 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             options["_discovery_result_policy"] = saved.get("discovery_result_policy") if saved else engine.DISCOVERY_RESULT_POLICY
             if options["_discovery_result_policy"] not in {None, engine.DISCOVERY_RESULT_POLICY}:
                 raise ValueError("The saved discovery result policy is unsupported.")
+            options["_affected_caller_policy"] = saved.get("affected_caller_policy") if saved else planning.AFFECTED_CALLER_POLICY
+            if options["_affected_caller_policy"] not in {None, planning.AFFECTED_CALLER_POLICY}:
+                raise ValueError("The saved affected caller policy is unsupported.")
             if attribution not in {None, assessment.ATTRIBUTION_VERSION}:
                 raise ValueError("The saved assessment attribution version is unsupported.")
             options["_assessment_attribution"] = attribution
@@ -178,19 +181,29 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution,
                     "source_tool_policy": source_tool_policy, "evidence_policy": options["_evidence_policy"],
                     "discovery_result_policy": options["_discovery_result_policy"],
+                    "affected_caller_policy": options["_affected_caller_policy"],
                     **({"comparison": selection} if selection else {})})
             options["_triage_snapshot"] = decisions
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)
+                unchanged = selection.get("strategy") == "skipped_unchanged"
+                reuse_callers = unchanged and selection.get("reuse_affected_callers", False)
+                reused_paths = selection.get("reused_paths", ())
                 plan = plan_snapshot(snap, options, stopped,
                     prompt_token_ceiling=connection["options"].get("prompt_token_ceiling"),
-                    full_tree_source_policy=full_tree_source_policy, reused_paths=selection.get("reused_paths", ()))
-                unchanged = selection.get("strategy") == "skipped_unchanged"
-                if unchanged and (plan.limit_reason or not plan.selected or len(plan.reused) != len(plan.selected)):
-                    raise ValueError("The saved review coverage does not match the pinned comparison.")
-                if on_plan is not None and plan.batches:
-                    on_plan(len(plan.selected) - len(plan.reused), connection["model"])
+                    full_tree_source_policy=full_tree_source_policy, reused_paths=() if reuse_callers else reused_paths)
+                if unchanged:
+                    if reuse_callers:
+                        # Reconstruct site-to-unit associations at the current head before marking coverage reused.
+                        if not plan.affected_callers or plan.affected_callers["limits_reached"]:
+                            raise ValueError("The saved caller coverage does not match the pinned comparison.")
+                        plan.reused = [item.path for item in plan.selected if item.path in reused_paths and not item.error]
+                    if plan.limit_reason or {item.path for item in plan.selected} != set(plan.reused):
+                        raise ValueError("The saved review coverage does not match the pinned comparison.")
+                if on_plan is not None and plan.batches and not unchanged:
+                    paths = {item.path for item in plan.selected} | {unit.path for unit in plan.units}
+                    on_plan(len(paths - set(plan.reused)), connection["model"])
                 # An empty diff needs neither a model nor credentials unless there are prior fixes to verify.
                 verify_previous = options["auto_resolve"] and previous and not plan.limit_reason
                 needs_credentials = not unchanged and (plan.batches or verify_previous or plan.limit_reason or plan.reused)
@@ -198,7 +211,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 session = Session(connection, credentials, history=history, run_id=run_id, deadline=deadline,
                                   progress=progress)
                 graphs, graph_status = {}, None
-                if graph and plan.batches:
+                if graph and plan.batches and not unchanged:
                     from mortis_engine import code_graph
 
                     progress({"phase": "graph"})
@@ -234,6 +247,8 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                         "strategy", "reason", "baseline_run_id", "baseline_head_sha") if key in selection}
                 if "second_pass" in raw:
                     result["second_pass"] = raw["second_pass"]
+                if "affected_callers" in raw:
+                    result["affected_callers"] = raw["affected_callers"]
                 if graph_status is not None:
                     result["code_graph"] = graph_status
                 if graphs:

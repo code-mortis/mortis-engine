@@ -108,6 +108,21 @@ Add `--progress` for a compact live view showing reviewed and failed file counts
 
 The view also shows possible findings as validated analysis results arrive. During assessment it shows assessed/total candidates, unique confirmed findings, rejected and uncertain candidates, failed assessments and duplicate confirmations. Failed assessments count as processed candidates and remain separate from rejected findings. These counts stay visible through summary generation. Scan progress shows Trivy findings separately from AI proposals and confirmations; unobserved findings retained from earlier scans are not counted as current confirmations. Finding text remains in the final report.
 
+### Review callers of deleted or renamed files
+
+Branch, staged and working-tree reviews automatically look for surviving references to eligible
+deleted or renamed files. For example, deleting a shell script can bring an unchanged Python
+line that invokes it into review. Discovery uses the same file policy as the review,
+including custom extensions admitted by `review.rules.include`, and works without Docker.
+Run `mortis review --preview` to see which caller ranges would be checked.
+
+The `affected_callers` section lists the triggering changes, caller ranges, outcomes and
+discovery limits. An unchanged caller contributes only its examined range to coverage.
+Path and module references, and symbol names corroborated by a dependency reference, nominate
+sites for assessment. Dynamically constructed names can escape this search. Discovery examines
+at most 512 eligible caller files and 8 MiB of caller source per run. When a bound leaves discovery
+incomplete, the CLI returns exit code 2 and the report keeps validated findings.
+
 ## Review a branch
 
 From your working branch, run:
@@ -161,7 +176,8 @@ files use their cumulative diff from the current comparison's common ancestor. T
 summary still covers the eligible changes in the branch, and previous findings stay
 in history. Reused coverage describes prior analysis of unchanged files. A first run,
 an incomplete review, a changed base or review configuration, or unavailable
-ancestry triggers a full comparison. `--graph` and `--second-pass` also use the full
+ancestry triggers a full comparison. A changed head tree with an eligible deletion or rename
+also gets a full comparison so callers are checked again. `--graph` and `--second-pass` also use the full
 comparison. `max_files` applies to the cumulative scope.
 
 `skip_unchanged` skips model calls when the compatible prior review covered the

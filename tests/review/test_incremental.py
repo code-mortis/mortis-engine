@@ -130,9 +130,11 @@ def test_incremental_rename_and_revert(repo, comparison_repo, provider, connecti
     commit(repo, {"b.py": "b = 0\n"})
     report = review_commits(repo, **kwargs)
     assert paths(report, "selected") == ["c.py", "d.py", "e.py", "renamed.py"]
-    assert paths(report, "completed") == ["renamed.py"]
-    assert paths(report, "reused") == ["c.py", "d.py", "e.py"]
-    assert provider[0]["summary"][-1] == paths(report, "selected")
+    assert report["comparison"]["strategy"] == "full"
+    assert report["comparison"]["reason"] == "affected_callers_require_full_review"
+    assert paths(report, "completed") == paths(report, "selected")
+    assert paths(report, "reused") == []
+    assert provider[0]["summary"][-1] == ["a.py", *paths(report, "selected")]
 
 
 @pytest.mark.parametrize("change", ["base", "model", "partial", "force_push", "legacy", "limit"])

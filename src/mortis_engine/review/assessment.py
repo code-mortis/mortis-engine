@@ -205,9 +205,28 @@ def build_context(repo, env, fetch_env, run, snapshot, previous, stopped):
         from mortis_engine.review import planning
 
         context["original_sha"] = merge_base
+        changes = planning._changes(repo, env, merge_base, head, stopped)
         context["attribution"] = {"version": 1, "merge_base_sha": merge_base,
-            "renames": {old: path for path, old, status in planning._changes(repo, env, merge_base, head, stopped)
-                        if old and status.startswith("R")}}
+            "renames": {old: path for path, old, status in changes if old and status.startswith("R")}}
+        if triggers := snapshot.get("affected_triggers"):
+            removed = {old or path: (path if old else None) for path, old, status in changes
+                       if status == "D" or status.startswith("R")}
+            originals = {item["path"] for item in triggers}
+            permitted = verification.review_paths(repo, env, merge_base, head, originals, run.config["settings"], stopped)
+            if originals != permitted:
+                raise ValueError("The affected caller refers to a dependency outside review scope.")
+            # Larger originals can be requested through the usual bounded assessment follow-up.
+            remaining = 64 * 1024
+            for item in triggers:
+                path = item["path"]
+                if path not in removed or removed[path] != item["new_path"] or item["source_sha"] != merge_base:
+                    raise ValueError("The affected dependency differs from the pinned change.")
+                entry = planning._entry(repo, env, merge_base, path, stopped)
+                if not entry or item["blob_sha"] != entry["blob_sha"]:
+                    raise ValueError("The affected dependency differs from its pinned blob.")
+                if entry["size"] <= remaining:
+                    expand_base_context(repo, env, run, context, [path], stopped)
+                    remaining -= entry["size"]
     selected &= verification.review_paths(repo, env, merge_base, head, selected,
                                     run.config["settings"], stopped,
                                     supporting_evidence=supports_test_evidence(run.config["settings"]))

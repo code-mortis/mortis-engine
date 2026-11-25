@@ -28,6 +28,8 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                            time.monotonic() + seconds if seconds else float("inf"))
         active = session or Session(prepared[0].connection if prepared else {}, credentials, progress=progress)
         run_id = active.run_id
+        caller_sites = (plan.affected_callers or {}).get("sites", [])
+        omitted_sites = {batch.units[0].key for batch in prepared if batch.affected_omission}
 
         def cancelled():
             return stopped() or time.monotonic() >= run_deadline
@@ -50,6 +52,10 @@ def execute(repo, env, plan, prepared, credentials, *, stopped=lambda: False, pr
                 "failed_files": sum(bool(item.error) or any(
                     outcomes.get(unit.key, {}).get("status") == "failed" for unit in item.units)
                     for item in plan.selected) if not plan.limit_reason else 0,
+                **({"affected_sites": {"completed": sum(
+                    outcomes.get(site["unit_key"], {}).get("status") == "completed"
+                    and site["unit_key"] not in omitted_sites for site in caller_sites),
+                    "selected": len(caller_sites)}} if caller_sites else {}),
                 "active_requests": active.active_requests,
                 "waiting_requests": active.waiting_requests,
                 "active_paths": sorted({unit.path for batch in active_batches.values() for unit in batch.units})})

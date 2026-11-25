@@ -106,19 +106,45 @@ def diagram_section(diagram):
     lines += [f'    {nodes[edge["source"]]} --> {nodes[edge["target"]]}' for edge in diagram["edges"]]
     return "<details>\n<summary>Diagram</summary>\n\n```mermaid\n" + "\n".join(lines) + "\n```\n\n</details>"
 
-def build_context(repo, env, run, stopped):
+def caller_summary(affected):
+    """Describe a deletion-only plan when there is no model work or its inventory cannot fit."""
+    paths = [item["path"] for item in affected["triggers"]]
+    sites = affected["sites"]
+    changes = ", ".join(paths[:3])
+    if len(paths) > 3:
+        changes += f" and {len(paths) - 3} more"
+    if len(changes) > 1200:
+        changes = changes[:1199] + "…"
+    parts = [f"Removed paths: {changes}."] if changes else []
+    if sites:
+        checked = sum(site.get("status") in {"completed", "reused"} for site in sites)
+        parts.append(f"Examined {checked} of {len(sites)} planned caller ranges.")
+    if affected["limits_reached"]:
+        parts.append("Caller discovery was incomplete.")
+    elif not sites:
+        parts.append("No matching caller sites were found.")
+    result = SummaryResult(narrative=clean_text(" ".join(parts)), groups=[])
+    return {"status": "completed", "limited_context": bool(affected["limits_reached"] or sites),
+            "result": result.model_dump(exclude_none=True)}
+
+def build_context(repo, env, run, stopped, *, affected=None):
     source = git_source
     coverage = (run.report or {}).get("manifest", {}).get("coverage", {})
-    paths = sorted({item["path"] for item in coverage.get("selected", [])
-                    if not file_policy.excluded(item["path"], file_policy.policy(run.config["settings"]))})
-    if not paths:
+    primary = {item["path"] for item in coverage.get("selected", [])
+               if not file_policy.excluded(item["path"], file_policy.policy(run.config["settings"]))}
+    if not primary and not affected:
         raise SummaryUnavailable("No reviewable changes were available to summarize.")
-    for path in paths:
+    trigger_paths = {path for trigger in (affected or {}).get("triggers", [])
+                     for path in (trigger["path"], trigger["new_path"]) if path}
+    site_paths = {site["path"] for site in (affected or {}).get("sites", [])}
+    for path in primary | trigger_paths | site_paths:
         ReviewComment.relative_path(path)
     # Recheck admitted paths and both rename sides against the pinned revisions.
     merge_base = source.git(repo, env, "merge-base", run.base_sha, run.head_sha, stopped=stopped).strip()
-    paths = sorted(verification.review_paths(repo, env, merge_base, run.head_sha, paths, run.config["settings"], stopped))
-    if not paths:
+    allowed = verification.review_paths(repo, env, merge_base, run.head_sha, primary | trigger_paths | site_paths,
+                                        run.config["settings"], stopped)
+    paths = sorted(primary & allowed)
+    if not paths and not (trigger_paths & allowed):
         raise SummaryUnavailable("No permitted reviewable changes were available to summarize.")
     ceiling = run.config["connection"].get("options", {}).get("prompt_token_ceiling", 58888)
     # Conservative byte bound leaves room for instructions, transport and generated output.
@@ -129,7 +155,7 @@ def build_context(repo, env, run, stopped):
     allowance = limit - len(json.dumps(context).encode()) - 4096
     if allowance < len(paths) * 80:
         raise SummaryUnavailable("The changed-file inventory exceeds the summary context limit; no usable summary context could fit.")
-    per_file = min(12000, allowance // len(paths))
+    per_file = min(12000, allowance // max(len(paths), 1))
     excerpts = []
     for path in paths:
         patch = source.git(repo, env, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3",
@@ -138,4 +164,33 @@ def build_context(repo, env, run, stopped):
         context["limited_context"] |= len(raw) > per_file
         excerpts.append(raw[:per_file].decode("utf-8", "ignore"))
     context["diff"] = "\n".join(excerpts)
+    if affected:
+        # Keep the ordinary diff budget. Add facts about removed paths without sending their retired source.
+        details = {"triggers": [], "sites": [], "limits_reached": affected["limits_reached"]}
+        context["affected_callers"] = details
+        remaining = limit - len(json.dumps(context).encode()) - 4096
+        for trigger in affected["triggers"]:
+            path, new_path = trigger["path"], trigger["new_path"]
+            if path not in allowed or (new_path and new_path not in allowed):
+                continue
+            row = {key: trigger[key] for key in ("path", "status", "new_path")}
+            size = len(json.dumps(row).encode()) + len(json.dumps(path).encode()) + 4
+            if size > remaining:
+                context["limited_context"] = True
+                continue
+            remaining -= size
+            details["triggers"].append(row)
+            if path not in primary:
+                paths.append(path)
+        for site in affected["sites"]:
+            if site["path"] not in allowed:
+                continue
+            row = {key: site[key] for key in ("path", "start_line", "end_line", "status")}
+            size = len(json.dumps(row).encode()) + 2
+            if size > remaining:
+                context["limited_context"] = True
+                break
+            remaining -= size
+            details["sites"].append(row)
+        paths.sort()
     return context
