@@ -24,7 +24,7 @@ def deletion_repo(repo, tmp_path_factory, monkeypatch):
 
 
 @pytest.mark.parametrize("changed_caller", [False, True])
-def test_identical_tree_reuses_affected_caller_coverage(deletion_repo, provider, connection, changed_caller):
+def test_identical_tree_reuses_affected_caller_coverage(deletion_repo, provider, connection, changed_caller, monkeypatch):
     repo = deletion_repo
     if changed_caller:
         commit(repo, {"app.py": "import subprocess\n" + CALLER + "done = True\n"})
@@ -39,14 +39,18 @@ def test_identical_tree_reuses_affected_caller_coverage(deletion_repo, provider,
 
     git(repo, "commit", "--allow-empty", "-qm", "same tree")
     requests_before = sum(map(len, provider[0].values()))
-    skipped = review_commits(repo, base="main", connection=connection, overrides=options,
-                             get_credentials=lambda: pytest.fail("Identical review loaded credentials"))
+    with monkeypatch.context() as patch:
+        patch.setattr(planning, "split_units", lambda *a, **kw: pytest.fail("Re-split a covered file"))
+        patch.setattr(affected_callers, "discover", lambda *a, **kw: pytest.fail("Re-read covered caller sources"))
+        skipped = review_commits(repo, base="main", connection=connection, overrides=options,
+                                 get_credentials=lambda: pytest.fail("Identical review loaded credentials"))
     assert skipped["status"] == "skipped"
     assert skipped["head_sha"] != first["head_sha"]
     assert skipped["comparison"]["baseline_run_id"] == first["run_id"]
     assert paths(skipped, "reused") == (["app.py"] if changed_caller else [])
     assert skipped["affected_callers"]["status"] == "reused"
     units = {unit["key"]: unit["status"] for unit in skipped["units"]}
+    assert set(units) == {unit["key"] for unit in first["units"]}
     for site in skipped["affected_callers"]["sites"]:
         assert site["status"] == units[site["unit_key"]] == "reused"
     assert sum(map(len, provider[0].values())) == requests_before

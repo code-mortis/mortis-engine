@@ -189,17 +189,13 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 unchanged = selection.get("strategy") == "skipped_unchanged"
                 reuse_callers = unchanged and selection.get("reuse_affected_callers", False)
                 reused_paths = selection.get("reused_paths", ())
-                plan = plan_snapshot(snap, options, stopped,
+                # The compatible baseline already holds the reviewed ranges and their exact unit keys.
+                plan_options = {**options, "_affected_caller_policy": None} if reuse_callers else options
+                plan = plan_snapshot(snap, plan_options, stopped,
                     prompt_token_ceiling=connection["options"].get("prompt_token_ceiling"),
-                    full_tree_source_policy=full_tree_source_policy, reused_paths=() if reuse_callers else reused_paths)
-                if unchanged:
-                    if reuse_callers:
-                        # Reconstruct site-to-unit associations at the current head before marking coverage reused.
-                        if not plan.affected_callers or plan.affected_callers["limits_reached"]:
-                            raise ValueError("The saved caller coverage does not match the pinned comparison.")
-                        plan.reused = [item.path for item in plan.selected if item.path in reused_paths and not item.error]
-                    if plan.limit_reason or {item.path for item in plan.selected} != set(plan.reused):
-                        raise ValueError("The saved review coverage does not match the pinned comparison.")
+                    full_tree_source_policy=full_tree_source_policy, reused_paths=reused_paths)
+                if unchanged and (plan.limit_reason or {item.path for item in plan.selected} != set(plan.reused)):
+                    raise ValueError("The saved review coverage does not match the pinned comparison.")
                 if on_plan is not None and plan.batches and not unchanged:
                     paths = {item.path for item in plan.selected} | {unit.path for unit in plan.units}
                     on_plan(len(paths - set(plan.reused)), connection["model"])
@@ -227,7 +223,18 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                             graphs, graph_status = {}, {"status": "unavailable",
                                 "reason": "Saved graph context includes source excluded by the current file policy."}
                 if unchanged:
+                    if reuse_callers:
+                        baseline = history.report(selection["baseline_run_id"])
+                        caller_scope = baseline.get("affected_callers")
+                        if (baseline["head_sha"] != selection["baseline_head_sha"]
+                                or not caller_scope or caller_scope["limits_reached"]
+                                or caller_scope["policy"] != options["_affected_caller_policy"]
+                                or caller_scope["status"] not in {"completed", "reused"}):
+                            raise ValueError("The saved caller coverage does not match the pinned comparison.")
+                        plan.affected_callers = caller_scope
                     status, raw, findings = engine._report(plan, [], {}, tokens=0, status="skipped")
+                    if reuse_callers:
+                        raw["units"] = [{**unit, "status": "reused"} for unit in baseline["units"]]
                 else:
                     status, raw, findings = engine.run(snap.repo, snap.env, plan, connection, options, credentials,
                         deadline=deadline, session=session, graph_by_path=graphs, progress=progress,
