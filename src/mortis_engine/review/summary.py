@@ -108,8 +108,9 @@ def diagram_section(diagram):
 
 def caller_summary(affected):
     """Describe a deletion-only plan when there is no model work or its inventory cannot fit."""
-    paths = [item["path"] for item in affected["triggers"]]
-    sites = affected["sites"]
+    paths = [item["path"] for item in affected.get("triggers", [])]
+    sites = affected.get("sites")
+    incomplete = sites is None or bool(affected.get("limits_reached"))
     changes = ", ".join(paths[:3])
     if len(paths) > 3:
         changes += f" and {len(paths) - 3} more"
@@ -119,12 +120,12 @@ def caller_summary(affected):
     if sites:
         checked = sum(site.get("status") in {"completed", "reused"} for site in sites)
         parts.append(f"Examined {checked} of {len(sites)} planned caller ranges.")
-    if affected["limits_reached"]:
+    if incomplete:
         parts.append("Caller discovery was incomplete.")
     elif not sites:
         parts.append("No matching caller sites were found.")
     result = SummaryResult(narrative=clean_text(" ".join(parts)), groups=[])
-    return {"status": "completed", "limited_context": bool(affected["limits_reached"] or sites),
+    return {"status": "completed", "limited_context": incomplete or bool(sites),
             "result": result.model_dump(exclude_none=True)}
 
 def build_context(repo, env, run, stopped, *, affected=None):
@@ -134,9 +135,11 @@ def build_context(repo, env, run, stopped, *, affected=None):
                if not file_policy.excluded(item["path"], file_policy.policy(run.config["settings"]))}
     if not primary and not affected:
         raise SummaryUnavailable("No reviewable changes were available to summarize.")
-    trigger_paths = {path for trigger in (affected or {}).get("triggers", [])
+    triggers = (affected or {}).get("triggers", [])
+    sites = (affected or {}).get("sites", [])
+    trigger_paths = {path for trigger in triggers
                      for path in (trigger["path"], trigger["new_path"]) if path}
-    site_paths = {site["path"] for site in (affected or {}).get("sites", [])}
+    site_paths = {site["path"] for site in sites}
     for path in primary | trigger_paths | site_paths:
         ReviewComment.relative_path(path)
     # Recheck admitted paths and both rename sides against the pinned revisions.
@@ -166,10 +169,11 @@ def build_context(repo, env, run, stopped, *, affected=None):
     context["diff"] = "\n".join(excerpts)
     if affected:
         # Keep the ordinary diff budget. Add facts about removed paths without sending their retired source.
-        details = {"triggers": [], "sites": [], "limits_reached": affected["limits_reached"]}
+        details = {"triggers": [], "sites": [], "limits_reached": affected.get("limits_reached", [])}
+        context["limited_context"] |= "sites" not in affected
         context["affected_callers"] = details
         remaining = limit - len(json.dumps(context).encode()) - 4096
-        for trigger in affected["triggers"]:
+        for trigger in triggers:
             path, new_path = trigger["path"], trigger["new_path"]
             if path not in allowed or (new_path and new_path not in allowed):
                 continue
@@ -182,7 +186,7 @@ def build_context(repo, env, run, stopped, *, affected=None):
             details["triggers"].append(row)
             if path not in primary:
                 paths.append(path)
-        for site in affected["sites"]:
+        for site in sites:
             if site["path"] not in allowed:
                 continue
             row = {key: site[key] for key in ("path", "start_line", "end_line", "status")}

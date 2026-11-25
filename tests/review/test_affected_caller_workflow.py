@@ -1,5 +1,6 @@
 """An unchanged cross-language caller travels through the public CLI and saved report."""
 
+import asyncio
 import json
 
 import pytest
@@ -97,6 +98,36 @@ def test_discovery_limit_sets_preview_and_review_exit_code(repo, profile, monkey
         assert "scanned_files" in result["affected_callers"]["limits_reached"]
     assert result["status"] == result["workflow_status"] == "partial"
     assert "tool.sh" in result["summary"]["result"]["narrative"]
+
+
+@pytest.mark.parametrize(("coverage", "caller_fields", "incomplete"), [
+    ({}, {"sites": []}, False),
+    ({"coverage": {}}, {"sites": []}, False),
+    ({"coverage": {"selected": []}}, {}, True),
+])
+def test_caller_summary_handles_missing_coverage_or_sites(coverage, caller_fields, incomplete):
+    report = {"base_sha": "a" * 40, "head_sha": "b" * 40, **coverage,
+              "affected_callers": {"triggers": [{"path": "retired.py"}], "limits_reached": [], **caller_fields}}
+    session = Session(None)
+    result = asyncio.run(workflows.generate_summary(None, {}, report, {}, session))
+    assert result["status"] == "completed"
+    assert result["limited_context"] is incomplete
+    expected = "Caller discovery was incomplete." if incomplete else "No matching caller sites were found."
+    assert result["result"]["narrative"] == f"Removed paths: retired.py. {expected}"
+    assert session.calls == []
+
+
+def test_missing_caller_sites_preserves_changed_file_summary(repo):
+    base = commit(repo, {"app.py": "value = 1\n", "old.py": "pass\n"})
+    git(repo, "rm", "old.py")
+    head = commit(repo, {"app.py": "value = 2\n"})
+    report = {"base_sha": base, "head_sha": head, "coverage": {"selected": [{"path": "app.py"}]},
+              "affected_callers": {"triggers": [{"path": "old.py", "new_path": None, "status": "deleted"}]}}
+    session = Session(lambda stage, context: {"narrative": "Updated app.py and removed old.py.", "groups": []})
+    with source.local_repository(repo) as (isolated, env):
+        result = asyncio.run(workflows.generate_summary(isolated, env, report, RepoSettings().model_dump(), session))
+    assert result["status"] == "completed" and result["limited_context"]
+    assert "+value = 2" in session.calls[0][1]["context"]["diff"]
 
 
 def test_summary_clips_caller_details_before_changing_primary_diff(repo):

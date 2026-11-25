@@ -257,8 +257,8 @@ async def verify(repo, env, original_report, current_sha, options, session):
 async def generate_summary(repo, env, report, options, session):
     run = _run(report, options, session)
     affected = report.get("affected_callers")
-    caller_only = affected and not report["coverage"]["selected"]
-    if caller_only and not any(site.get("unit_key") for site in affected["sites"]):
+    caller_only = affected and not report.get("coverage", {}).get("selected")
+    if caller_only and not any(site.get("unit_key") for site in affected.get("sites", [])):
         return review_context.sanitize(summary.caller_summary(affected), session.credentials)
     try:
         context = summary.build_context(repo, env, run, lambda: False, affected=affected)
