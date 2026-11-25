@@ -75,6 +75,23 @@ def test_rename_updates_relative_import_of_same_basename(repo):
     assert not preview["affected_callers"]["sites"]
 
 
+@pytest.mark.parametrize("binding", ["import new as replacement\nreplacement.apply()", "from new import apply\napply()"])
+def test_bare_import_of_renamed_sibling_rebinds_only_in_its_directory(repo, binding):
+    original = "from src.old import apply\napply()\n"
+    base = commit(repo, {"src/old.py": "def apply():\n    return 1\n", "src/caller.py": original,
+                         "other/caller.py": original, "other/new.py": "other = 1\n"})
+    git(repo, "mv", "src/old.py", "src/new.py")
+    commit(repo, {"src/caller.py": binding + "\n", "other/caller.py": binding + "\n"})
+    preview = preview_local(repo, mode="commits", base=base)
+    assert {site["path"] for site in preview["affected_callers"]["sites"]} == {"other/caller.py"}
+    with snapshots.snapshot(repo, mode="commits", base=base) as snap:
+        options = {**settings.load(snap.repo, snap.env, snap.settings_sha), "_affected_caller_policy": "affected-callers/v1"}
+        legacy = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
+                                      options, lambda: False)
+    assert legacy.affected_callers["policy"] == "affected-callers/v1"
+    assert {site["path"] for site in legacy.affected_callers["sites"]} == {"src/caller.py", "other/caller.py"}
+
+
 @pytest.mark.parametrize("stale_symbol", [False, True])
 def test_rename_rebinds_only_the_symbol_actually_imported(repo, stale_symbol):
     module = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"

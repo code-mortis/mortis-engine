@@ -371,12 +371,16 @@ def _binary_paths(repo, env, merge_base, head_sha, stopped):
     return result
 
 
+def affected_caller_policy(options):
+    policy = options.get("_affected_caller_policy", AFFECTED_CALLER_POLICY)
+    if policy not in {None, "affected-callers/v1", AFFECTED_CALLER_POLICY}:
+        raise ValueError("The saved affected-caller policy is unsupported.")
+    return policy
+
+
 def affected_changes(changes, options, rules, *, unavailable=(), binary=()):
     """Return eligible old paths and their surviving rename destinations."""
-    policy = options.get("_affected_caller_policy", AFFECTED_CALLER_POLICY)
-    if policy not in {None, AFFECTED_CALLER_POLICY}:
-        raise ValueError("The saved affected-caller policy is unsupported.")
-    if policy is None or options.get("review_mode") == "all":
+    if affected_caller_policy(options) is None or options.get("review_mode") == "all":
         return []
     return sorted(
         (old_path or path, path if old_path else None)
@@ -500,7 +504,8 @@ def _plan_callers(repo, env, plan, options, changes, triggers, unavailable, bina
         return all(value not in unavailable and value not in binary and allowed_path(value, options, plan.rules)
                    for value in (path, previous) if value)
 
-    scope, evidence, matches = affected_callers.discover(repo, env, plan, changes, triggers, eligible, stopped)
+    scope, evidence, matches = affected_callers.discover(repo, env, plan, changes, triggers, eligible, stopped,
+                                                        policy=affected_caller_policy(options))
     if not scope["triggers"] and not scope["limits_reached"]:
         return
     plan.affected_callers = scope
@@ -529,7 +534,7 @@ def _plan_callers(repo, env, plan, options, changes, triggers, unavailable, bina
             record(unit.path, ranges, error="review_context")
             return False
         used += extra
-        unit.input_hash = fingerprint([AFFECTED_CALLER_POLICY, unit.path, unit.input_hash, plan.merge_base, plan.head_sha,
+        unit.input_hash = fingerprint([scope["policy"], unit.path, unit.input_hash, plan.merge_base, plan.head_sha,
                                        [(start, end, sorted(paths)) for start, end, paths in ranges],
                                        unit.affected_triggers])
         unit.key = f"pr-{unit.input_hash}"

@@ -122,8 +122,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             if options["_discovery_result_policy"] not in {None, engine.DISCOVERY_RESULT_POLICY}:
                 raise ValueError("The saved discovery result policy is unsupported.")
             options["_affected_caller_policy"] = saved.get("affected_caller_policy") if saved else planning.AFFECTED_CALLER_POLICY
-            if options["_affected_caller_policy"] not in {None, planning.AFFECTED_CALLER_POLICY}:
-                raise ValueError("The saved affected caller policy is unsupported.")
+            planning.affected_caller_policy(options)
             if attribution not in {None, assessment.ATTRIBUTION_VERSION}:
                 raise ValueError("The saved assessment attribution version is unsupported.")
             options["_assessment_attribution"] = attribution

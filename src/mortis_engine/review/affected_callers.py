@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from . import source
 from .errors import ReviewStopped
 
-POLICY = "affected-callers/v1"
+POLICY = "affected-callers/v2"
 MAX_TRIGGERS = 64
 MAX_FILES = 512
 MAX_INVENTORY_ENTRIES = 4096
@@ -64,7 +64,7 @@ def _relative_spellings(token, parent):
     return [path for path in normalized if path not in {".", ".."} and not path.startswith(("../", "/"))]
 
 
-def _references(line, path, labels, relative_paths, file_names, *, qualified_only=False):
+def _references(line, path, labels, relative_paths, file_names, *, binding_policy=None):
     parent = str(PurePosixPath(path).parent)
     in_module_context = bool(_MODULE_CONTEXT.search(line))
     tokens = [(match.group().rstrip(".:"), False) for match in _TOKEN.finditer(line)]
@@ -89,12 +89,13 @@ def _references(line, path, labels, relative_paths, file_names, *, qualified_onl
             spellings.update((qualified, qualified.rpartition("::")[0]))
         for spelling in spellings:
             candidates = relative_paths.get(spelling) or labels.get(spelling, ())
-            if not candidates:
+            if not candidates and binding_policy != POLICY:
                 continue
+            local = labels.get(posixpath.join(parent, spelling), ()) if parent != "." else ()
+            resolved_module = spelling in relative_paths or (binding_policy == POLICY and bool(local))
             qualified = (any(separator in spelling for separator in ("/", ".", "::"))
-                         or (in_module_context and spelling in relative_paths))
-            if qualified or (quoted and spelling in file_names) or (in_module_context and not qualified_only):
-                local = labels.get(posixpath.join(parent, spelling), ()) if parent != "." else ()
+                         or (in_module_context and resolved_module))
+            if qualified or (quoted and spelling in file_names) or (in_module_context and binding_policy is None):
                 yield from local or candidates
 
 
@@ -130,10 +131,10 @@ def _excerpt(path, sha, text):
             "text": "\n".join(lines[start:end])}
 
 
-def discover(repo, env, plan, changes, triggers, allowed, stopped):
+def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POLICY):
     """Return public scope and pinned source for the planner's focused units."""
     limits = set()
-    scope = {"policy": POLICY, "triggers": [], "sites": [], "scanned_files": 0, "scanned_bytes": 0,
+    scope = {"policy": policy, "triggers": [], "sites": [], "scanned_files": 0, "scanned_bytes": 0,
              "limits_reached": []}
     source_by_trigger, labels, replacements, symbols, matches = {}, defaultdict(set), defaultdict(set), defaultdict(set), {}
     old_paths, replacement_paths = defaultdict(set), defaultdict(set)
@@ -238,10 +239,10 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped):
             linked = set(_references(line, path, labels, old_paths, file_names))
             if replacements and _MODULE_BINDING.match(line):
                 replacement = set(_references(line, path, replacements, replacement_paths, replacement_names,
-                                              qualified_only=True))
+                                              binding_policy=policy))
                 if replacement:
                     linked -= replacement - set(_references(line, path, labels, old_paths, file_names,
-                                                            qualified_only=True))
+                                                            binding_policy=policy))
                     for name in _IDENTIFIER.findall(line):
                         rebound_symbols[name].update(replacement.intersection(symbols.get(name, ())))
                     aliases = _IMPORT_ALIAS.findall(line)
