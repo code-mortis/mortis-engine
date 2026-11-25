@@ -8,7 +8,8 @@ from pathlib import PurePosixPath
 from . import source
 from .errors import ReviewStopped
 
-POLICY = "affected-callers/v2"
+POLICY = "affected-callers/v3"
+LEGACY_TEXT_POLICIES = (None, "affected-callers/v1", "affected-callers/v2")
 MAX_TRIGGERS = 64
 MAX_FILES = 512
 MAX_INVENTORY_ENTRIES = 4096
@@ -66,6 +67,7 @@ def _relative_spellings(token, parent):
 
 def _references(line, path, labels, relative_paths, file_names, *, binding_policy=None):
     parent = str(PurePosixPath(path).parent)
+    sibling_bindings = binding_policy not in (None, "affected-callers/v1")
     in_module_context = bool(_MODULE_CONTEXT.search(line))
     tokens = [(match.group().rstrip(".:"), False) for match in _TOKEN.finditer(line)]
     tokens.extend((match[2], True) for match in _QUOTED.finditer(line))
@@ -89,10 +91,10 @@ def _references(line, path, labels, relative_paths, file_names, *, binding_polic
             spellings.update((qualified, qualified.rpartition("::")[0]))
         for spelling in spellings:
             candidates = relative_paths.get(spelling) or labels.get(spelling, ())
-            if not candidates and binding_policy != POLICY:
+            if not candidates and not sibling_bindings:
                 continue
             local = labels.get(posixpath.join(parent, spelling), ()) if parent != "." else ()
-            resolved_module = spelling in relative_paths or (binding_policy == POLICY and bool(local))
+            resolved_module = spelling in relative_paths or (sibling_bindings and bool(local))
             qualified = (any(separator in spelling for separator in ("/", ".", "::"))
                          or (in_module_context and resolved_module))
             if qualified or (quoted and spelling in file_names) or (in_module_context and binding_policy is None):
@@ -179,7 +181,7 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
             limits.add("source_unavailable")
             cached[blob] = None
             return None
-        if "\ufffd" in text or len(text.encode()) != size:
+        if len(text.encode()) != size or (policy in LEGACY_TEXT_POLICIES and "\ufffd" in text):
             limits.add("source_unavailable")
             text = None
         cached[blob] = None if text is None or "\0" in text else text

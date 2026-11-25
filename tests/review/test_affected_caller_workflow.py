@@ -18,11 +18,11 @@ from .test_workflows import Session, decision, selected
 @pytest.mark.parametrize("fallback", [False, True])
 def test_deleted_script_from_preview_through_assessment(repo, profile, monkeypatch, capsys, fallback):
     script = "scripts/charge.sh"
-    call = 'subprocess.run(["scripts/charge.sh"], check=True)'
+    call = 'subprocess.run(["scripts/charge.sh"], check=True)  # \ufffd'
     app = "import subprocess\n" + (
         "try:\n    " + call + "\nexcept FileNotFoundError:\n    use_builtin_charge()\n" if fallback else call + "\n"
     )
-    base = commit(repo, {script: "echo charge\n", "payments.py": app})
+    base = commit(repo, {script: "echo charge  # \ufffd\n", "payments.py": app})
     git(repo, "rm", script)
     git(repo, "commit", "-qm", "remove charge script")
     args = ["review", "--repo", str(repo), "--base", base, "--format", "json"]
@@ -52,7 +52,7 @@ def test_deleted_script_from_preview_through_assessment(repo, profile, monkeypat
             seen.append("assessment")
             assert payload["original_sha"] == base
             assert 'original source: "scripts/charge.sh"' in body
-            assert "1 | echo charge" in body
+            assert "1 | echo charge  # \ufffd" in body
             assert 'current source: "payments.py"' in body
             assert all(f"{i} | {value}" in body for i, value in enumerate(app.splitlines(), 1))
             output = decision(verdict="rejected" if fallback else "confirmed",

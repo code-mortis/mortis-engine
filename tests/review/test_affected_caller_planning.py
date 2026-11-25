@@ -43,6 +43,32 @@ def test_explicit_paths_can_resolve_from_repository_root_without_leaving_it(repo
     assert site["path"] == "backend/run.py" and site["triggers"] == [executable]
 
 
+@pytest.mark.parametrize(("suffix", "unavailable"), [(b"\xff", True), (b"\0", False)])
+def test_caller_discovery_omits_undecodable_and_binary_blobs(repo, suffix, unavailable):
+    (repo / "caller.py").write_bytes(b'run("tool.sh")  # ' + suffix + b"\n")
+    base = commit(repo, {"tool.sh": "exit 0\n"})
+    git(repo, "rm", "tool.sh")
+    git(repo, "commit", "-qm", "remove tool")
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert scope["sites"] == []
+    assert scope["limits_reached"] == (["source_unavailable"] if unavailable else [])
+
+
+def test_literal_replacement_character_preserves_saved_plan_scope(repo):
+    base = commit(repo, {"tool.sh": "exit 0\n", "caller.py": 'run("tool.sh")\n'})
+    git(repo, "rm", "tool.sh")
+    commit(repo, {"caller.py": 'run("tool.sh")  # \ufffd\n'})
+    with snapshots.snapshot(repo, mode="commits", base=base) as snap:
+        args = (snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base)
+        options = settings.load(snap.repo, snap.env, snap.settings_sha)
+        current = planning.plan_review(*args, options, lambda: False)
+        legacy = planning.plan_review(*args, {**options, "_affected_caller_policy": "affected-callers/v2"}, lambda: False)
+    assert current.selected[0].error is None
+    assert current.affected_callers["sites"][0]["unit_key"] == current.selected[0].units[0].key
+    assert legacy.selected[0].error and not legacy.units
+    assert legacy.affected_callers["limits_reached"] == ["source_unavailable"]
+
+
 def test_callers_across_languages_share_one_discovery_pass(repo):
     callers = {
         "client.ts": ("lib/old_client.ts", "import { send } from './lib/old_client';"),

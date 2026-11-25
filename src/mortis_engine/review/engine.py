@@ -181,8 +181,8 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
         entry = planning._entry(repo, env, revision, path, stopped)
         if not entry or entry["size"] > affected_callers.MAX_FILE_BYTES:
             raise ValueError("Affected-caller evidence exceeds its pinned source bounds.")
-        original = git_source.git(repo, env, "cat-file", "blob", entry["blob_sha"], stopped=stopped)
-        if "\0" in original or "\ufffd" in original:
+        original = git_source.git(repo, env, "cat-file", "blob", entry["blob_sha"], stopped=stopped, strict_utf8=True)
+        if "\0" in original:
             raise ValueError("Affected-caller evidence needs regular UTF-8 source.")
         # Multiline credentials may cross a planned excerpt boundary.
         redacted = context.sanitize(original, credentials, stopped)
