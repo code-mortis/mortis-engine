@@ -114,6 +114,8 @@ def _markdown(report) -> str:
         _section(lines, "Review comparison", comparison)
     coverage = report.get("coverage", {})
     affected = report.get("affected_callers", {})
+    if not isinstance(affected, dict):
+        affected = {}
     if report.get("summary"):
         _summary(lines, report["summary"], coverage, affected)
 
