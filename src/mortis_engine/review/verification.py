@@ -265,11 +265,13 @@ class ResultValidationError(ValueError):
         self.feedback = feedback
 
 
-def review_paths(repo, env, base_sha, head_sha, paths, options, stopped, *, supporting_evidence=False):
+def review_paths(repo, env, base_sha, head_sha, paths, options, stopped, *, supporting_evidence=False, changes=None):
     rules = planning.load_rules(repo, env, options.get("_settings_sha", base_sha), options, stopped)
     allowed = {path for path in paths
                if planning.allowed_path(path, options, rules, supporting_evidence=supporting_evidence)}
-    for path, old_path, _ in planning._changes(repo, env, base_sha, head_sha, stopped):
+    if changes is None:
+        changes = planning._changes(repo, env, base_sha, head_sha, stopped)
+    for path, old_path, _ in changes:
         if old_path and not all(planning.allowed_path(value, options, rules, supporting_evidence=supporting_evidence)
                                 for value in (path, old_path)):
             allowed.difference_update((path, old_path))

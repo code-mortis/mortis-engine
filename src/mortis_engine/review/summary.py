@@ -6,7 +6,7 @@ import re
 
 from mortis_engine.security import clean_text
 
-from . import file_policy, verification
+from . import file_policy, planning, verification
 from . import source as git_source
 from .contracts import ReviewComment
 from .workflow_contracts import SummaryDiagram, SummaryResult
@@ -106,8 +106,9 @@ def diagram_section(diagram):
     lines += [f'    {nodes[edge["source"]]} --> {nodes[edge["target"]]}' for edge in diagram["edges"]]
     return "<details>\n<summary>Diagram</summary>\n\n```mermaid\n" + "\n".join(lines) + "\n```\n\n</details>"
 
-def caller_summary(affected):
+def caller_summary(repo, env, run, stopped, affected):
     """Describe a deletion-only plan when there is no model work or its inventory cannot fit."""
+    _, _, affected = _permitted_scope(repo, env, run, stopped, affected)
     paths = [item["path"] for item in affected.get("triggers", [])]
     sites = affected.get("sites")
     incomplete = sites is None or bool(affected.get("limits_reached"))
@@ -128,8 +129,8 @@ def caller_summary(affected):
     return {"status": "completed", "limited_context": incomplete or bool(sites),
             "result": result.model_dump(exclude_none=True)}
 
-def build_context(repo, env, run, stopped, *, affected=None):
-    source = git_source
+def _permitted_scope(repo, env, run, stopped, affected):
+    """Recheck both local and provider summary inputs against the pinned comparison."""
     coverage = (run.report or {}).get("manifest", {}).get("coverage", {})
     primary = {item["path"] for item in coverage.get("selected", [])
                if not file_policy.excluded(item["path"], file_policy.policy(run.config["settings"]))}
@@ -138,16 +139,33 @@ def build_context(repo, env, run, stopped, *, affected=None):
     triggers = (affected or {}).get("triggers", [])
     sites = (affected or {}).get("sites", [])
     trigger_paths = {path for trigger in triggers
-                     for path in (trigger["path"], trigger["new_path"]) if path}
+                     for path in (trigger["path"], trigger.get("new_path")) if path}
     site_paths = {site["path"] for site in sites}
     for path in primary | trigger_paths | site_paths:
         ReviewComment.relative_path(path)
     # Recheck admitted paths and both rename sides against the pinned revisions.
-    merge_base = source.git(repo, env, "merge-base", run.base_sha, run.head_sha, stopped=stopped).strip()
+    merge_base = git_source.git(repo, env, "merge-base", run.base_sha, run.head_sha, stopped=stopped).strip()
+    changes = planning._changes(repo, env, merge_base, run.head_sha, stopped)
     allowed = verification.review_paths(repo, env, merge_base, run.head_sha, primary | trigger_paths | site_paths,
-                                        run.config["settings"], stopped)
-    paths = sorted(primary & allowed)
-    if not paths and not (trigger_paths & allowed):
+                                        run.config["settings"], stopped, changes=changes)
+    if affected:
+        removed = {(old or path, path if old else None) for path, old, status in changes
+                   if status == "D" or status.startswith("R")}
+        permitted_triggers = []
+        for trigger in triggers:
+            path, new_path = trigger["path"], trigger.get("new_path")
+            if (path, new_path) in removed and path in allowed and (new_path is None or new_path in allowed):
+                permitted_triggers.append({"path": path, "new_path": new_path, "status": "renamed" if new_path else "deleted"})
+        affected = {**affected, "triggers": permitted_triggers}
+        if "sites" in affected:
+            affected["sites"] = [row for row in sites if row["path"] in allowed]
+    return merge_base, primary & allowed, affected
+
+
+def build_context(repo, env, run, stopped, *, affected=None):
+    merge_base, primary, affected = _permitted_scope(repo, env, run, stopped, affected)
+    paths = sorted(primary)
+    if not paths and not (affected or {}).get("triggers"):
         raise SummaryUnavailable("No permitted reviewable changes were available to summarize.")
     ceiling = run.config["connection"].get("options", {}).get("prompt_token_ceiling", 58888)
     # Conservative byte bound leaves room for instructions, transport and generated output.
@@ -161,7 +179,7 @@ def build_context(repo, env, run, stopped, *, affected=None):
     per_file = min(12000, allowance // max(len(paths), 1))
     excerpts = []
     for path in paths:
-        patch = source.git(repo, env, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3",
+        patch = git_source.git(repo, env, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3",
                         f"{merge_base}..{run.head_sha}", "--", path, stopped=stopped)
         raw = clean_text(patch).encode()
         context["limited_context"] |= len(raw) > per_file
@@ -173,10 +191,8 @@ def build_context(repo, env, run, stopped, *, affected=None):
         context["limited_context"] |= "sites" not in affected
         context["affected_callers"] = details
         remaining = limit - len(json.dumps(context).encode()) - 4096
-        for trigger in triggers:
-            path, new_path = trigger["path"], trigger["new_path"]
-            if path not in allowed or (new_path and new_path not in allowed):
-                continue
+        for trigger in affected["triggers"]:
+            path = trigger["path"]
             row = {key: trigger[key] for key in ("path", "status", "new_path")}
             size = len(json.dumps(row).encode()) + len(json.dumps(path).encode()) + 4
             if size > remaining:
@@ -186,9 +202,7 @@ def build_context(repo, env, run, stopped, *, affected=None):
             details["triggers"].append(row)
             if path not in primary:
                 paths.append(path)
-        for site in sites:
-            if site["path"] not in allowed:
-                continue
+        for site in affected.get("sites", []):
             row = {key: site[key] for key in ("path", "start_line", "end_line", "status")}
             size = len(json.dumps(row).encode()) + 2
             if size > remaining:

@@ -258,16 +258,21 @@ async def generate_summary(repo, env, report, options, session):
     run = _run(report, options, session)
     affected = report.get("affected_callers")
     caller_only = affected and not report.get("coverage", {}).get("selected")
+
+    def local_summary():
+        result = summary.caller_summary(repo, env, run, lambda: False, affected)
+        return review_context.sanitize(result, session.credentials)
+
     if caller_only and not any(site.get("unit_key") for site in affected.get("sites", [])):
-        return review_context.sanitize(summary.caller_summary(affected), session.credentials)
+        return local_summary()
     try:
         context = summary.build_context(repo, env, run, lambda: False, affected=affected)
     except summary.SummaryUnavailable:
         if caller_only:
-            return review_context.sanitize(summary.caller_summary(affected), session.credentials)
+            return local_summary()
         raise
     if caller_only and not context["paths"]:
-        return review_context.sanitize(summary.caller_summary(affected), session.credentials)
+        return local_summary()
     context["diagram_enabled"] = options.get("summary_diagram_enabled", False)
     instructions = summary.INSTRUCTIONS
     if affected:

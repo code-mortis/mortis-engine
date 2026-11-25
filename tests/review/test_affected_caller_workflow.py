@@ -105,15 +105,39 @@ def test_discovery_limit_sets_preview_and_review_exit_code(repo, profile, monkey
     ({"coverage": {}}, {"sites": []}, False),
     ({"coverage": {"selected": []}}, {}, True),
 ])
-def test_caller_summary_handles_missing_coverage_or_sites(coverage, caller_fields, incomplete):
-    report = {"base_sha": "a" * 40, "head_sha": "b" * 40, **coverage,
+def test_caller_summary_handles_missing_coverage_or_sites(repo, coverage, caller_fields, incomplete):
+    base = commit(repo, {"retired.py": "pass\n"})
+    git(repo, "rm", "retired.py")
+    head = commit(repo, {})
+    report = {"base_sha": base, "head_sha": head, **coverage,
               "affected_callers": {"triggers": [{"path": "retired.py"}], "limits_reached": [], **caller_fields}}
     session = Session(None)
-    result = asyncio.run(workflows.generate_summary(None, {}, report, {}, session))
+    with source.local_repository(repo) as (isolated, env):
+        result = asyncio.run(workflows.generate_summary(isolated, env, report, {}, session))
     assert result["status"] == "completed"
     assert result["limited_context"] is incomplete
     expected = "Caller discovery was incomplete." if incomplete else "No matching caller sites were found."
     assert result["result"]["narrative"] == f"Removed paths: retired.py. {expected}"
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("unit_key", [None, "assigned"])
+def test_local_summary_rechecks_pinned_caller_scope(repo, unit_key):
+    base = commit(repo, {"retired.py": "# retired\n", "moved.py": "# moved\n", ".env": "example\n",
+                         "caller.py": "import retired\n", "ignored.py": "import retired\n"})
+    git(repo, "rm", "retired.py", ".env")
+    git(repo, "mv", "moved.py", "private.py")
+    head = commit(repo, {})
+    triggers = [{"path": path, "new_path": new, "status": "renamed" if new else "deleted"}
+                for path, new in [("retired.py", None), ("ghost.py", None), (".env", None), ("moved.py", "private.py")]]
+    sites = [{"path": path, "unit_key": unit_key, "status": "completed", "start_line": 1, "end_line": 1}
+             for path in ["caller.py", "ignored.py"]]
+    report = {"base_sha": base, "head_sha": head, "affected_callers": {"triggers": triggers, "sites": sites}}
+    options = {**RepoSettings().model_dump(), "exclusions": "private.py,ignored.py", "summary_token_budget": 1}
+    session = Session(None)
+    with source.local_repository(repo) as (isolated, env):
+        result = asyncio.run(workflows.generate_summary(isolated, env, report, options, session))
+    assert result["result"]["narrative"] == "Removed paths: retired.py. Examined 1 of 1 planned caller ranges."
     assert session.calls == []
 
 
