@@ -428,6 +428,36 @@ def draft_finding(request, *, invalid_citation=False, content="Incorrect value")
                           "start_line": unit["start_line"], "end_line": unit["start_line"]}]}
 
 
+def test_citation_repair_uses_ranges_from_the_generated_request(monkeypatch):
+    value = plan(2, same_file=True)
+    value.batches = [value.units]
+    attempts = []
+
+    async def send(connection, credentials, request, **kwargs):
+        excerpts = json.loads(request.messages[0].content)["citation_sources"]
+        first, second = excerpts
+        assert first["source_id"] == second["source_id"]
+        finding = draft_finding(request)
+        finding["evidence"] = [{key: source[key] for key in ("source_id", "start_line", "end_line")}
+                               for source in excerpts]
+        if not attempts:
+            # Both lines were supplied, but the requested span crosses two excerpts.
+            finding["evidence"][0]["end_line"] = second["end_line"]
+        else:
+            issue, = json.loads(request.messages[-1].content)["validation_diagnostics"]["issues"]
+            assert issue["code"] == "citation_range_out_of_bounds"
+            assert issue["field"] == ["findings", 0, "evidence", 0]
+        attempts.append(request)
+        response = final(request)
+        response.output["findings"] = [finding]
+        return response
+
+    monkeypatch.setattr(gateway, "send", send)
+    state, _, findings = engine.run(None, {}, value, CONNECTION, OPTIONS, {})
+    assert state == "completed" and len(attempts) == 2
+    assert [item["quote"] for item in findings[0]["evidence"]] == ["value = 0", "value = 1"]
+
+
 def test_possible_findings_update_while_other_analysis_is_active(monkeypatch):
     events = []
     first_finished = asyncio.Event()
@@ -496,7 +526,10 @@ def test_repair_reconsiders_valid_and_invalid_candidates_from_prior_draft(monkey
             followup = json.loads(request.messages[-1].content)
             draft = followup.get("previous_result_draft")
             if draft:
-                assert followup["validation_diagnostics"]["issues"][0]["code"] == "unavailable_citation"
+                issue, = followup["validation_diagnostics"]["issues"]
+                assert issue["code"] == "unavailable_citation"
+                assert issue["field"] == ["findings", 1, "evidence", 0]
+                assert "exact source_id" in issue["message"]
                 draft["findings"][1]["evidence"][0]["source_id"] = draft["findings"][0]["evidence"][0]["source_id"]
                 response.output = draft
         return response

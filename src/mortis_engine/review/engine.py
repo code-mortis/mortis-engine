@@ -378,8 +378,13 @@ def validate_result(data, batch, sources, credentials, stopped=lambda: False):
             source = next((source for source in sources if source["source_id"] == evidence.source_id
                            and source["start_line"] <= evidence.start_line <= evidence.end_line <= source["end_line"]), None)
             if source is None:
+                if any(source["source_id"] == evidence.source_id for source in sources):
+                    raise ResultValidationError("citation_range_out_of_bounds", evidence_field,
+                                                "Keep both line numbers inside one supplied excerpt for this source_id. "
+                                                "Use separate evidence entries for separate excerpts.")
                 raise ResultValidationError("unavailable_citation", evidence_field,
-                                            "Select source_id and line bounds from the supplied citation sources.")
+                                            "Copy an exact source_id from the supplied citation sources "
+                                            "(citation_sources or supporting_sources).")
             lines = source["text"].splitlines()
             quote = "\n".join(lines[evidence.start_line - source["start_line"]:evidence.end_line - source["start_line"] + 1])
             if not quote.strip():
