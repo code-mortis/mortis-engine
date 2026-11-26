@@ -178,6 +178,9 @@ in history. Reused coverage describes prior analysis of unchanged files. A first
 an incomplete review, a changed Engine version, base or review configuration, or
 unavailable ancestry triggers a full comparison. A changed head tree with an
 eligible deletion or rename also gets a full comparison so callers are checked again.
+If a later commit fully reverts a reviewed file change, Mortis reviews the remaining
+branch diff in full whenever it would otherwise reuse coverage. A caller can still
+contain a change that depended on the reverted file.
 `--graph` and `--second-pass` also use the full comparison. `max_files` applies to
 the cumulative scope.
 
