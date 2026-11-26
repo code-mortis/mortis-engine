@@ -151,6 +151,12 @@ def test_reverting_reviewed_dependency_rechecks_caller(repo, tmp_path_factory, m
     ("def total(amount, currency, *, tax):\n    return amount\n", True),
     ("def total(amount, currency, tax=0):\n    return amount\n", False),
     ("def total(amount, currency):\n    return round(amount)\n", False),
+    pytest.param(
+        "def total(amount, currency): return amount\n"
+        "class Invoice:\n    def total(self, tax): return tax\n"
+        "def make_quote():\n    def total(tax): return tax\n    return total\n",
+        False, id="nested-functions-and-methods",
+    ),
 ])
 def test_incremental_review_rechecks_importers_of_changed_signature(
     repo, tmp_path_factory, monkeypatch, provider, connection, declaration, recheck,
@@ -193,6 +199,31 @@ def test_incremental_review_rechecks_importers_of_changed_signature(
     assert paths(second, "reused") == sorted([same_module, unrelated] if recheck else [
         checkout, script, same_module, qualified, unrelated,
     ])
+
+
+@pytest.mark.parametrize(("definition", "module"), [
+    pytest.param("if __debug__:\n    def total({params}): return amount\n", "billing", id="module-conditional"),
+    pytest.param("def total({params}): return amount\n", ".billing", id="root-relative-import"),
+])
+def test_incremental_review_rechecks_module_scope_importer(
+    repo, tmp_path_factory, monkeypatch, provider, connection, definition, module,
+):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
+    commit(repo, {"__init__.py": "", "billing.py": definition.format(params="amount")})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {"checkout.py": f"from {module} import total\nprice = total(10)\n", "unrelated.py": "items = 1\n"})
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict, "overrides": {"incremental": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == ["checkout.py", "unrelated.py"]
+
+    commit(repo, {"billing.py": definition.format(params="amount, currency")})
+    analysis = provider[0]["analysis"]
+    analysis.clear()
+    second = review_commits(repo, **kwargs)
+    assert second["comparison"]["strategy"] == "incremental"
+    assert paths(second, "completed") == ["billing.py", "checkout.py"]
+    assert paths(second, "reused") == ["unrelated.py"]
+    assert sorted(unit["path"] for batch in analysis for unit in batch) == ["billing.py", "checkout.py"]
 
 
 def test_incremental_review_fails_closed_when_python_caller_cannot_be_inspected(

@@ -15,7 +15,9 @@ def is_python(path):
 
 def _required_signatures(tree):
     signatures = defaultdict(list)
-    for node in tree.body:
+    pending = [tree]
+    while pending:
+        node = pending.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             args = node.args
             required = len(args.posonlyargs) + len(args.args) - len(args.defaults)
@@ -24,6 +26,8 @@ def _required_signatures(tree):
                                     if default is None))
             names = tuple(arg.arg for arg in args.args[:required - positional])
             signatures[node.name].append((positional, names, keywords))
+        elif not isinstance(node, (ast.ClassDef, ast.expr)):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
     return signatures
 
 
@@ -35,7 +39,8 @@ def _imports_changed_function(tree, path, changed, stopped):
         if isinstance(node, ast.Import):
             if any(tuple(name.name.split(".")) in changed for name in node.names):
                 return True
-        elif isinstance(node, ast.ImportFrom) and node.level <= len(package):
+        elif isinstance(node, ast.ImportFrom) and node.level <= len(package) + 1:
+            # One leading dot stays in the current directory, which can be the repository root.
             parent = package[:len(package) + 1 - node.level] if node.level else ()
             module = (*parent, *(node.module.split(".") if node.module else ()))
             functions = changed.get(module, ())
