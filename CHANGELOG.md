@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Rebuild the optional code graph parser with `mortis graph build` to use Python 3.15, Tree-sitter 0.27 and the updated C# and PHP grammars.
+
 ## 0.1.5 - 2026-11-24
 
 - Use `mortis ask --base main --question-file question.txt` to ask about a local Git comparison. Answers cite eligible diff hunks by path, commit and line range. Use `--path`, `--line` and `--side` together to select lines across one or more hunks.

@@ -12,6 +12,8 @@ from mortis_engine.code_graph import build, transport
 from mortis_engine.code_graph.contracts import (
     APP_EXTRACTOR_VERSION,
     EXTRACTOR_VERSION,
+    LEGACY_EXTRACTOR_VERSION,
+    PREVIOUS_EXTRACTOR_VERSION,
     CodeGraphRequest,
     CodeGraphResult,
     CodeGraphSymbol,
@@ -99,6 +101,8 @@ def test_validator_rejects_facts_without_validated_source(status, fact):
 
 @pytest.mark.parametrize(("configuration", "version"), [
     (True, EXTRACTOR_VERSION),
+    ({"image": transport.PREVIOUS_IMAGE}, PREVIOUS_EXTRACTOR_VERSION),
+    ({"image": transport.LEGACY_IMAGE}, LEGACY_EXTRACTOR_VERSION),
     ({"image": transport.APP_IMAGE}, APP_EXTRACTOR_VERSION),
 ])
 def test_enrichment_uses_same_revision_bounded_one_hop_imports(tmp_path, monkeypatch, configuration, version):
@@ -243,12 +247,15 @@ def test_native_extractor_retains_real_source_contract():
     pytest.importorskip("tree_sitter")
     from mortis_engine.code_graph.extract import extract
     php = b"<?php function helper() { return 1; } helper();\n"
-    request = request_fixture(extra_files=(("app.php", php),))
+    csharp = b"class Example { int Value() => 1; }\n"
+    request = request_fixture(extra_files=(("app.php", php), ("Example.cs", csharp)))
     result = validate_result(request, extract(request))
     assert result.imports[0].target_path == "dep.js"
     assert result.files[0].unresolved_calls == 1
     assert any(symbol.file_path == "app.php" and symbol.name == "helper" for symbol in result.symbols)
     assert next(item for item in result.files if item.path == "app.php").unresolved_calls == 1
+    assert {(symbol.name, symbol.kind) for symbol in result.symbols if symbol.file_path == "Example.cs"} == {
+        ("Example", "class_declaration"), ("Value", "method_declaration")}
     with pytest.raises(ValueError, match="different parser version"):
         extract(request.model_copy(update={"extractor_version": APP_EXTRACTOR_VERSION}))
 

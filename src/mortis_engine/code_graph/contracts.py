@@ -22,7 +22,8 @@ MAX_RESULT_BYTES = 32 * 1024 * 1024
 MAX_FACTS = 100_000
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 EXTRACTION_SECONDS = 120
-EXTRACTOR_VERSION = "tree-sitter/0.26.1-mortis/8"
+EXTRACTOR_VERSION = "tree-sitter/0.27.0-mortis/9"
+PREVIOUS_EXTRACTOR_VERSION = "tree-sitter/0.26.1-mortis/8"
 LEGACY_EXTRACTOR_VERSION = "tree-sitter/0.26.1-mortis/7"
 APP_EXTRACTOR_VERSION = "tree-sitter/0.25.2-mortis/6"
 
@@ -246,7 +247,9 @@ class CodeGraphRequest(StrictModel):
     schema_version: Literal["code-graph/v2"] = "code-graph/v2"
     repository_id: int = Field(gt=0, le=2**63 - 1, strict=True)
     commit_sha: GitSha
-    extractor_version: Literal[EXTRACTOR_VERSION, LEGACY_EXTRACTOR_VERSION, APP_EXTRACTOR_VERSION] = EXTRACTOR_VERSION
+    extractor_version: Literal[
+        EXTRACTOR_VERSION, PREVIOUS_EXTRACTOR_VERSION, LEGACY_EXTRACTOR_VERSION, APP_EXTRACTOR_VERSION
+    ] = EXTRACTOR_VERSION
     policy_digest: Digest
     limits: CodeGraphLimits = Field(default_factory=CodeGraphLimits)
     files: list[CodeGraphSource] = Field(max_length=MAX_TREE_ENTRIES)

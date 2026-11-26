@@ -15,6 +15,7 @@ from .contracts import (
     EXTRACTOR_VERSION,
     LEGACY_EXTRACTOR_VERSION,
     MAX_TREE_ENTRIES,
+    PREVIOUS_EXTRACTOR_VERSION,
     CodeGraphLimits,
     CodeGraphRequest,
     blob_sha,
@@ -76,6 +77,8 @@ def _request(repo, env, plan, options, credentials, stopped, *, image, legacy):
     version = EXTRACTOR_VERSION
     if image == transport.APP_IMAGE:
         version = APP_EXTRACTOR_VERSION
+    elif image == transport.PREVIOUS_IMAGE:
+        version = PREVIOUS_EXTRACTOR_VERSION
     elif legacy or image == transport.LEGACY_IMAGE:
         version = LEGACY_EXTRACTOR_VERSION
     return CodeGraphRequest(repository_id=1, commit_sha=plan.head_sha, extractor_version=version,

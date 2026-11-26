@@ -392,8 +392,8 @@ mortis graph build
 mortis review --base main --graph
 ```
 
-Docker builds a separate parser image with the pinned grammars. After upgrading
-from 0.1.2 or earlier, rerun `mortis graph build` before using `--graph`. During
+Docker builds a separate parser image with the pinned grammars. When an engine
+upgrade changes the parser, rerun `mortis graph build` before using `--graph`. During
 review the parser receives bounded file contents at one revision. It runs without
 network or host mounts. A review can continue using available graph facts and its
 normal source evidence when graph coverage is incomplete. Resumed reviews reuse
@@ -530,9 +530,9 @@ The Python package bundles the end-user `mortis-engine-use` skill.
 
 GitHub Actions runs the test suite on Python 3.13, 3.14 and 3.15 for pushes to `main`
 (including merges), pull requests targeting `main` and manual dispatches.
-Python 3.15 checks Ruff, builds and checks the wheel/source distribution and
-smoke-tests isolated installations. Python 3.13 tests native graph extraction with
-the parser's pinned dependencies. Provider, Trivy
+Each Python version tests native graph extraction with the parser's pinned dependencies.
+Python 3.15 also checks Ruff, builds and checks the wheel/source distribution and
+smoke-tests isolated installations. Provider, Trivy
 and Docker boundaries use mocks in this suite; CI does not make live analysis requests.
 
 ```sh

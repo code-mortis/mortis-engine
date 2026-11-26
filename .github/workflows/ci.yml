@@ -35,9 +35,9 @@ jobs:
         run: |
           echo "XDG_CONFIG_HOME=$RUNNER_TEMP/mortis-config" >> "$GITHUB_ENV"
           echo "XDG_STATE_HOME=$RUNNER_TEMP/mortis-state" >> "$GITHUB_ENV"
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "0.13.8"
+          version: "0.13.10"
           python-version: ${{ matrix.python }}
           enable-cache: true
       - name: Install locked dependencies
@@ -45,7 +45,6 @@ jobs:
       - name: Run tests
         run: uv run --locked pytest -q
       - name: Test native parser with its pinned dependencies
-        if: matrix.python == '3.13'
         run: >-
           uv run --locked --with-requirements src/mortis_engine/code_graph/requirements.txt
           python -m pytest -q tests/code_graph/test_graph.py::test_native_extractor_retains_real_source_contract
