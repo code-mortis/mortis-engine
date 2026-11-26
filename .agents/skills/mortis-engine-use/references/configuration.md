@@ -45,6 +45,9 @@ allowed only when every resolved address is private or loopback. Mortis connects
 to a validated address and retains the hostname for TLS and HTTP routing. Use
 only the endpoint and trust scope the user selected. Repository configuration
 does not control endpoint trust. Bedrock manages its own signing headers.
+Inference reports `endpoint_dns` for lookup failures and `endpoint_policy` for
+address validation failures. Temporary DNS failures are eligible for retry.
+A request stopped during DNS resolution releases its token reservation.
 
 ## Trusted revision settings
 
@@ -78,7 +81,12 @@ the last compatible, fully covered head. The summary and `max_files` still
 cover the eligible branch comparison. Missing or incomplete history, a changed
 Engine version, base or configuration, and unavailable ancestry can trigger a
 full comparison. A changed head tree with an eligible deletion or rename gets a
-full comparison to check callers again. `--graph` and `--second-pass` always
+full comparison to check callers again. Fully reverting a reviewed file change
+also triggers a full comparison if coverage would otherwise be reused.
+A change to a module-level Python function's required parameters, `*args` or
+`**kwargs` can bring previously reviewed importers back into scope. When bounded
+inspection of these files cannot finish, Mortis runs the full comparison.
+`--graph` and `--second-pass` always
 use the full comparison. With unchanged skipping enabled, a compatible review
 of the same head tree can reuse complete caller coverage even when the commit
 SHA changed.

@@ -57,7 +57,8 @@ incremental or unchanged-review flags.
 Branch, staged and working-tree previews can include `affected_callers` when
 eligible files were deleted or renamed. Inspect the planned caller ranges and
 `limits_reached` there. Review checks those ranges under the same file policy
-without requiring Docker.
+without requiring Docker. For modules under `src/`, this includes Python callers
+that still use the deleted or renamed module's absolute import path.
 
 ## Run an authorized analysis
 
@@ -118,6 +119,8 @@ coverage. An unchanged skip links to the earlier report without new findings.
 When present, read `affected_callers` for range-level outcomes and discovery
 limits. An examined range in an unchanged caller accounts only for that range.
 Partial caller coverage can return code `2` with validated findings.
+For graph-enabled reviews, inspect `code_graph.discovery_omissions` when present.
+It identifies units that received source without optional graph context.
 Do not label partial coverage as clean, unknown usage as zero, an unavailable
 scan grade as a pass, or a finding absent from a later run as fixed. Report the
 run ID, scope, actionable findings and material coverage/usage limits to the user.

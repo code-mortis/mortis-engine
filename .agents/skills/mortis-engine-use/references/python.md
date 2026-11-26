@@ -65,6 +65,10 @@ range separately from file coverage. Check it alongside the report status.
 Caller discovery or analysis can be partial while the report retains validated
 findings. A compatible unchanged-tree skip can reuse complete caller coverage.
 
+For graph-enabled reviews, `result.get("code_graph", {}).get("discovery_omissions", [])`
+lists the `path`, `reason` and `unit_keys` for optional context omitted during
+discovery. Read `coverage` for the outcome of the assigned source review.
+
 For diff questions or a branch description, use the
 [CLI commands](../SKILL.md#ask-about-or-describe-a-branch-comparison).
 
@@ -103,6 +107,9 @@ Additional exports in `mortis_engine.operations`:
 | `triage(repository, ...)` | `run_id`, `finding_id`, `state`, `version`, `reason` |
 
 Retries use saved evidence allowed by the current file policy, preserve the
-original report and can be blocked by unknown usage or stale history. Triage
+original report and can be blocked by unknown usage or stale history. A resumed
+review uses the original run's line numbering. Each candidate in a new review
+has its own assessment attempt, including candidates with identical content.
+Resuming an interrupted retry can reuse its saved response. Triage
 requires the user's decision and current version, just as with the CLI. Inspect
 `status`, coverage, stage failures and usage in returned dictionaries.

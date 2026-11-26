@@ -2,9 +2,14 @@
 
 ## Unreleased
 
-- Incremental branch reviews recheck Python importers when a module-level function's required parameters change or it gains or loses `*args` or `**kwargs`. This includes callers that import a submodule and call a function on its parent package.
-- Graph-enabled reviews report the paths and review units whose optional graph context was dropped to fit a discovery request.
-- Incremental reviews recheck the remaining branch diff when a previously reviewed change is fully reverted and coverage would otherwise be reused. Callers that still depend on the reverted change receive fresh analysis. The first comparison after upgrading establishes a fresh baseline.
+## 0.1.7 - 2026-11-26
+
+- Incremental branch reviews recheck previously reviewed Python importers when a module-level function's required parameters change or it gains or loses `*args` or `**kwargs`. Fully reverting a reviewed file change triggers a fresh review of the remaining branch diff when coverage would otherwise be reused. The first comparison after upgrading establishes a new baseline.
+- Caller discovery recognizes absolute Python imports of deleted or renamed modules under `src/`, including imports in unchanged files.
+- New reviews count source lines the same way Git does, including in files with bare carriage returns or Unicode line separators. Resumed reviews keep their saved line numbering. Citation repair distinguishes an unknown source from a line range outside the supplied excerpt.
+- Graph-enabled reviews report where optional graph context was dropped to fit a discovery request. JSON records the path, reason and affected review units in `code_graph.discovery_omissions`.
+- Identical review candidates have separate assessment attempts. Resuming an interrupted assessment retry reuses its saved response when available.
+- Inference distinguishes DNS lookup failures from endpoint policy rejections and can retry temporary DNS failures. Failures known to occur before dispatch release the token reservation. An uncertain dispatch still blocks replay.
 
 ## 0.1.6 - 2026-11-25
 

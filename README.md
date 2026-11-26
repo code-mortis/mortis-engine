@@ -114,6 +114,8 @@ Branch, staged and working-tree reviews automatically look for surviving referen
 deleted or renamed files. For example, deleting a shell script can bring an unchanged Python
 line that invokes it into review. Discovery uses the same file policy as the review,
 including custom extensions admitted by `review.rules.include`, and works without Docker.
+For Python modules under `src/`, discovery also recognizes absolute imports such as
+`from package.module import helper` when `src/package/module.py` is removed or moved.
 Run `mortis review --preview` to see which caller ranges would be checked.
 
 The `affected_callers` section lists the triggering changes, caller ranges, outcomes and
@@ -331,6 +333,8 @@ mortis background --ref HEAD
 
 Run history, task reservations and retained snapshot objects live under `$XDG_STATE_HOME/mortis` (default `~/.local/state/mortis`). These private files can contain reviewed source. Use `mortis review --resume RUN_ID` to continue an interrupted review with its pinned revisions and saved connection. Each workflow accepts `--resume`. Validated task results can be reused. A request interrupted after dispatch retains its reservation with unknown usage.
 
+New reviews use Git's line numbering for evidence, including files with bare carriage
+returns or Unicode line separators. Resumed reviews keep the numbering of the saved run.
 Resumed reviews and scans keep their saved concurrency override and assessment dispatch
 policy. Runs created before continuous assessment resume in batches. Omit
 `--concurrency` when using `--resume`. You can enable `--progress` when resuming.
@@ -348,7 +352,9 @@ shows which failed candidates can be retried and explains blocked retries. A tar
 retry assesses only that candidate using its original source, settings and connection.
 It saves a separate `mortis.assessment/v1` result and prints its run ID, verdict and any
 confirmed finding. Analysis, Trivy and summary generation are not repeated. Repeating a
-successful retry returns the saved result.
+successful retry returns the saved result. Each new review candidate has its own
+assessment attempt, even when two candidates have identical content. Resuming a
+retry reuses a saved provider response when available.
 
 Retries have their own invocation deadline and assessment budget, with usage recorded
 separately and cumulatively across the candidate's attempts. Unknown token consumption
@@ -497,6 +503,9 @@ Explicit hostname trust allows that destination through the endpoint checks. Con
 use validated IP addresses while retaining the hostname for TLS verification and HTTP
 routing. Use a placeholder key for a local provider that does not require authentication.
 Endpoint policy comes from these environment settings and is not loaded from repository files.
+Inference reports DNS lookup failures separately from endpoint policy rejections.
+A temporary DNS failure can be retried. When the request stops during DNS resolution,
+Mortis releases the token reservation because the request has not reached the provider.
 
 Extra header values can also come from environment variables.
 
