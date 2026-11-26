@@ -187,6 +187,11 @@ def render(result):
     graph = result.get("code_graph", {})
     if graph:
         lines.append(f"Code graph: {graph.get('status', 'unavailable')}" + (" — " + graph["reason"] if graph.get("reason") else ""))
+        for omission in graph.get("discovery_omissions", []):
+            count = len(omission["unit_keys"])
+            reason = omission["reason"].replace("_", " ")
+            lines.append(f"Graph context omitted from discovery for {omission['path']} "
+                         f"({count} review {'unit' if count == 1 else 'units'}, {reason}).")
     return "\n".join(map(terminal_line, lines))
 
 

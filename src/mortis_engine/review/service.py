@@ -263,7 +263,9 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 if "affected_callers" in raw:
                     result["affected_callers"] = raw["affected_callers"]
                 if graph_status is not None:
-                    result["code_graph"] = graph_status
+                    result["code_graph"] = {**graph_status}
+                    if "graph_discovery_omissions" in raw:
+                        result["code_graph"]["discovery_omissions"] = raw["graph_discovery_omissions"]
                 if graphs:
                     options["_graph"] = graphs
 

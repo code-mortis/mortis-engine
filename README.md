@@ -178,6 +178,14 @@ in history. Reused coverage describes prior analysis of unchanged files. A first
 an incomplete review, a changed Engine version, base or review configuration, or
 unavailable ancestry triggers a full comparison. A changed head tree with an
 eligible deletion or rename also gets a full comparison so callers are checked again.
+When a Python module-level function's required parameters change or it gains or
+loses `*args` or `**kwargs`, Mortis rechecks previously reviewed Python files that
+import that function or its module. For functions defined in `__init__.py`, this
+includes callers that use `import package.submodule`. Mortis compares the two heads
+using pinned source. Unrelated files can still reuse coverage. An ambiguous
+import name can cause extra rechecks, and dynamic imports or re-exports can
+escape detection. If the bounded source inspection cannot finish, Mortis runs
+a full comparison.
 If a later commit fully reverts a reviewed file change, Mortis reviews the remaining
 branch diff in full whenever it would otherwise reuse coverage. A caller can still
 contain a change that depended on the reverted file.
@@ -403,6 +411,12 @@ parser receives bounded file contents at one revision. It runs without network o
 host mounts. A review can continue using available graph facts and its normal
 source evidence when graph coverage is incomplete. Resumed reviews reuse their
 saved graph context when available.
+
+When a discovery request would exceed the provider context limit, Mortis can omit
+the optional graph context to fit the assigned source. The terminal lists the
+affected paths. JSON records each path, reason and review unit keys in
+`code_graph.discovery_omissions` when this happens. The graph status describes
+extraction, and primary review coverage counts the assigned units as usual.
 
 Set extraction limits in the trusted committed configuration:
 

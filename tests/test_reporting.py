@@ -39,6 +39,21 @@ def test_partial_review_keeps_findings_coverage_accounting_and_legacy_timing():
     assert report == before
 
 
+def test_terminal_and_markdown_show_optional_graph_omissions():
+    from mortis_engine.cli.review import render
+
+    report = {**review_report(), "merge_base": "base"}
+    report["code_graph"] = {"status": "ready", "enriched_paths": 1}
+    assert "Code graph: ready" in render(report)
+    assert "Graph context omitted" not in render(report)
+    report["code_graph"]["discovery_omissions"] = [
+        {"path": "pricing.py", "unit_keys": ["unit-1"], "reason": "provider_context_limit"},
+    ]
+    assert "Graph context omitted from discovery for pricing.py (1 review unit, provider context limit)." in render(report)
+    exported = markdown(report)
+    assert "Discovery omissions" in exported and r"provider\_context\_limit" in exported
+
+
 def test_security_preserves_grade_stages_dependency_and_redacted_secret_evidence():
     report = {"schema_version": "mortis.security/v1", "status": "partial", "grade": None,
               "commit": "commit-1", "elapsed_seconds": 1.25,

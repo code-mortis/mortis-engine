@@ -736,6 +736,18 @@ def _report(plan, prepared, outcomes, *, tokens, status=None):
                         for unit in report_units]}
     if affected:
         report["affected_callers"] = affected
+    discovery_omissions = {}
+    for batch in prepared:
+        if batch.error or not batch.graph_omitted:
+            continue
+        for unit in batch.units:
+            if unit.path in batch.graph_omitted:
+                discovery_omissions.setdefault(unit.path, []).append(unit.key)
+    if discovery_omissions:
+        report["graph_discovery_omissions"] = [
+            {"path": path, "reason": "provider_context_limit", "unit_keys": keys}
+            for path, keys in sorted(discovery_omissions.items())
+        ]
     if plan.limit_reason:
         selected = report["manifest"]["coverage"]["selected"]
         report["manifest"] = {"schema_version": "code-mortis.file-limit/v1", "terminal_state": "skipped",

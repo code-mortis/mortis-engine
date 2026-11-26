@@ -4,14 +4,15 @@ import json
 
 from mortis_engine import __version__
 
-from . import engine, planning, settings, source
+from . import engine, planning, python_signatures, settings, source
+from .errors import ReviewStopped
 
 VERSION = "branch-review/v1"
 
 
 def decide(snap, options, history, previous, *, connection, profile, graph, decisions, assessments, stopped):
     signature = planning.fingerprint({
-        "reuse_policy": "reverted-paths/v1",
+        "reuse_policy": "python-required-signatures/v3",
         "versions": [__version__, planning.VERSION, engine.VERSION, engine.PROMPT_VERSION, engine.SOURCE_CODE_POLICY,
                      engine.SOURCE_TOOL_POLICY],
         "base": snap.base_sha, "merge_base": snap.merge_base, "settings_sha": snap.settings_sha,
@@ -61,6 +62,7 @@ def decide(snap, options, history, previous, *, connection, profile, graph, deci
             return {**baseline, "reason": "baseline_not_ancestor"}
 
         current = planning._changes(repo, env, snap.merge_base, snap.head_sha, stopped)
+        rules, binary = None, None
         if any(status == "D" or status.startswith("R") for _, _, status in current):
             rules = planning.load_rules(repo, env, snap.settings_sha, options, stopped)
             binary = planning._binary_paths(repo, env, snap.merge_base, snap.head_sha, stopped)
@@ -68,8 +70,8 @@ def decide(snap, options, history, previous, *, connection, profile, graph, deci
                 return {**baseline, "reason": "affected_callers_require_full_review"}
         before = {path: (old, status) for path, old, status in
                   planning._changes(repo, env, snap.merge_base, previous_head, stopped)}
-        changed = {name for path, old, _ in planning._changes(repo, env, previous_head, snap.head_sha, stopped)
-                   for name in (path, old) if name is not None}
+        delta = planning._changes(repo, env, previous_head, snap.head_sha, stopped)
+        changed = {name for path, old, _ in delta for name in (path, old) if name is not None}
         reusable = [path for path, old, status in current
                     if path in covered and path not in changed and old not in changed and before.get(path) == (old, status)]
         if reusable:
@@ -80,6 +82,30 @@ def decide(snap, options, history, previous, *, connection, profile, graph, deci
             current_paths.update(old for _, old, status in current if status.startswith("R"))
             if reviewed_paths - current_paths:
                 return {**baseline, "reason": "reverted_paths_require_full_review"}
+            modified = [path for path, _, status in delta if status == "M" and python_signatures.is_python(path)]
+            candidates = [path for path in reusable if python_signatures.is_python(path)]
+            if modified and candidates:
+                if rules is None:
+                    rules = planning.load_rules(repo, env, snap.settings_sha, options, stopped)
+                if binary is None:
+                    binary = planning._binary_paths(repo, env, snap.merge_base, snap.head_sha, stopped)
+                binary_delta = planning._binary_paths(repo, env, previous_head, snap.head_sha, stopped)
+                origins = {path: old for path, old, _ in current}
+                eligible = [path for path in modified if all(
+                    value not in binary and value not in binary_delta and planning.allowed_path(value, options, rules)
+                    for value in (path, origins.get(path), before.get(path, (None, ""))[0]) if value)]
+                try:
+                    affected_paths = python_signatures.affected(
+                        repo, env, previous_head, snap.head_sha, eligible,
+                        [path for path in candidates if path not in binary], stopped,
+                    )
+                except ReviewStopped:
+                    raise
+                except ValueError:
+                    return {**baseline, "reason": "python_caller_inspection_incomplete"}
+                reusable = [path for path in reusable if path not in affected_paths]
+    except ReviewStopped:
+        raise
     except ValueError:
         return {**baseline, "reason": "baseline_unavailable"}
     return {**baseline, "strategy": "incremental", "reason": "compatible_ancestor", "reused_paths": reusable}
