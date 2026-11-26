@@ -12,7 +12,7 @@ from pydantic import ConfigDict, Field, ValidationError, model_validator
 from mortis_engine import gateway as llm
 from mortis_engine.schemas import Message, Request, StrictModel, Tool
 
-from . import affected_callers, context, planning, policy, source_navigation
+from . import affected_callers, context, planning, policy, source_lines, source_navigation
 from . import source as git_source
 from .contracts import ReviewComment
 from .errors import ReviewStopped
@@ -186,7 +186,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
             raise ValueError("Affected-caller evidence needs regular UTF-8 source.")
         # Multiline credentials may cross a planned excerpt boundary.
         redacted = context.sanitize(original, credentials, stopped)
-        if len(redacted.splitlines()) != len(original.splitlines()):
+        if len(source_lines.split(redacted)) != len(source_lines.split(original)):
             raise ValueError("Affected-caller evidence lost its pinned line boundaries during redaction.")
         return redacted
 
@@ -197,7 +197,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
         for unit in units:
             payload = assigned_unit(unit)
             if unit.caller_only:
-                lines = redacted_source(unit.source_sha, unit.path).splitlines(keepends=True)
+                lines = source_lines.split(redacted_source(unit.source_sha, unit.path), keepends=True)
                 payload["source"] = "".join(lines[unit.start_line - 1:unit.end_line])
             sources.append(_source(unit.source_sha, unit.path, unit.start_line, unit.end_line, payload["source"]))
             triggers = []
@@ -205,7 +205,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
                 if evidence := trigger.get("evidence"):
                     location = (evidence["revision"], evidence["path"], evidence["start_line"], evidence["end_line"])
                     if location not in trigger_sources:
-                        lines = redacted_source(*location[:2]).splitlines()
+                        lines = source_lines.split(redacted_source(*location[:2]))
                         redacted = "\n".join(lines[location[2] - 1:location[3]])
                         trigger_sources[location] = _source(*location, redacted)
                     trigger = {**trigger, "evidence": {**evidence, "text": trigger_sources[location]["text"]}}
@@ -264,7 +264,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
             for graph in graphs.values():
                 for item in graph.get("sources", []):
                     sources.append(_source(graph["commit_sha"], item["path"], 1,
-                                           len(item["text"].splitlines()), item["text"]))
+                                           len(source_lines.split(item["text"])), item["text"]))
         payload["citation_sources"] = [{key: value for key, value in source.items() if key != "text"}
                                        for source in sources]
         try:
@@ -339,7 +339,7 @@ def prepare_batches(plan, connection, options, credentials, *, graph_by_path=Non
 
 def _diff_lines(patch):
     result, line = set(), None
-    for row in patch.splitlines():
+    for row in source_lines.split(patch):
         match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", row)
         if match:
             line = int(match[1])
@@ -385,7 +385,7 @@ def validate_result(data, batch, sources, credentials, stopped=lambda: False):
                 raise ResultValidationError("unavailable_citation", evidence_field,
                                             "Copy an exact source_id from the supplied citation sources "
                                             "(citation_sources or supporting_sources).")
-            lines = source["text"].splitlines()
+            lines = source_lines.split(source["text"])
             quote = "\n".join(lines[evidence.start_line - source["start_line"]:evidence.end_line - source["start_line"] + 1])
             if not quote.strip():
                 raise ResultValidationError("empty_citation", evidence_field, "Select a nonblank source range.")
@@ -403,7 +403,7 @@ def validate_result(data, batch, sources, credentials, stopped=lambda: False):
             if "existing_code" in finding.model_fields_set:
                 raise ResultValidationError("unexpected_code_quote", [*field, "existing_code"],
                                             "Select finding line bounds; omit existing_code, which Mortis constructs.")
-            finding.existing_code = "\n".join(assigned["text"].splitlines()[local_start:local_end])
+            finding.existing_code = "\n".join(source_lines.split(assigned["text"])[local_start:local_end])
             if not finding.existing_code.strip():
                 raise ResultValidationError("empty_finding_source", field, "Select nonblank finding source lines.")
         elif not finding.existing_code.strip() or not context.quote_matches(
@@ -498,7 +498,7 @@ def read_sources(calls, *, repo, env, plan, options, credentials, authorize, sto
                     text = git_source.read_source(repo, env, plan.head_sha, path, stopped)
                     # Inspect complete content for secret material before selecting a range.
                     text = context.sanitize(text, credentials, stopped)
-                    lines = text.splitlines()
+                    lines = source_lines.split(text)
                     if bounded:
                         cursor, last = start, min(end, len(lines))
                         eof_line = len(lines) if end > len(lines) else None

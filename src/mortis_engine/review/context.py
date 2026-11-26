@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence, Set
 
 from mortis_engine.security import clean_text, digest
 
+from . import source_lines
 from .errors import ReviewStopped
 
 
@@ -60,11 +61,11 @@ def quote_matches(source, start_line, end_line, quote):
     if (not isinstance(source, str) or not isinstance(quote, str) or not quote.strip()
             or type(start_line) is not int or type(end_line) is not int):
         return False
-    lines = source.splitlines(keepends=True)
+    lines = source_lines.split(source, keepends=True)
     if not 1 <= start_line <= end_line <= len(lines):
         return False
     original = "".join(lines[start_line - 1:end_line])
-    rendered = "\n".join(source.splitlines()[start_line - 1:end_line])
+    rendered = "\n".join(source_lines.split(source)[start_line - 1:end_line])
     return quote in original or quote in rendered
 
 

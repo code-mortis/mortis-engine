@@ -1,15 +1,18 @@
 """Bounded discovery of surviving references to removed or renamed Git paths."""
 
+import ast
 import posixpath
 import re
+import warnings
 from collections import defaultdict
 from pathlib import PurePosixPath
 
-from . import source
+from . import source, source_lines
 from .errors import ReviewStopped
 
-POLICY = "affected-callers/v3"
+POLICY = "affected-callers/v4"
 LEGACY_TEXT_POLICIES = (None, "affected-callers/v1", "affected-callers/v2")
+LEGACY_POLICIES = (*LEGACY_TEXT_POLICIES, "affected-callers/v3")
 MAX_TRIGGERS = 64
 MAX_FILES = 512
 MAX_INVENTORY_ENTRIES = 4096
@@ -28,6 +31,8 @@ _MODULE_BINDING = re.compile(r"^[ \t]*(?:(?:pub|export)[ \t]+)?(?:from|import|us
 _FROM_IMPORT = re.compile(r"\bfrom[ \t]+([.\w/]+)[ \t]+import[ \t]+([\w$]+)")
 _IMPORT_ALIAS = re.compile(r"\bas[ \t]+([\w$]+)")
 _QUALIFIER = re.compile(r"([\w$]+)(?:\.|::)$")
+_PYTHON_SUFFIXES = {".py", ".pyi"}
+_PYTHON_IMPORT = re.compile(r"^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+)?import[ \t]+([^#;]+)")
 # shortcut: common declaration forms cover literal discovery. Add resolvers when measured misses justify them.
 _DECLARATION = re.compile(
     r"(?m)^[ \t]*(?:(?:async|export|default|pub|public|private|protected|internal|static|final|abstract|"
@@ -49,6 +54,53 @@ def _spellings(path):
             for spelling in (name, name.replace("/", "."), name.replace("/", "::"), PurePosixPath(name).name)}
 
 
+def _src_module(path):
+    file = PurePosixPath(path)
+    if len(file.parts) < 3 or file.parts[0] != "src" or file.suffix not in _PYTHON_SUFFIXES:
+        return None
+    parts = file.with_suffix("").parts[1:]
+    if file.stem == "__init__":
+        parts = parts[:-1]
+    if parts and all(part.isidentifier() for part in parts):
+        return ".".join(parts)
+    return None
+
+
+def _src_imports(path, text, modules, stopped):
+    if not modules or PurePosixPath(path).suffix not in _PYTHON_SUFFIXES or "import" not in text:
+        return {}
+    # Callers pass only source blobs already admitted by MAX_FILE_BYTES and MAX_BYTES.
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    git_lines = [0]
+    has_cr = "\r" in text
+    if has_cr:
+        for ending in re.finditer(r"\r\n|[\r\n]", text):
+            git_lines.append(git_lines[-1] + ending[0].endswith("\n"))
+    imports = defaultdict(list)
+
+    def record(spelling, line, imported=(), qualifier=None):
+        if spelling in modules:
+            index = git_lines[line - 1] if has_cr else line - 1
+            imports[index].append((spelling, imported, qualifier))
+
+    for node in ast.walk(tree):
+        if stopped():
+            raise ReviewStopped("Caller discovery was cancelled.")
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                record(name.name, name.lineno, qualifier=name.asname or name.name.rsplit(".", 1)[-1])
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            record(node.module, node.lineno, tuple(name.name for name in node.names if not name.asname))
+            for name in node.names:
+                record(f"{node.module}.{name.name}", name.lineno, qualifier=name.asname or name.name)
+    return imports
+
+
 def _relative_spellings(token, parent):
     if token.startswith(("./", "../")):
         # Imports generally start at the caller, while invocations may start at the repository root.
@@ -65,10 +117,19 @@ def _relative_spellings(token, parent):
     return [path for path in normalized if path not in {".", ".."} and not path.startswith(("../", "/"))]
 
 
-def _references(line, path, labels, relative_paths, file_names, *, binding_policy=None):
+def _references(line, path, labels, relative_paths, file_names, *, binding_policy=None, src_modules=None):
     parent = str(PurePosixPath(path).parent)
     sibling_bindings = binding_policy not in (None, "affected-callers/v1")
     in_module_context = bool(_MODULE_CONTEXT.search(line))
+    if src_modules and PurePosixPath(path).suffix in _PYTHON_SUFFIXES and (match := _PYTHON_IMPORT.match(line)):
+        module, names = match.groups()
+        if module:
+            yield from src_modules.get(module, ())
+        for value in names.split(","):
+            words = value.strip(" \t()\r\n").split()
+            if words:
+                name = f"{module}.{words[0]}" if module else words[0]
+                yield from src_modules.get(name, ())
     tokens = [(match.group().rstrip(".:"), False) for match in _TOKEN.finditer(line)]
     tokens.extend((match[2], True) for match in _QUOTED.finditer(line))
     tokens.extend((f"{match[1]}{'' if match[1].endswith('.') else '.'}{match[2]}", False)
@@ -122,7 +183,7 @@ def _inventory(repo, env, sha, stopped, limits):
 
 
 def _excerpt(path, sha, text):
-    lines = text.splitlines()
+    lines = source_lines.split(text)
     start = next((index for index, line in enumerate(lines) if 0 < len(line.encode()) <= 400 and line.strip()), None)
     if start is None:
         return None
@@ -140,6 +201,7 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
              "limits_reached": []}
     source_by_trigger, labels, replacements, symbols, matches = {}, defaultdict(set), defaultdict(set), defaultdict(set), {}
     old_paths, replacement_paths = defaultdict(set), defaultdict(set)
+    old_modules, replacement_modules = defaultdict(set), defaultdict(set)
     file_names, replacement_names = set(), set()
     if len(triggers) > MAX_TRIGGERS:
         limits.add("trigger_count")
@@ -203,12 +265,18 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
             labels[label].add(path)
         for spelling in _module_paths(path):
             old_paths[spelling].add(path)
+        old_module = _src_module(path) if policy == POLICY else None
+        if old_module:
+            old_modules[old_module].add(path)
         if new_path:
             replacement_names.add(PurePosixPath(new_path).name)
             for label in _spellings(new_path) - old_spellings:
                 replacements[label].add(path)
             for spelling in _module_paths(new_path) - _module_paths(path):
                 replacement_paths[spelling].add(path)
+            new_module = _src_module(new_path) if policy == POLICY else None
+            if new_module and new_module != old_module:
+                replacement_modules[new_module].add(path)
         if text:
             declarations = sorted(set(_DECLARATION.findall(text)))
             if len(declarations) > MAX_SYMBOLS:
@@ -217,6 +285,7 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                 symbols[symbol].add(path)
 
     count = 0
+    src_modules = old_modules.keys() | replacement_modules.keys()
     for path in sorted(head):
         if not labels:
             break
@@ -233,18 +302,31 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
         if not text:
             continue
         scope["scanned_bytes"] += head[path][1]
-        lines = text.splitlines(keepends=True)
+        lines = source_lines.split(text, keepends=True)
+        imports = _src_imports(path, text, src_modules, stopped)
+        old_fallback = old_modules if imports is None else None
+        replacement_fallback = replacement_modules if imports is None else None
+        imports = imports or {}
         direct, rebound_symbols, rebound_modules = [], defaultdict(set), defaultdict(set)
-        for line in lines:
+        for index, line in enumerate(lines):
             if stopped():
                 raise ReviewStopped("Caller discovery was cancelled.")
-            linked = set(_references(line, path, labels, old_paths, file_names))
+            linked = set(_references(line, path, labels, old_paths, file_names, src_modules=old_fallback))
+            explicit, migrated = set(), set()
+            for spelling, names, qualifier in imports.get(index, ()):
+                explicit.update(old_modules.get(spelling, ()))
+                resolved = replacement_modules.get(spelling, ())
+                if resolved:
+                    migrated.update(resolved)
+                    for name in names:
+                        rebound_symbols[name].update(resolved)
+                    if qualifier:
+                        rebound_modules[qualifier].update(resolved)
+            replacement = set()
             if replacements and _MODULE_BINDING.match(line):
                 replacement = set(_references(line, path, replacements, replacement_paths, replacement_names,
-                                              binding_policy=policy))
+                                              binding_policy=policy, src_modules=replacement_fallback))
                 if replacement:
-                    linked -= replacement - set(_references(line, path, labels, old_paths, file_names,
-                                                            binding_policy=policy))
                     for name in _IDENTIFIER.findall(line):
                         rebound_symbols[name].update(replacement.intersection(symbols.get(name, ())))
                     aliases = _IMPORT_ALIAS.findall(line)
@@ -252,7 +334,10 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                         module = PurePosixPath(source_by_trigger[dependency]["new_path"]).stem
                         for name in aliases or [module]:
                             rebound_modules[name].add(dependency)
-            direct.append(linked)
+            if replacement or migrated:
+                linked -= (replacement | migrated) - set(_references(line, path, labels, old_paths, file_names,
+                                                                      binding_policy=policy, src_modules=old_fallback))
+            direct.append(linked | explicit)
         existing = set().union(*direct)
         original_refs = None
         sites = []
@@ -277,10 +362,14 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                     if original and original == head[path] and original_path == path:
                         original_refs = existing
                     else:
-                        old_text = read(original) if original else None
-                        original_refs = {reference for old_line in (old_text or "").splitlines()
+                        old_text = (read(original) if original else None) or ""
+                        old_imports = _src_imports(original_path, old_text, old_modules, stopped)
+                        original_refs = {reference for old_line in source_lines.split(old_text)
                                          for reference in _references(old_line, original_path, labels,
-                                                                      old_paths, file_names)}
+                                                                      old_paths, file_names,
+                                                                      src_modules=old_modules if old_imports is None else None)}
+                        original_refs.update(reference for row in (old_imports or {}).values() for spelling, _, _ in row
+                                             for reference in old_modules.get(spelling, ()))
                 linked.update(used & (near | (original_refs or set())))
             if not linked:
                 continue

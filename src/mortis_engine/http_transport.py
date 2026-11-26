@@ -7,18 +7,26 @@ from concurrent.futures import Future
 
 import httpx
 
-from .security import endpoint_addresses
+from .security import EndpointLookupError, endpoint_addresses
 
 _DNS_SLOTS = threading.BoundedSemaphore(8)
+_RESOLUTION_EXTENSION = "mortis_endpoint_resolution"
+_DNS_PENDING = object()
 
 
 class EndpointPolicyError(ValueError):
     pass
 
 
+def awaiting_endpoint_resolution(request):
+    return request is not None and request.extensions.get(_RESOLUTION_EXTENSION) is _DNS_PENDING
+
+
 def addresses(request):
     try:
         return endpoint_addresses(str(request.url.copy_with(query=None, fragment=None)))
+    except EndpointLookupError:
+        raise
     except ValueError as exc:
         raise EndpointPolicyError(str(exc)) from exc
 
@@ -97,11 +105,14 @@ class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request):
         started = time.monotonic()
+        # Retain this proof if the outer timeout cancels resolution before we reach a socket.
+        request.extensions[_RESOLUTION_EXTENSION] = _DNS_PENDING
         try:
             resolved = await asyncio.wait_for(asyncio.to_thread(addresses, request),
                                               request.extensions.get("timeout", {}).get("connect"))
         except TimeoutError as exc:
             raise httpx.ConnectTimeout("Endpoint resolution exceeded its deadline") from exc
+        request.extensions.pop(_RESOLUTION_EXTENSION)
         origin = (request.url.scheme, request.url.host, request.url.port)
         if origin not in self._transports:
             self._transports[origin] = httpx.AsyncHTTPTransport(trust_env=False,

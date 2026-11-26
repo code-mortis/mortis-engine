@@ -15,9 +15,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
 from . import __version__
-from .http_transport import EndpointPolicyError
+from .http_transport import EndpointPolicyError, awaiting_endpoint_resolution
 from .schemas import Request, Response, ToolCall, Usage, extra_body_entries
-from .security import clean_text, digest, safe_endpoint
+from .security import EndpointLookupError, clean_text, digest, safe_endpoint
 
 MAX_RESPONSE_BYTES = 20_000_000
 MAX_REQUEST_BYTES = 32_000_000
@@ -38,6 +38,13 @@ class InferenceError(Exception):
 
 def _invalid(message="The provider returned a malformed response.", **kwargs):
     return InferenceError("malformed_response", message, **kwargs)
+
+
+def _endpoint_error(exc):
+    if isinstance(exc, EndpointLookupError):
+        return InferenceError("endpoint_dns", str(exc), retryable=exc.retryable, consumption_unknown=False)
+    return InferenceError("endpoint_policy", "The selected inference endpoint failed address validation.",
+                          consumption_unknown=False)
 
 
 def _schema(schema):
@@ -487,8 +494,10 @@ async def post_json(client: httpx.AsyncClient, url: str, headers, body: dict | b
     content = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
     if len(content) > MAX_REQUEST_BYTES:
         raise ValueError("Inference request exceeded its transport size limit")
+    wire = None
 
     async def perform():
+        nonlocal wire
         try:
             wire = client.build_request(method, url, headers=headers, content=content, timeout=timeout)
             # Provider cookies are not credentials and must not cross task/run boundaries.
@@ -540,9 +549,8 @@ async def post_json(client: httpx.AsyncClient, url: str, headers, body: dict | b
                 return data, identity
             finally:
                 await response.aclose()
-        except EndpointPolicyError as exc:
-            raise InferenceError("endpoint_policy", "The selected inference endpoint failed address validation.",
-                                 consumption_unknown=False) from exc
+        except (EndpointLookupError, EndpointPolicyError) as exc:
+            raise _endpoint_error(exc) from exc
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise InferenceError("connection", "Could not connect to the selected inference endpoint.",
                                  retryable=True, consumption_unknown=False) from exc
@@ -550,7 +558,12 @@ async def post_json(client: httpx.AsyncClient, url: str, headers, body: dict | b
             raise InferenceError("timeout", "The inference request timed out; consumption is unknown.") from exc
         except httpx.HTTPError as exc:
             raise InferenceError("transport", "The inference connection failed; consumption is unknown.") from exc
-    return await _bounded(perform(), stopped, timeout)
+    try:
+        return await _bounded(perform(), stopped, timeout)
+    except InferenceError as exc:
+        if exc.code in {"timeout", "cancelled"} and awaiting_endpoint_resolution(wire):
+            exc.consumption_unknown = False
+        raise
 
 
 def request_headers(protocol, options, credentials):
@@ -585,6 +598,8 @@ async def send(connection: dict, credentials: dict, request: Request, *, client:
     except InferenceError as exc:
         exc.consumption_unknown = False
         raise
+    except ValueError as exc:
+        raise _endpoint_error(exc) from exc
     suffix = {"openai": "/chat/completions", "openai-responses": "/responses", "anthropic": "/messages"}[protocol]
     if protocol == "anthropic" and not base.endswith("/v1"):
         base += "/v1"

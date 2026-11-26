@@ -54,14 +54,15 @@ def test_caller_discovery_omits_undecodable_and_binary_blobs(repo, suffix, unava
     assert scope["limits_reached"] == (["source_unavailable"] if unavailable else [])
 
 
-def test_literal_replacement_character_preserves_saved_plan_scope(repo):
+@pytest.mark.parametrize("policy", [affected_callers.POLICY, "affected-callers/v3"])
+def test_literal_replacement_character_preserves_saved_plan_scope(repo, policy):
     base = commit(repo, {"tool.sh": "exit 0\n", "caller.py": 'run("tool.sh")\n'})
     git(repo, "rm", "tool.sh")
     commit(repo, {"caller.py": 'run("tool.sh")  # \ufffd\n'})
     with snapshots.snapshot(repo, mode="commits", base=base) as snap:
         args = (snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base)
         options = settings.load(snap.repo, snap.env, snap.settings_sha)
-        current = planning.plan_review(*args, options, lambda: False)
+        current = planning.plan_review(*args, {**options, "_affected_caller_policy": policy}, lambda: False)
         legacy = planning.plan_review(*args, {**options, "_affected_caller_policy": "affected-callers/v2"}, lambda: False)
     assert current.selected[0].error is None
     assert current.affected_callers["sites"][0]["unit_key"] == current.selected[0].units[0].key
@@ -90,6 +91,60 @@ def test_callers_across_languages_share_one_discovery_pass(repo):
         path: [target] for path, (target, _) in callers.items()
     }
     assert not scope["limits_reached"]
+
+
+@pytest.mark.parametrize(("statement", "legacy_match"), [
+    ("import acme.old", False), ("from acme.old import apply", False), ("from acme import old", True),
+    ("from acme import (\n    old,\n)", False), ("if enabled: import acme.old", False),
+    ("value = 1; import acme.old", False), ("from acme.old import apply\nunfinished = (", False),
+])
+def test_deleted_src_layout_module_has_absolute_python_callers(repo, statement, legacy_match):
+    target, caller = "src/acme/old.py", "jobs/run.py"
+    base = commit(repo, {target: "def apply():\n    return 1\n", caller: statement + "\n"})
+    git(repo, "rm", target)
+    git(repo, "commit", "-qm", "remove module")
+    preview = preview_local(repo, mode="commits", base=base)
+    site, = preview["affected_callers"]["sites"]
+    assert site["path"] == caller and site["triggers"] == [target]
+    with snapshots.snapshot(repo, mode="commits", base=base) as snap:
+        options = settings.load(snap.repo, snap.env, snap.settings_sha)
+        legacy = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
+                                      {**options, "_affected_caller_policy": "affected-callers/v3"}, lambda: False)
+    assert bool(legacy.affected_callers["sites"]) == legacy_match
+
+
+@pytest.mark.parametrize("imported", ["apply", "(\n    apply,\n)"])
+def test_renamed_src_layout_module_tracks_stale_import_only(repo, imported):
+    old, new = "src/acme/old.py", "src/acme/new.py"
+    original = f"from acme.old import {imported}\napply()\n"
+    base = commit(repo, {old: "def apply():\n    return 1\n", "jobs/stale.py": original, "jobs/updated.py": original})
+    git(repo, "mv", old, new)
+    commit(repo, {"jobs/updated.py": f"from acme.new import {imported}\napply()\n"})
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert scope["triggers"][0]["new_path"] == new
+    site, = scope["sites"]
+    assert site["path"] == "jobs/stale.py" and site["triggers"] == [old]
+
+
+def test_caller_ranges_count_only_git_line_separators(repo):
+    base = commit(repo, {"old.sh": "exit 0\n",
+                         "run.py": 'label = "left\u2028right"\na = 1\nb = 2\nc = 3\nrun("old.sh")\n'})
+    git(repo, "rm", "old.sh")
+    git(repo, "commit", "-qm", "remove script")
+    preview = preview_local(repo, mode="commits", base=base)
+    site, = preview["affected_callers"]["sites"]
+    assert (site["start_line"], site["end_line"]) == (2, 5)
+
+
+def test_multiline_src_import_preserves_git_line_coordinates(repo):
+    module, caller = "src/acme/old.py", "jobs/run.py"
+    base = commit(repo, {module: "pass\n",
+                         caller: 'label = "left\u2028right"\rvalue = 1\na = 2\nb = 3\nfrom acme import (\n    old,\n)'})
+    git(repo, "rm", module)
+    git(repo, "commit", "-qm", "remove module")
+    preview = preview_local(repo, mode="commits", base=base)
+    site, = preview["affected_callers"]["sites"]
+    assert (site["path"], site["start_line"], site["end_line"]) == (caller, 2, 6)
 
 
 def test_rename_updates_relative_import_of_same_basename(repo):

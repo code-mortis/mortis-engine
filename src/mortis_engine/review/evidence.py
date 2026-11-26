@@ -6,6 +6,7 @@ from pydantic import Field
 
 from mortis_engine.schemas import StrictModel
 
+from . import source_lines
 from .context import source_id
 from .verification import ResultValidationError
 
@@ -26,7 +27,7 @@ def prepare(context, schema):
     supplied, schema = copy.deepcopy(context), copy.deepcopy(schema)
     supplied["task_contract"] = "review-task/v2"
     supplied["citation_sources"] = {
-        source_id(revision, path): {"revision": revision, "path": path, "line_count": len(text.splitlines())}
+        source_id(revision, path): {"revision": revision, "path": path, "line_count": len(source_lines.split(text))}
         for revision, sources in sorted(context["sources"].items()) for path, text in sorted(sources.items())
     }
     definition = Selection.model_json_schema()
@@ -52,7 +53,7 @@ def resolve(raw, supplied, history):
         if source is None:
             raise ResultValidationError("Source identity was not supplied.", {"kind": "citation_selection", "field": f"evidence[{index}]"})
         text = supplied["sources"][source["revision"]][source["path"]]
-        lines = text.splitlines(keepends=True)
+        lines = source_lines.split(text, keepends=True)
         if not 1 <= selection.start_line <= selection.end_line <= len(lines):
             raise ResultValidationError("Evidence range exceeds supplied source.", {"kind": "citation_selection", "field": f"evidence[{index}]"})
         quote = "".join(lines[selection.start_line - 1:selection.end_line])

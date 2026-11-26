@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 
-from mortis_engine.review import affected_callers, file_policy, source
+from mortis_engine.review import affected_callers, file_policy, source, source_lines
 from mortis_engine.review.errors import ReviewStopped
 
 VERSION = "mortis-pr-plan/v1"
@@ -373,7 +373,7 @@ def _binary_paths(repo, env, merge_base, head_sha, stopped):
 
 def affected_caller_policy(options):
     policy = options.get("_affected_caller_policy", AFFECTED_CALLER_POLICY)
-    if policy != AFFECTED_CALLER_POLICY and policy not in affected_callers.LEGACY_TEXT_POLICIES:
+    if policy != AFFECTED_CALLER_POLICY and policy not in affected_callers.LEGACY_POLICIES:
         raise ValueError("The saved affected-caller policy is unsupported.")
     return policy
 
@@ -393,7 +393,7 @@ def affected_changes(changes, options, rules, *, unavailable=(), binary=()):
 
 def _patch_rows(patch, total_lines):
     metadata, rows, old, new, active = [], [], 0, 0, False
-    for row in patch.splitlines(keepends=True):
+    for row in source_lines.split(patch, keepends=True):
         match = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", row)
         if match:
             old, new, active = int(match[1]), int(match[2]), True
@@ -430,7 +430,7 @@ def _range_patch(metadata, rows):
 
 
 def split_units(path, old_path, status, sha, text, patch, rule, maximum, *, source_only=False):
-    lines = text.splitlines(keepends=True)
+    lines = source_lines.split(text, keepends=True)
     metadata, rows = ("", []) if source_only else _patch_rows(patch, len(lines))
     by_line = {}
     for row in rows:

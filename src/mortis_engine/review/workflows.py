@@ -11,6 +11,8 @@ from mortis_engine.security_scans.payload import check_saved_sources
 from . import assessment, background, evidence, planning, policy, summary, verification
 from . import context as review_context
 
+ASSESSMENT_TASK_KEY_POLICY = "candidate/v1"
+
 
 def _run(report, options, session):
     return SimpleNamespace(base_sha=report["base_sha"], head_sha=report["head_sha"],
@@ -65,16 +67,20 @@ def _related_paths(repo, env, context, options, base_sha, head_sha):
 
 
 async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=None, pinned_context=None,
-                  predecessors=None, rebuild_saved=False):
+                  task_key=None, predecessors=None, rebuild_saved=False):
     options = run.config["settings"]
     saved = None
     if pinned_context is None and candidate_id and getattr(session, "history", None):
         saved = session.history.assessment_input(session.run_id, candidate_id)
         if saved:
             pinned_context = saved["context"]
+            task_key = saved["task_key"]
             options = {**options, "_evidence_policy": planning.saved_evidence_policy(saved["options"])}
             run = SimpleNamespace(base_sha=run.base_sha, head_sha=run.head_sha,
                                   config={**run.config, "settings": options})
+    if task_key is None:
+        key_policy = options.get("_assessment_task_key_policy", ASSESSMENT_TASK_KEY_POLICY)
+        task_key = candidate_id if candidate_id and key_policy == ASSESSMENT_TASK_KEY_POLICY else planning.fingerprint(snapshot)
     if pinned_context is None or (saved and rebuild_saved):
         context = assessment.build_context(repo, env, env, run, snapshot, previous, lambda: False)
         context["review_sensitivity"] = options.get("review_sensitivity")
@@ -85,8 +91,7 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
                 raise ValueError("The saved candidate has different immutable assessment inputs.")
         elif candidate_id and getattr(session, "history", None):
             from mortis_engine.assessments import pin_input
-            prepared = pin_input(session, candidate_id, "review", snapshot, context, options,
-                                 planning.fingerprint(snapshot), repo, env,
+            prepared = pin_input(session, candidate_id, "review", snapshot, context, options, task_key, repo, env,
                                  base_sha=run.base_sha, head_sha=run.head_sha,
                                  predecessors=predecessors(context) if predecessors is not None else None)
             if prepared is not None:
@@ -108,9 +113,8 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
                          "name alone is insufficient. Request original or current evidence if needed.")
     if options.get("review_mode") == "all":
         instructions = instructions.replace("introduced by the change", "present in the supplied snapshot")
-    identity = planning.fingerprint(snapshot)
     for round in range(3):
-        result = await _ask(session, "assessment", f"{identity}:{round}", context, instructions,
+        result = await _ask(session, "assessment", f"{task_key}:{round}", context, instructions,
                             assessment.output_schema(context), assessment.validate_response, options)
         requested = result.pop("required_paths", [])
         base_requested = result.pop("required_base_paths", [])
@@ -387,13 +391,14 @@ async def postprocess(repo, env, report, options, session, *, history=(), progre
         index, snapshot, candidate_id = candidate
         row = {"id": candidate_id, "snapshot": snapshot, "position": index}
         try:
-            pinned = {"candidate_id": row["id"]} if getattr(session, "history", None) else {}
-            if pinned:
+            pinned = {}
+            if getattr(session, "history", None):
                 if continuous:
                     pinned["predecessors"] = context_predecessors
                 else:
                     pinned["rebuild_saved"] = True
-            assessment_result = await _assess(repo, env, run, snapshot, previous, session, **pinned)
+            assessment_result = await _assess(repo, env, run, snapshot, previous, session,
+                                              candidate_id=candidate_id, **pinned)
             if not continuous:
                 assessment_result = assessment.AssessmentResult.model_validate(assessment_result, strict=True).model_dump()
             row.update(status="completed", result=assessment_result)

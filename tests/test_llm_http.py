@@ -543,8 +543,10 @@ def test_endpoint_and_routing_validation_precede_dispatch(monkeypatch):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: (_ for _ in ()).throw(ValueError("protected endpoint")))
-            with pytest.raises(ValueError, match="protected endpoint"):
+            with pytest.raises(llm_http.InferenceError) as denied:
                 await llm_http.send(connection(), {"api_key": "secret"}, request(), client=client)
+            assert denied.value.code == "endpoint_policy"
+            assert not denied.value.consumption_unknown and not denied.value.retryable
             monkeypatch.setattr(llm_http, "safe_endpoint", lambda url: url)
             with pytest.raises(ValueError, match="routing"):
                 await llm_http.send(connection(), {"api_key": "secret", "extra_headers": {

@@ -326,7 +326,7 @@ def test_assessment_progress_counts_verdicts_failures_and_unique_findings(repo, 
     input_report["findings"] = [{**candidate(head), "content": str(index)} for index in range(5)]
     events = []
 
-    async def assess(repo, env, run, snapshot, previous, session):
+    async def assess(repo, env, run, snapshot, previous, session, *, candidate_id):
         index = int(snapshot["content"])
         if index == 1:
             return decision(relationship="duplicate", finding_id=previous["findings"][-1]["id"])

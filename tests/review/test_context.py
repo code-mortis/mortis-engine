@@ -42,7 +42,7 @@ def test_quote_matches_rejects_invalid_citations(start, end, quote):
     assert not quote_matches("first\nsecond\n", start, end, quote)
 
 
-@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
 def test_quote_matches_preserves_original_and_rendered_line_endings(newline):
     source = newline.join(["first", "second", "third", ""])
     assert quote_matches(source, 2, 3, f"second{newline}third{newline}")

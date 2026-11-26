@@ -224,6 +224,7 @@ def test_saved_assessment_restores_policy_for_requested_tests(repo, integration,
         context = workflows.assessment.build_context(isolated, env, env, run, proposal,
             {"findings": [], "prior_candidates": []}, lambda: False)
         value = {"options": options, "workflow_kind": "review", "candidate": proposal,
+                 "task_key": planning.fingerprint(proposal),
                  "context": context, "base_sha": base, "head_sha": head}
 
         def respond(stage, key, request):

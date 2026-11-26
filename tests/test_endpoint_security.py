@@ -4,12 +4,14 @@ import asyncio
 import socket
 import ssl
 import threading
+import time
+from contextlib import asynccontextmanager
 
 import httpcore
 import httpx
 import pytest
 
-from mortis_engine import discovery, gateway, http_transport, llm_http, security
+from mortis_engine import discovery, gateway, http_transport, llm_http, security, workflow
 from mortis_engine.http_transport import EndpointPolicyError, PinnedAsyncHTTPTransport, PinnedHTTPTransport
 from mortis_engine.schemas import Message, Request
 from mortis_engine.security_scans import advisories
@@ -145,9 +147,18 @@ def test_transport_pins_dns_preserves_tls_host_and_pool_isolation(monkeypatch, a
 
 
 @pytest.mark.parametrize("protocol", ["openai", "openai-responses", "anthropic"])
-def test_inference_rechecks_dns_at_dispatch_and_accounts_for_denial(monkeypatch, protocol):
-    answers = iter([dns_rows(PUBLIC), dns_rows("169.254.169.254")])
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: next(answers))
+@pytest.mark.parametrize("code", ["endpoint_policy", "endpoint_dns"])
+def test_inference_rechecks_dns_at_dispatch_and_accounts_for_denial(monkeypatch, protocol, code):
+    lookups = iter([True, False])
+
+    def resolve(*args, **kwargs):
+        if next(lookups):
+            return dns_rows(PUBLIC)
+        if code == "endpoint_dns":
+            raise socket.gaierror(socket.EAI_AGAIN, "fixture DNS failure")
+        return dns_rows("169.254.169.254")
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
     monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", lambda *a, **kw: pytest.fail("Socket opened"))
 
     async def run():
@@ -156,23 +167,145 @@ def test_inference_rechecks_dns_at_dispatch_and_accounts_for_denial(monkeypatch,
                 await gateway.send({"kind": "api", "protocol": protocol, "base_url": "https://provider.example/v1",
                     "model": "fixture", "options": {}}, {"api_key": "fixture-key"},
                     Request(messages=[Message(role="user", content="fixture")], max_output_tokens=256), client=client)
-        assert error.value.code == "endpoint_policy"
-        assert not error.value.consumption_unknown and not error.value.retryable
+        assert error.value.code == code and not error.value.consumption_unknown
+        assert error.value.retryable == (code == "endpoint_dns")
 
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("code", ["endpoint_dns", "endpoint_policy", "transport"])
+def test_only_a_dispatched_failure_blocks_the_next_analysis_task(monkeypatch, code):
+    lookups, posts = [], []
+
+    @asynccontextmanager
+    async def admit(*args, **kwargs):
+        yield
+
+    def resolve(*args, **kwargs):
+        lookups.append(None)
+        if len(lookups) == 1:
+            if code == "endpoint_dns":
+                raise socket.gaierror(socket.EAI_AGAIN, "fixture DNS failure")
+            if code == "endpoint_policy":
+                return dns_rows("169.254.169.254")
+        return dns_rows(PUBLIC)
+
+    def respond(wire):
+        posts.append(wire.method)
+        if code == "transport":
+            raise httpx.ReadError("fixture connection lost after dispatch", request=wire)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "complete"}, "finish_reason": "stop"}],
+                                        "usage": {"prompt_tokens": 2, "completion_tokens": 1}})
+
+    monkeypatch.setattr(workflow.admission, "slot", admit)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+
+    async def run():
+        connection = {"kind": "api", "protocol": "openai", "base_url": "https://provider.example/v1", "model": "fixture"}
+        session = workflow.Session(connection, {})
+        request = Request(messages=[Message(role="user", content="fixture")], max_output_tokens=256)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            async def task(key):
+                # Leave less than the retry backoff to settle the first attempt independently.
+                return await session.send("analysis", key, request, client=client, timeout_at=time.monotonic() + 0.9,
+                                          token_budget=None, stopped=lambda: False, accept=lambda value: value.content)
+
+            with pytest.raises(llm_http.InferenceError) as error:
+                await task("first")
+            assert error.value.code == code
+            first = session.usage()["requests"][0]
+            assert first["code"] == code
+            assert first["consumption_unknown"] == (code == "transport")
+            if code == "transport":
+                with pytest.raises(llm_http.InferenceError) as next_error:
+                    await task("second")
+                assert next_error.value.code == "usage_unknown"
+                assert len(lookups) == 1 and session.usage()["total_tokens"] is None
+                assert session.usage()["reserved_tokens"] == first["reserved_tokens"] > 0
+            else:
+                assert posts == [] and session.usage()["reserved_tokens"] == 0
+                assert await task("second") == "complete"
+                assert len(lookups) == 2 and session.usage()["total_tokens"] == 3
+        assert posts == ["POST"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["second_dns", "after_dns", "custom_transport"])
+@pytest.mark.parametrize("code", ["timeout", "cancelled"])
+def test_only_stopping_during_pinned_dns_has_known_usage(monkeypatch, phase, code):
+    release, reached = threading.Event(), threading.Event()
+    lookups, dispatches = [], []
+
+    def resolve(*args, **kwargs):
+        lookups.append(None)
+        if phase == "second_dns" and len(lookups) == 2:
+            reached.set()
+            release.wait(3)
+        return dns_rows(PUBLIC)
+
+    async def respond(wire):
+        dispatches.append(wire.method)
+        assert not http_transport.awaiting_endpoint_resolution(wire)
+        reached.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
+
+    async def run():
+        client = (httpx.AsyncClient(transport=httpx.MockTransport(respond))
+                  if phase == "custom_transport" else gateway.http_client())
+        async with client:
+            if phase == "second_dns":
+                build = client.build_request
+
+                def build_request(*args, **kwargs):
+                    wire = build(*args, **kwargs)
+                    # Force the outer deadline to win over the pinned connect deadline.
+                    wire.extensions["timeout"]["connect"] = 2
+                    return wire
+
+                monkeypatch.setattr(client, "build_request", build_request)
+            connection = {"kind": "api", "protocol": "openai", "base_url": "https://provider.example/v1",
+                          "model": "fixture"}
+            request = Request(messages=[Message(role="user", content="fixture")], max_output_tokens=256)
+            try:
+                with pytest.raises(llm_http.InferenceError) as error:
+                    await gateway.send(connection, {}, request, client=client, timeout=0.25,
+                                       stopped=lambda: code == "cancelled" and reached.is_set())
+                assert error.value.code == code
+                assert error.value.consumption_unknown == (phase != "second_dns")
+                assert not error.value.retryable
+            finally:
+                release.set()  # Let asyncio.run join the mocked resolver thread.
+
+    asyncio.run(run())
+    assert len(lookups) == (1 if phase == "custom_transport" else 2)
+    assert dispatches == ([] if phase == "second_dns" else ["POST"])
+
+
 @pytest.mark.parametrize("operation", ["discovery", "advisory"])
-def test_sync_callers_recheck_dns_before_sending(monkeypatch, operation):
-    answers = iter([dns_rows(PUBLIC), dns_rows("127.0.0.1")])
-    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: next(answers))
+@pytest.mark.parametrize("blocked", ["endpoint_policy", "endpoint_dns"])
+def test_sync_callers_recheck_dns_before_sending(monkeypatch, operation, blocked):
+    lookups = iter([True, False])
+
+    def resolve(*args, **kwargs):
+        if next(lookups):
+            return dns_rows(PUBLIC)
+        if blocked == "endpoint_dns":
+            raise socket.gaierror(socket.EAI_AGAIN, "fixture DNS failure")
+        return dns_rows("127.0.0.1")
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
     monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", lambda *a, **kw: pytest.fail("Socket opened"))
-    with pytest.raises(EndpointPolicyError):
+    with pytest.raises(security.EndpointLookupError if blocked == "endpoint_dns" else EndpointPolicyError) as error:
         if operation == "discovery":
             discovery.list_models({"protocol": "openai", "base_url": "https://provider.example"},
                                   {"api_key": "fixture-key"})
         else:
             advisories.fetch("CVE-2026-12345")
+    assert isinstance(error.value, ValueError)
 
 
 @pytest.mark.parametrize("operation", ["discovery", "advisory", "transport"])
