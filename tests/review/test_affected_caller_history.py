@@ -62,6 +62,24 @@ def test_identical_tree_reuses_affected_caller_coverage(deletion_repo, provider,
     assert changed["affected_callers"]["sites"] == []
 
 
+def test_restoring_deleted_file_rechecks_caller_after_identical_skip(deletion_repo, provider, connection):
+    repo = deletion_repo
+    commit(repo, {"app.py": "import subprocess\n" + CALLER + "done = True\n"})
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
+              "overrides": {"incremental": True, "skip_unchanged": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == ["app.py"]
+    skipped = review_commits(repo, **kwargs)
+    assert skipped["comparison"]["strategy"] == "skipped_unchanged"
+
+    commit(repo, {"scripts/legacy.sh": "exit 0\n"})
+    restored = review_commits(repo, **kwargs)
+    assert restored["comparison"]["baseline_run_id"] == skipped["run_id"]
+    assert restored["comparison"]["reason"] == "reverted_paths_require_full_review"
+    assert paths(restored, "completed") == ["app.py"]
+    assert paths(restored, "reused") == []
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_resume_restores_saved_affected_caller_scope(deletion_repo, provider, connection, monkeypatch, legacy):
     repo = deletion_repo

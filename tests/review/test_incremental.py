@@ -123,6 +123,29 @@ def test_incremental_review_and_unchanged_skip(repo, comparison_repo, provider, 
     assert paths(review(incremental=False, skip_unchanged=False), "completed") == comparison_repo
 
 
+def test_reverting_reviewed_dependency_rechecks_caller(repo, tmp_path_factory, monkeypatch, provider, connection):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
+    original = "def total(amount):\n    return amount\n"
+    commit(repo, {"billing.py": original, "checkout.py": "from billing import total\nprice = total(10)\n"})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {"billing.py": "def total(amount, currency):\n    return amount\n",
+                  "checkout.py": "from billing import total\nprice = total(10, 'USD')\n"})
+
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
+              "overrides": {"incremental": True, "skip_unchanged": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == ["billing.py", "checkout.py"]
+    commit(repo, {"billing.py": original})
+    analysis = provider[0]["analysis"]
+    analysis.clear()
+    second = review_commits(repo, **kwargs)
+    assert [unit["path"] for batch in analysis for unit in batch] == ["checkout.py"]
+    assert second["comparison"]["strategy"] == "full"
+    assert second["comparison"]["reason"] == "reverted_paths_require_full_review"
+    assert paths(second, "completed") == ["checkout.py"]
+    assert paths(second, "reused") == []
+
+
 def test_incremental_rename_and_revert(repo, comparison_repo, provider, connection):
     kwargs = {"base": "main", "connection": connection, "get_credentials": dict, "overrides": {"incremental": True}}
     review_commits(repo, **kwargs)

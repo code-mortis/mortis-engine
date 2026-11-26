@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Incremental reviews recheck the remaining branch diff when a previously reviewed change is fully reverted and coverage would otherwise be reused. Callers that still depend on the reverted change receive fresh analysis. The first comparison after upgrading establishes a fresh baseline.
+
 ## 0.1.6 - 2026-11-25
 
 - Branch, staged and working-tree reviews look for surviving references to deleted or renamed files, including in eligible unchanged files. Previews and review reports list the affected caller ranges separately. When caller coverage is partial, the CLI returns exit code 2 and reports any validated findings.

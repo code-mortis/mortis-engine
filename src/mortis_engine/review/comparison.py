@@ -11,6 +11,7 @@ VERSION = "branch-review/v1"
 
 def decide(snap, options, history, previous, *, connection, profile, graph, decisions, assessments, stopped):
     signature = planning.fingerprint({
+        "reuse_policy": "reverted-paths/v1",
         "versions": [__version__, planning.VERSION, engine.VERSION, engine.PROMPT_VERSION, engine.SOURCE_CODE_POLICY,
                      engine.SOURCE_TOOL_POLICY],
         "base": snap.base_sha, "merge_base": snap.merge_base, "settings_sha": snap.settings_sha,
@@ -71,6 +72,14 @@ def decide(snap, options, history, previous, *, connection, profile, graph, deci
                    for name in (path, old) if name is not None}
         reusable = [path for path, old, status in current
                     if path in covered and path not in changed and old not in changed and before.get(path) == (old, status)]
+        if reusable:
+            # Restoring a deleted dependency can invalidate callers too. Deletions live in
+            # affected_callers rather than in the report's primary file coverage.
+            reviewed_paths = covered | {item["path"] for item in (affected or {}).get("triggers", ())}
+            current_paths = {path for path, _, _ in current}
+            current_paths.update(old for _, old, status in current if status.startswith("R"))
+            if reviewed_paths - current_paths:
+                return {**baseline, "reason": "reverted_paths_require_full_review"}
     except ValueError:
         return {**baseline, "reason": "baseline_unavailable"}
     return {**baseline, "strategy": "incremental", "reason": "compatible_ancestor", "reused_paths": reusable}
