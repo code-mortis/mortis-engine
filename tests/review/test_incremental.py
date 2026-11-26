@@ -146,6 +146,75 @@ def test_reverting_reviewed_dependency_rechecks_caller(repo, tmp_path_factory, m
     assert paths(second, "reused") == []
 
 
+@pytest.mark.parametrize(("declaration", "recheck"), [
+    ("def total(amount, currency, tax):\n    return amount\n", True),
+    ("def total(amount, currency, *, tax):\n    return amount\n", True),
+    ("def total(amount, currency, tax=0):\n    return amount\n", False),
+    ("def total(amount, currency):\n    return round(amount)\n", False),
+])
+def test_incremental_review_rechecks_importers_of_changed_signature(
+    repo, tmp_path_factory, monkeypatch, provider, connection, declaration, recheck,
+):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
+    billing = "packages/api-client/backend/shop/billing.py"
+    checkout = "packages/api-client/backend/shop/checkout.py"
+    script = "packages/api-client/backend/shop/script.py"
+    same_module = "same_module.py"
+    qualified = "qualified.py"
+    unrelated = "unrelated.py"
+    helpers = "def rate():\n    return 5\n"
+    commit(repo, {"mortis.toml": "[review]\nexclusions = 'private.py'\n",
+                  "private.py": "private = 1\n",
+                  billing: "def total(amount):\n    return amount\n" + helpers,
+                  checkout: "from .billing import total as quote\nprice = quote(10)\n",
+                  script: "from billing import total\nprice = total(10)\n",
+                  same_module: "from shop.billing import rate\ntax = rate()\n",
+                  qualified: "import shop.billing as billing\nprice = billing.total(10)\n",
+                  unrelated: "items = 1\n"})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {billing: "def total(amount, currency):\n    return amount\n" + helpers,
+                  checkout: "from .billing import total as quote\nprice = quote(10, 'USD')\n",
+                  script: "from billing import total\nprice = total(10, 'USD')\n",
+                  same_module: "from shop.billing import rate\ntax = rate() * 2\n",
+                  qualified: "import shop.billing as billing\nprice = billing.total(10, 'USD')\n",
+                  unrelated: "items = 2\n"})
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
+              "overrides": {"incremental": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == sorted([billing, checkout, script, same_module, qualified, unrelated])
+    commit(repo, {billing: declaration + helpers, "private.py": "if\n"})
+    analysis = provider[0]["analysis"]
+    analysis.clear()
+    second = review_commits(repo, **kwargs)
+    expected = sorted([billing, checkout, script, qualified] if recheck else [billing])
+    assert second["comparison"]["strategy"] == "incremental"
+    assert paths(second, "completed") == expected
+    assert sorted(unit["path"] for batch in analysis for unit in batch) == expected
+    assert paths(second, "reused") == sorted([same_module, unrelated] if recheck else [
+        checkout, script, same_module, qualified, unrelated,
+    ])
+
+
+def test_incremental_review_fails_closed_when_python_caller_cannot_be_inspected(
+    repo, tmp_path_factory, monkeypatch, provider, connection,
+):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
+    commit(repo, {"billing.py": "def total(amount):\n    return amount\n", "checkout.py": "price = 0\n"})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {"checkout.py": "from billing import total\nprice = total(10)\nif\n"})
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
+              "overrides": {"incremental": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == ["checkout.py"]
+
+    commit(repo, {"billing.py": "def total(amount, currency):\n    return amount\n"})
+    second = review_commits(repo, **kwargs)
+    assert second["comparison"]["strategy"] == "full"
+    assert second["comparison"]["reason"] == "python_caller_inspection_incomplete"
+    assert paths(second, "completed") == ["billing.py", "checkout.py"]
+    assert paths(second, "reused") == []
+
+
 def test_incremental_rename_and_revert(repo, comparison_repo, provider, connection):
     kwargs = {"base": "main", "connection": connection, "get_credentials": dict, "overrides": {"incremental": True}}
     review_commits(repo, **kwargs)
