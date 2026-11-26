@@ -178,9 +178,10 @@ in history. Reused coverage describes prior analysis of unchanged files. A first
 an incomplete review, a changed Engine version, base or review configuration, or
 unavailable ancestry triggers a full comparison. A changed head tree with an
 eligible deletion or rename also gets a full comparison so callers are checked again.
-When a Python module-level function's required parameters change in place, Mortis
-also rechecks previously reviewed Python files that directly import that function
-or its module. This check compares the previously reviewed head with the new head
+When a Python module-level function's required parameters change or it gains or
+loses `*args` or `**kwargs`, Mortis rechecks previously reviewed Python files that
+import that function or its module. For functions defined in `__init__.py`, this
+includes callers that use `import package.submodule`. Mortis compares the two heads
 using pinned source. Unrelated files can still reuse coverage. An ambiguous
 import name can cause extra rechecks, and dynamic imports or re-exports can
 escape detection. If the bounded source inspection cannot finish, Mortis runs

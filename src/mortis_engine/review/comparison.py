@@ -12,7 +12,7 @@ VERSION = "branch-review/v1"
 
 def decide(snap, options, history, previous, *, connection, profile, graph, decisions, assessments, stopped):
     signature = planning.fingerprint({
-        "reuse_policy": "python-required-signatures/v2",
+        "reuse_policy": "python-required-signatures/v3",
         "versions": [__version__, planning.VERSION, engine.VERSION, engine.PROMPT_VERSION, engine.SOURCE_CODE_POLICY,
                      engine.SOURCE_TOOL_POLICY],
         "base": snap.base_sha, "merge_base": snap.merge_base, "settings_sha": snap.settings_sha,

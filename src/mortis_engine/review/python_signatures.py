@@ -25,19 +25,20 @@ def _required_signatures(tree):
             keywords = tuple(sorted(arg.arg for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
                                     if default is None))
             names = tuple(arg.arg for arg in args.args[:required - positional])
-            signatures[node.name].append((positional, names, keywords))
+            signatures[node.name].append((positional, names, keywords, args.vararg is not None, args.kwarg is not None))
         elif not isinstance(node, (ast.ClassDef, ast.expr)):
             pending.extend(reversed(list(ast.iter_child_nodes(node))))
     return signatures
 
 
-def _imports_changed_function(tree, path, changed, stopped):
+def _imports_changed_function(tree, path, changed, package_prefixes, stopped):
     package = PurePosixPath(path).parent.parts
     for node in ast.walk(tree):
         if stopped():
             raise ReviewStopped("Python caller inspection was cancelled.")
         if isinstance(node, ast.Import):
-            if any(tuple(name.name.split(".")) in changed for name in node.names):
+            if any(tuple(name.name.split(".")) in changed or name.name.startswith(package_prefixes)
+                   for name in node.names):
                 return True
         elif isinstance(node, ast.ImportFrom) and node.level <= len(package) + 1:
             # One leading dot stays in the current directory, which can be the repository root.
@@ -51,7 +52,7 @@ def _imports_changed_function(tree, path, changed, stopped):
 
 
 def affected(repo, env, previous_head, head, modified, candidates, stopped):
-    """Identify known importers of edited module-level required-argument signatures.
+    """Identify importers affected by changes to required or variadic parameters.
 
     If bounded inspection fails, the caller falls back to a full review.
     """
@@ -77,9 +78,11 @@ def affected(repo, env, previous_head, head, modified, candidates, stopped):
             raise ValueError("Python caller inspection requires parseable source.") from exc
 
     changed = defaultdict(set)
+    packages = set()
     for path in modified:
         file = PurePosixPath(path)
-        module = file.parent.parts if file.stem == "__init__" else file.with_suffix("").parts
+        is_package = file.stem == "__init__"
+        module = file.parent.parts if is_package else file.with_suffix("").parts
         before = _required_signatures(parse(previous_head, path))
         after = _required_signatures(parse(head, path))
         functions = {name for name in before.keys() & after.keys() if before[name] != after[name]}
@@ -93,6 +96,10 @@ def affected(repo, env, previous_head, head, modified, candidates, stopped):
             if not module[root].isidentifier():
                 break
             changed[module[root:]].update(functions)
+            if is_package:
+                packages.add(".".join(module[root:]) + ".")
     if not changed:
         return set()
-    return {path for path in candidates if _imports_changed_function(parse(head, path), path, changed, stopped)}
+    package_prefixes = tuple(packages)
+    return {path for path in candidates
+            if _imports_changed_function(parse(head, path), path, changed, package_prefixes, stopped)}

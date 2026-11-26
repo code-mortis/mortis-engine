@@ -226,6 +226,32 @@ def test_incremental_review_rechecks_module_scope_importer(
     assert sorted(unit["path"] for batch in analysis for unit in batch) == ["billing.py", "checkout.py"]
 
 
+@pytest.mark.parametrize(("parameters", "caller"), [
+    pytest.param("amount, *extras", "from shop.billing import total\nprice = total(10, 2)\n", id="remove-varargs"),
+    pytest.param("amount, **options", "from shop.billing import total\nprice = total(10, tax=2)\n", id="remove-kwargs"),
+    pytest.param("amount, currency", "import shop.billing.rates\nprice = shop.billing.total(10, 'USD')\n",
+                 id="import-submodule"),
+])
+def test_incremental_review_rechecks_package_callers(
+    repo, tmp_path_factory, monkeypatch, provider, connection, parameters, caller,
+):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
+    billing = "shop/billing/__init__.py"
+    commit(repo, {"shop/__init__.py": "", billing: f"def total({parameters}): return amount\n",
+                  "shop/billing/rates.py": "", "shop/billing_tools.py": ""})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {"checkout.py": caller, "unrelated.py": "import shop.billing_tools\n"})
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict, "overrides": {"incremental": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == ["checkout.py", "unrelated.py"]
+
+    commit(repo, {billing: "def total(amount): return amount\n"})
+    second = review_commits(repo, **kwargs)
+    assert second["comparison"]["strategy"] == "incremental"
+    assert paths(second, "completed") == ["checkout.py", billing]
+    assert paths(second, "reused") == ["unrelated.py"]
+
+
 def test_incremental_review_fails_closed_when_python_caller_cannot_be_inspected(
     repo, tmp_path_factory, monkeypatch, provider, connection,
 ):

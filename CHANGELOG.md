@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Incremental branch reviews recheck previously reviewed Python importers when an eligible module-level function's required parameters change in place.
+- Incremental branch reviews recheck Python importers when a module-level function's required parameters change or it gains or loses `*args` or `**kwargs`. This includes callers that import a submodule and call a function on its parent package.
 - Graph-enabled reviews report the paths and review units whose optional graph context was dropped to fit a discovery request.
 - Incremental reviews recheck the remaining branch diff when a previously reviewed change is fully reverted and coverage would otherwise be reused. Callers that still depend on the reverted change receive fresh analysis. The first comparison after upgrading establishes a fresh baseline.
 
