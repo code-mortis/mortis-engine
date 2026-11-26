@@ -6,7 +6,7 @@ Release preparation is local until a maintainer deliberately pushes a version ta
 
 ## Prepare and validate
 
-Use Python 3.15 (selected by `.python-version`), a current uv (CI uses 0.13.8)
+Use Python 3.15 (selected by `.python-version`), a current uv (CI uses 0.13.10)
 and the locked development environment:
 
 ```sh
@@ -19,9 +19,10 @@ uv run --locked python scripts/check_dist.py
 
 Start with an empty `dist/` directory; the archive check allows uv's generated
 `.gitignore` but rejects stale or extra artifacts. It verifies archive paths, private/generated-file exclusions, required
-runtime/parser assets, license, version metadata, and source/test/evaluation files.
-The source archive deliberately retains the frozen evaluation baseline and fixtures
-used by tests. Neither archive includes local agent settings or GitHub configuration.
+runtime/parser assets, license, version metadata, source and tests. The source
+archive retains the regression test fixtures. The evaluation harnesses and frozen
+results live in the companion `mortis-benchmarks` repository. Neither archive
+includes local agent settings or GitHub configuration.
 
 CI also installs each archive in its own fresh environment with the locked runtime
 dependencies. To reproduce those checks on macOS or Linux:

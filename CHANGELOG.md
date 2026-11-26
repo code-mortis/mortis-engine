@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-- Rebuild the optional code graph parser with `mortis graph build` to use Python 3.15, Tree-sitter 0.27 and the updated C# and PHP grammars.
+## 0.1.6 - 2026-11-25
+
+- Branch, staged and working-tree reviews look for surviving references to deleted or renamed files, including in eligible unchanged files. Previews and review reports list the affected caller ranges separately. When caller coverage is partial, the CLI returns exit code 2 and reports any validated findings.
+- A changed branch tree with an eligible deletion or rename gets a full comparison so callers are checked again. Unchanged-tree skips can reuse complete caller coverage from a compatible run. The first comparison after upgrading needs a new baseline, and interrupted reviews keep their saved scope.
+- Rebuild the optional code graph parser with `mortis graph build` before using `--graph` after upgrading. The new image uses Python 3.15, Tree-sitter 0.27 and updated C# and PHP grammars.
+- Review workflow evaluation harnesses and historical results moved to the companion `mortis-benchmarks` repository. The source distribution retains the Engine regression tests and their fixtures.
 
 ## 0.1.5 - 2026-11-24
 

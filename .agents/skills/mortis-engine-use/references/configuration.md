@@ -76,10 +76,12 @@ flags to force a full comparison.
 Incremental analysis uses the cumulative branch diff for files changed since
 the last compatible, fully covered head. The summary and `max_files` still
 cover the eligible branch comparison. Missing or incomplete history, a changed
-base or configuration, and unavailable ancestry can trigger a full comparison.
-`--graph` and `--second-pass` always use the full comparison. With unchanged
-skipping enabled, a compatible review of the same head tree can be reused even
-when the commit SHA changed.
+Engine version, base or configuration, and unavailable ancestry can trigger a
+full comparison. A changed head tree with an eligible deletion or rename gets a
+full comparison to check callers again. `--graph` and `--second-pass` always
+use the full comparison. With unchanged skipping enabled, a compatible review
+of the same head tree can reuse complete caller coverage even when the commit
+SHA changed.
 
 ## Bounds and costs
 
@@ -123,8 +125,8 @@ enable it or increase limits as an implicit recovery step.
 
 Docker is optional for review graph context; Trivy is required for scans.
 `mortis graph build` builds the pinned parser image and can download build
-dependencies. After upgrading from 0.1.2 or earlier, rerun the build before using
-graph context. `mortis review --graph ...` uses the isolated parser. A review can
+dependencies. After upgrading to 0.1.6, rerun the build before using graph
+context. `mortis review --graph ...` uses the isolated parser. A review can
 use available graph facts when coverage is incomplete and resume with saved
 graph context when present. Do not enable networking, host mounts, inherited
 credentials or Docker-socket access on the parser container.

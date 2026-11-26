@@ -20,6 +20,8 @@ not read profiles, credentials or saved history and does not invoke inference.
 It shows the full scope and rejects `incremental` and `skip_unchanged` overrides.
 Inspect `errors` for files the snapshot could not read. Their `selected_files`
 entries can retain Git change status and the original rename path when available.
+When eligible deletions or renames trigger caller discovery, inspect
+`plan.get("affected_callers")` for planned caller ranges and discovery limits.
 
 ## Review with the selected saved profile
 
@@ -57,6 +59,11 @@ Use `False` to override a committed setting. Reports can include `comparison`
 with the strategy and prior run ID, alongside `coverage["reused"]` for earlier
 coverage. Unchanged comparisons return `status="skipped"` with zero model
 requests. Resume preserves the original selection.
+
+When present, `result["affected_callers"]` records the outcome of each caller
+range separately from file coverage. Check it alongside the report status.
+Caller discovery or analysis can be partial while the report retains validated
+findings. A compatible unchanged-tree skip can reuse complete caller coverage.
 
 For diff questions or a branch description, use the
 [CLI commands](../SKILL.md#ask-about-or-describe-a-branch-comparison).

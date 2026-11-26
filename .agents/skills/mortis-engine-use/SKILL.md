@@ -54,6 +54,11 @@ batches without consulting previous runs. It rejects `--connection`, `--resume`,
 `--graph`, `--progress`, `--output`, `--concurrency`, `--second-pass` and the
 incremental or unchanged-review flags.
 
+Branch, staged and working-tree previews can include `affected_callers` when
+eligible files were deleted or renamed. Inspect the planned caller ranges and
+`limits_reached` there. Review checks those ranges under the same file policy
+without requiring Docker.
+
 ## Run an authorized analysis
 
 Inspect saved profile metadata and effective repository settings with
@@ -99,9 +104,9 @@ or treating every nonzero exit as an empty result.
 | `1` | Failure; inspect stderr and any returned report |
 | `130` | CLI cancellation |
 
-Preview uses `2` for a scope limit or file errors. Other subcommands have their
-own success conditions: successful export returns `0` even for a partial saved
-report. Do not use exit code alone as a findings or security gate.
+Preview uses `2` for a scope limit, file errors or bounded caller discovery that
+left coverage incomplete. Successful export returns `0` even for a partial
+saved report. Do not use exit code alone as a findings or security gate.
 
 Check `schema_version`, `run_id`, `status`, pinned revisions, findings, coverage,
 errors and usage. Review JSON uses `mortis.review/v1`; scan JSON uses
@@ -110,6 +115,9 @@ include `errors` and `stage_errors`; scans expose `problems` and stage details.
 For branch review reuse, read `comparison` for the strategy and previous run ID.
 `coverage.completed` counts new analysis and `coverage.reused` records prior
 coverage. An unchanged skip links to the earlier report without new findings.
+When present, read `affected_callers` for range-level outcomes and discovery
+limits. An examined range in an unchanged caller accounts only for that range.
+Partial caller coverage can return code `2` with validated findings.
 Do not label partial coverage as clean, unknown usage as zero, an unavailable
 scan grade as a pass, or a finding absent from a later run as fixed. Report the
 run ID, scope, actionable findings and material coverage/usage limits to the user.

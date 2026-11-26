@@ -26,7 +26,7 @@ becomes complete because of the second pass. `second_pass` is absent when disabl
 
 The `review-improvements` suite in the companion `mortis-benchmarks` project
 contains the frozen baseline, corpus, grader and replay instructions.
-`fixtures/second-pass.json` supplies additional scripted discovery of c03 and
+`harness/fixtures/second-pass.json` supplies additional scripted discovery of c03 and
 repeats c01 to exercise duplicate suppression. It retains c05's unknown
 consumption. Replay uses a mocked provider and reads source as data.
 

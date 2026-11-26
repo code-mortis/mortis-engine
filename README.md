@@ -175,10 +175,11 @@ skip_unchanged = true
 files use their cumulative diff from the current comparison's common ancestor. The
 summary still covers the eligible changes in the branch, and previous findings stay
 in history. Reused coverage describes prior analysis of unchanged files. A first run,
-an incomplete review, a changed base or review configuration, or unavailable
-ancestry triggers a full comparison. A changed head tree with an eligible deletion or rename
-also gets a full comparison so callers are checked again. `--graph` and `--second-pass` also use the full
-comparison. `max_files` applies to the cumulative scope.
+an incomplete review, a changed Engine version, base or review configuration, or
+unavailable ancestry triggers a full comparison. A changed head tree with an
+eligible deletion or rename also gets a full comparison so callers are checked again.
+`--graph` and `--second-pass` also use the full comparison. `max_files` applies to
+the cumulative scope.
 
 `skip_unchanged` skips model calls when the compatible prior review covered the
 same head tree, even with a new commit SHA. The skipped report exits successfully
@@ -392,12 +393,13 @@ mortis graph build
 mortis review --base main --graph
 ```
 
-Docker builds a separate parser image with the pinned grammars. When an engine
-upgrade changes the parser, rerun `mortis graph build` before using `--graph`. During
-review the parser receives bounded file contents at one revision. It runs without
-network or host mounts. A review can continue using available graph facts and its
-normal source evidence when graph coverage is incomplete. Resumed reviews reuse
-their saved graph context when available.
+Docker builds a separate parser image with the pinned grammars. After upgrading
+to 0.1.6, rerun `mortis graph build` before using `--graph`. The new image uses
+Python 3.15, Tree-sitter 0.27 and updated C# and PHP grammars. During review the
+parser receives bounded file contents at one revision. It runs without network or
+host mounts. A review can continue using available graph facts and its normal
+source evidence when graph coverage is incomplete. Resumed reviews reuse their
+saved graph context when available.
 
 Set extraction limits in the trusted committed configuration:
 

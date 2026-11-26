@@ -122,9 +122,10 @@ uv run --locked python scripts/check_dist.py "$release_check_dir/dist"
 Use Python 3.15 for development and preserve Python 3.13–3.15 compatibility.
 Use fresh build output instead of deleting prior artifacts. Run focused
 regressions first when behavior changes, then the complete release checks.
-CI tests native graph extraction on Python 3.13 with the parser's pinned
-dependencies. Reproduce that check from `.github/workflows/ci.yml` for extraction
-changes and record the status of each hosted Python job when available.
+CI tests native graph extraction on Python 3.13, 3.14 and 3.15 with the parser's
+pinned dependencies. Reproduce the Python 3.13 check from
+`.github/workflows/ci.yml` for extraction changes and record the status of each
+hosted Python job when available.
 
 Install the wheel and source archive into separate temporary environments with
 the locked runtime dependencies, then run `tests/smoke_test.py` with each installed

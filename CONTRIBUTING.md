@@ -7,7 +7,7 @@ ownership and invariants.
 ## Development
 
 Use Python 3.15 for development and a current
-[uv](https://docs.astral.sh/uv/getting-started/installation/) (CI uses 0.13.8).
+[uv](https://docs.astral.sh/uv/getting-started/installation/) (CI uses 0.13.10).
 The repository's `.python-version` selects Python 3.15. Then run:
 
 ```sh
