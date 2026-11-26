@@ -10,6 +10,12 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+class EndpointLookupError(ValueError):
+    def __init__(self, *, retryable=False):
+        super().__init__("The provider address could not be found. Check the URL and local DNS.")
+        self.retryable = retryable
+
+
 def safe_endpoint(url: str) -> str:
     endpoint_addresses(url)
     return url.rstrip("/")
@@ -31,9 +37,9 @@ def endpoint_addresses(url: str) -> list[str]:
         addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
                                        type=socket.SOCK_STREAM)
     except OSError as exc:
-        raise ValueError("The provider address could not be found. Check the URL and local DNS.") from exc
+        raise EndpointLookupError(retryable=isinstance(exc, socket.gaierror) and exc.errno == socket.EAI_AGAIN) from exc
     if not addresses:
-        raise ValueError("The provider address could not be found. Check the URL and local DNS.")
+        raise EndpointLookupError()
     resolved = list(dict.fromkeys(entry[4][0] for entry in addresses))
     for value in resolved:
         address = ipaddress.ip_address(value)

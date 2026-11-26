@@ -12,7 +12,7 @@ from .findings import apply_decisions, scan_history, snapshot
 from .findings import list_findings as list_findings
 from .findings import triage as triage
 from .history import History
-from .review import planning, settings, source, workflows
+from .review import planning, settings, source, source_lines, workflows
 from .review.service import credentials_for_history, effective_connection, scope_ref
 from .security_scans import service as security
 from .workflow import Session
@@ -80,7 +80,8 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                     "profile": profile, "finding_run": finding_run, "effort": effort, "rotations": list(rotations),
                     "concurrency": concurrency, "overrides": overrides, "triage_versions": decisions, "assessment_runs": assessment_runs,
                     **({"assessment_dispatch": ASSESSMENT_DISPATCH_POLICY} if kind == "scan" else {}),
-                    **({"evidence_policy": options["_evidence_policy"]} if kind == "verify" else {})})
+                    **({"evidence_policy": options["_evidence_policy"], "source_line_policy": source_lines.POLICY}
+                       if kind == "verify" else {})})
             with history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)
@@ -101,7 +102,8 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                             return await security.scan(root, ref=sha, session=session, options=scan_options, previous=prior,
                                                        progress=progress, continuous=continuous)
                         if kind == "verify":
-                            return await workflows.verify(repo, env, original, sha, options, session)
+                            with source_lines.use(saved.get("source_line_policy") if saved else source_lines.POLICY):
+                                return await workflows.verify(repo, env, original, sha, options, session)
                         if kind == "summary":
                             result = await workflows.generate_summary(repo, env, original, options, session)
                             return {"schema_version": "mortis.summary/v1", **result}

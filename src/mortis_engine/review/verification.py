@@ -10,7 +10,7 @@ from pydantic import Field, ValidationError
 from mortis_engine.schemas import StrictModel
 
 from . import context as review_context
-from . import file_policy, planning
+from . import file_policy, planning, source_lines
 from . import source as git_source
 from .workflow_contracts import VerificationResult
 
@@ -89,13 +89,12 @@ def validate_result(value, context):
         if source is None:
             feedback["reason"] = "unavailable source"
         else:
-            lines = source.splitlines()
+            lines = source_lines.split(source)
             if item["end_line"] < item["start_line"] or item["end_line"] > len(lines):
                 feedback["reason"] = "invalid source line range"
             else:
-                source_lines = "\n".join(lines[item["start_line"] - 1:item["end_line"]])
                 if not item["quote"].strip() or not review_context.quote_matches(source, item["start_line"], item["end_line"], item["quote"]):
-                    feedback.update(reason="quote is not verbatim text within the cited source lines", source_lines=source_lines)
+                    feedback.update(reason="quote is not verbatim text within the cited source lines", source_lines="\n".join(lines[item["start_line"] - 1:item["end_line"]]))
         if "reason" in feedback:
             problems.append({**feedback, "quote": item["quote"]})
     if problems:

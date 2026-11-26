@@ -5,7 +5,7 @@ import re
 
 from mortis_engine.schemas import Tool
 
-from . import context, planning, source
+from . import context, planning, source, source_lines
 from .errors import ReviewStopped
 
 VERSION = "pinned-symbol-search/v1"
@@ -85,7 +85,7 @@ def search(repo, env, plan, options, symbol, credentials, authorize, stopped):
         except ValueError:
             result["omitted_files"] += 1
             continue
-        for line, value in enumerate(text.splitlines(), 1):
+        for line, value in enumerate(source_lines.split(text), 1):
             check()
             if not pattern.search(value):
                 continue

@@ -11,7 +11,7 @@ from pathlib import Path
 from .history import History, encode, private_directory
 from .llm_http import InferenceError
 from .review import context as review_context
-from .review import planning, source, workflows
+from .review import planning, source, source_lines, workflows
 from .review.service import credentials_for_history, effective_connection
 from .security_scans.payload import check_saved_sources
 from .workflow import Session
@@ -249,8 +249,9 @@ async def _execute(repository, repo, env, value, session):
     if value["workflow_kind"] == "review":
         options = {**options, "_evidence_policy": planning.saved_evidence_policy(options)}
         report = {"base_sha": value["base_sha"], "head_sha": value["head_sha"]}
-        return await workflows._assess(repo, env, workflows._run(report, options, session),
-                                       value["candidate"], {}, session, pinned_context=value["context"])
+        with source_lines.use(options.get("_source_line_policy")):
+            return await workflows._assess(repo, env, workflows._run(report, options, session), value["candidate"],
+                                           {}, session, pinned_context=value["context"], task_key=value["task_key"])
     from .review import file_policy
     from .security_scans import engine, inference
     from .security_scans.scanner import identity_key

@@ -6,7 +6,7 @@ from pydantic import Field, ValidationError
 
 from . import context as review_context
 from . import source as git_source
-from . import verification
+from . import source_lines, verification
 from .errors import ReviewStopped
 from .planning import fingerprint, supports_test_evidence
 from .workflow_contracts import AssessmentResult
@@ -342,7 +342,7 @@ def validate_result(value, context):
         reason = None
         if source is None:
             reason = "unavailable source"
-        elif evidence["end_line"] < evidence["start_line"] or evidence["end_line"] > len(source.splitlines()):
+        elif evidence["end_line"] < evidence["start_line"] or evidence["end_line"] > len(source_lines.split(source)):
             reason = "invalid source line range"
         elif not evidence["quote"].strip():
             reason = "empty quote"
@@ -389,11 +389,11 @@ def _invalid_python_suggestion(context):
     start, end = finding.get("start_line"), finding.get("end_line")
     if source is None or not isinstance(suggestion, str) or type(start) is not int or type(end) is not int:
         return False
-    lines = source.splitlines(keepends=True)
+    lines = source_lines.split(source, keepends=True)
     if not 1 <= start <= end <= len(lines):
         return False
     existing = finding.get("existing_code")
-    if not isinstance(existing, str) or existing.splitlines() != source.splitlines()[start - 1:end]:
+    if not isinstance(existing, str) or source_lines.split(existing) != source_lines.split(source)[start - 1:end]:
         return False
     # Only a valid original and an exact whole-line replacement support a syntax veto.
     try:

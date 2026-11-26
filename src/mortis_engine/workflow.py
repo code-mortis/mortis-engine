@@ -12,6 +12,7 @@ from . import admission, gateway, llm_http
 from .assessment_dispatch import without_slot
 from .history import encode
 from .llm_http import InferenceError
+from .review import source_lines
 from .review.context import sanitize
 from .schemas import Message, Request, Response, Usage
 
@@ -40,7 +41,7 @@ def schema_for_transport(schema):
     return schema
 
 
-def evidence_bundle(context):
+def evidence_bundle(context, *, split_lines=source_lines.split):
     import re
 
     parts = ["# Code Mortis verification evidence", json.dumps({
@@ -48,7 +49,7 @@ def evidence_bundle(context):
     }, indent=2)]
     blocks = [("Subsequent Git diff", context["diff"])]
     blocks.extend((f"{revision} source: {json.dumps(path)} (source line numbers before |)",
-                   "\n".join(f"{number} | {line}" for number, line in enumerate(source.splitlines(), 1)))
+                   "\n".join(f"{number} | {line}" for number, line in enumerate(split_lines(source), 1)))
                   for revision, sources in context["sources"].items() for path, source in sources.items())
     for title, source in blocks:
         fence = "`" * max(3, 1 + max((len(match) for match in re.findall(r"`+", source)), default=0))
@@ -250,7 +251,8 @@ class Session:
     def request(self, stage, key, *, instructions, context, schema, effort="medium", max_output_tokens=None):
         """Reconstruct immutable stage inputs without dispatching a provider request."""
         supplied = sanitize(context, self.credentials)
-        content = (evidence_bundle(supplied) if "sources" in supplied and "diff" in supplied
+        split_lines = str.splitlines if stage.startswith("security_") else source_lines.split
+        content = (evidence_bundle(supplied, split_lines=split_lines) if "sources" in supplied and "diff" in supplied
                    else json.dumps(supplied, ensure_ascii=False))
         session_id = hashlib.sha256(encode([self.run_id, stage, key]).encode()).hexdigest()
         return Request(instructions=sanitize(instructions, self.credentials),

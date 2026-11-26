@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mortis_engine.review import assessment, source, verification, workflows
+from mortis_engine.review import assessment, planning, source, verification, workflows
 from mortis_engine.review.settings import RepoSettings
 
 from .git_helpers import commit, git
@@ -193,7 +193,7 @@ def test_saved_legacy_context_reused_without_rebuilding_or_changing_schema(repo,
 
     def assessment_input(run_id, candidate_id):
         assert (run_id, candidate_id) == ("origin", "candidate")
-        return {"context": saved, "options": {}}
+        return {"context": saved, "options": {}, "task_key": planning.fingerprint(candidate(sha))}
 
     session.history = SimpleNamespace(assessment_input=assessment_input)
     monkeypatch.setattr(assessment, "build_context", lambda *args, **kwargs: pytest.fail("Saved context was rebuilt"))

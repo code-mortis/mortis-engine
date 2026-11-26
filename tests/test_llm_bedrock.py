@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import socket
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ from botocore.exceptions import ProfileNotFound
 from mortis_engine import llm_bedrock as bedrock
 from mortis_engine.llm_http import InferenceError
 from mortis_engine.schemas import Message, Request, Tool
+from mortis_engine.security import safe_endpoint
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +60,23 @@ def execute(handler, config=None, credentials=None, query=None, **kwargs):
             return await bedrock.send(config or connection(), credentials or {"api_key": "bedrock-key"},
                                       query or request(), client=client, **kwargs)
     return asyncio.run(run())
+
+
+@pytest.mark.parametrize("code", ["endpoint_dns", "endpoint_policy"])
+def test_bedrock_preflight_endpoint_failures_have_known_usage(monkeypatch, code):
+    def resolve(*args, **kwargs):
+        if code == "endpoint_dns":
+            raise socket.gaierror(socket.EAI_AGAIN, "fixture DNS failure")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))]
+
+    monkeypatch.delenv("CM_TRUSTED_ENDPOINT_HOSTS", raising=False)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(bedrock, "safe_endpoint", safe_endpoint)
+    with pytest.raises(InferenceError) as error:
+        execute(lambda _: pytest.fail("Dispatched Converse after failed preflight"),
+                config=connection(base_url="https://provider.example"))
+    assert error.value.code == code and not error.value.consumption_unknown
+    assert error.value.retryable == (code == "endpoint_dns")
 
 
 def test_bearer_tools_schema_options_and_selected_model(monkeypatch):

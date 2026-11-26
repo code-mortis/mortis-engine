@@ -431,12 +431,47 @@ def decision(verdict="confirmed"):
             "required_paths": []}
 
 
-def failed_review(local, monkeypatch, *, unknown=False):
+def test_duplicate_review_candidates_have_distinct_durable_attempts(local, monkeypatch):
+    repo, base, head = local
+    candidate = {"path": "app.py", "start_line": 2, "end_line": 2, "content": "Zero crashes division",
+                 "existing_code": "    return 1 / value", "source_sha": head}
+    options = {**RepoSettings().model_dump(), "_settings_sha": base,
+               "_assessment_task_key_policy": workflows.ASSESSMENT_TASK_KEY_POLICY}
+    prior_counts = []
+
+    async def send(connection, credentials, request, **kwargs):
+        prior_counts.append(len(request_context(request)["prior_candidates"]))
+        return Response(output={**decision("rejected"), "required_base_paths": []}, usage=Usage(total_tokens=7))
+
+    monkeypatch.setattr(gateway, "send", send)
+    with History(repo) as history, source.local_repository(repo, object_cache=history.objects) as (isolated, env):
+        run_id = history.begin("review", "main", {"triage_versions": {}})
+        report = {"run_id": run_id, "head_sha": head, "base_sha": base, "status": "completed",
+                  "findings": [candidate, candidate.copy()]}
+
+        def review():
+            session = Session(effective_connection(CONNECTION, options), {}, history=history, run_id=run_id)
+            return asyncio.run(workflows.postprocess(isolated, env, report, options, session))
+
+        result = review()
+        assert result["status"] == "completed"
+        assert [row["result"]["verdict"] for row in result["candidates"]] == ["rejected", "rejected"]
+        keys = [row["id"] for row in result["candidates"]]
+        assert set(history.attempts(run_id)) == {("assessment", f"{key}:0") for key in keys}
+        assert [history.assessment_input(run_id, key)["task_key"] for key in keys] == keys
+
+        monkeypatch.setattr(gateway, "send", lambda *args, **kwargs: pytest.fail("Saved request was sent again"))
+        assert review() == result
+
+    assert prior_counts == [0, 1]
+
+
+def failed_review(local, monkeypatch, *, unknown=False, task_key_policy=workflows.ASSESSMENT_TASK_KEY_POLICY):
     repo, base, head = local
     snapshot = {"path": "app.py", "start_line": 2, "end_line": 2, "content": "Zero crashes division",
                 "existing_code": "    return 1 / value", "suggestion_code": "unsafe suggestion", "source_sha": head,
                 "severity": "high", "category": "correctness"}
-    options = {**RepoSettings().model_dump(), "_settings_sha": base}
+    options = {**RepoSettings().model_dump(), "_settings_sha": base, "_assessment_task_key_policy": task_key_policy}
 
     async def fail(*args, **kwargs):
         raise InferenceError("fixture", "Original failure", consumption_unknown=unknown, usage=Usage(total_tokens=None if unknown else 7))
@@ -548,9 +583,10 @@ def test_unknown_retry_lineage_cannot_be_bypassed_by_a_new_child(local, monkeypa
                                     get_credentials=lambda: pytest.fail("credentials read"))
 
 
-def test_retry_resumes_cached_assessment_without_dispatching_twice(local, monkeypatch):
+@pytest.mark.parametrize("task_key_policy", [None, workflows.ASSESSMENT_TASK_KEY_POLICY])
+def test_retry_resumes_cached_assessment_without_dispatching_twice(local, monkeypatch, task_key_policy):
     repo, _, _ = local
-    parent = failed_review(local, monkeypatch)
+    parent = failed_review(local, monkeypatch, task_key_policy=task_key_policy)
     sent = []
 
     async def send(*args, **kwargs):
@@ -565,6 +601,10 @@ def test_retry_resumes_cached_assessment_without_dispatching_twice(local, monkey
                                     get_credentials=lambda: {})
     with History(repo) as history:
         child = assessments._children(history, parent, "candidate-fixture")[0]["id"]
+        pinned = history.assessment_input(parent, "candidate-fixture")
+        key = "candidate-fixture" if task_key_policy else workflows.planning.fingerprint(pinned["candidate"])
+        assert pinned["task_key"] == key
+        assert list(history.attempts(child)) == [("assessment", f"{key}:0")]
     monkeypatch.setattr(assessments, "_finding", real_finding)
     result = operations.retry_assessment(repo, resume=child, connection=CONNECTION, get_credentials=lambda: {})
     assert result["status"] == "completed" and result["run_id"] == child and sent == [1]

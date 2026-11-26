@@ -24,6 +24,7 @@ from . import (
     settings,
     snapshots,
     source,
+    source_lines,
     workflows,
 )
 
@@ -116,6 +117,11 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
             attribution = saved.get("assessment_attribution") if saved else assessment.ATTRIBUTION_VERSION
             options["_evidence_policy"] = planning.saved_evidence_policy(saved) if saved else planning.EVIDENCE_POLICY
             planning.supports_test_evidence(options)
+            options["_source_line_policy"] = saved.get("source_line_policy") if saved else source_lines.POLICY
+            key_policy = saved.get("assessment_task_key_policy") if saved else workflows.ASSESSMENT_TASK_KEY_POLICY
+            if key_policy not in (None, workflows.ASSESSMENT_TASK_KEY_POLICY):
+                raise ValueError("The saved assessment task key policy is unsupported.")
+            options["_assessment_task_key_policy"] = key_policy
             if saved and "evidence_policy" not in saved:
                 options["_unmarked_verification_policy"] = True
             options["_discovery_result_policy"] = saved.get("discovery_result_policy") if saved else engine.DISCOVERY_RESULT_POLICY
@@ -177,13 +183,14 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                     "overrides": overrides, "code_graph_limits": options["code_graph_limits"],
                     "triage_versions": decisions, "assessment_runs": assessment_runs,
                     "assessment_dispatch": ASSESSMENT_DISPATCH_POLICY,
+                    "assessment_task_key_policy": key_policy, "source_line_policy": options["_source_line_policy"],
                     "full_tree_source_policy": full_tree_source_policy, "assessment_attribution": attribution,
                     "source_tool_policy": source_tool_policy, "evidence_policy": options["_evidence_policy"],
                     "discovery_result_policy": options["_discovery_result_policy"],
                     "affected_caller_policy": options["_affected_caller_policy"],
                     **({"comparison": selection} if selection else {})})
             options["_triage_snapshot"] = decisions
-            with history.claim(run_id):
+            with source_lines.use(options["_source_line_policy"]), history.claim(run_id):
                 if history.row(run_id)["report"] is not None:
                     return history.report(run_id)
                 unchanged = selection.get("strategy") == "skipped_unchanged"

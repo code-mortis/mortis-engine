@@ -21,6 +21,7 @@ from .llm_http import (
     DEFAULT_TIMEOUT,
     InferenceError,
     _bounded,
+    _endpoint_error,
     _invalid,
     _usage,
     decode_response,
@@ -48,7 +49,10 @@ def _prepare(connection, credentials, body):
         endpoint = EndpointResolver(session.get_data("endpoints")).construct_endpoint("bedrock-runtime", region)
         if not endpoint:
             raise ValueError("No Bedrock endpoint for the selected AWS region")
-    base = safe_endpoint(connection.get("base_url") or f'https://{endpoint["hostname"]}')
+    try:
+        base = safe_endpoint(connection.get("base_url") or f'https://{endpoint["hostname"]}')
+    except ValueError as exc:
+        raise _endpoint_error(exc) from exc
     model = connection["model"]
     if not isinstance(model, str) or not model or len(model) > 2048 or model in {".", ".."} or any(ord(char) < 32 for char in model):
         raise ValueError("Invalid Bedrock model identifier")
