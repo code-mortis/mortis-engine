@@ -100,14 +100,16 @@ def enrich(repo, env, plan, options, credentials, stopped=lambda: False, *, lega
         manifest = {item.path: item for item in parsed.files}
         sources = {item.path: item for item in request.files}
         graph, consumed = {}, 0
-        for assigned in sorted({unit.path for unit in plan.units}):
-            neighbors = set()
-            for edge in parsed.imports:
-                if edge.target_path and edge.provenance == "relative_path":
-                    if edge.file_path == assigned:
-                        neighbors.add(edge.target_path)
-                    if edge.target_path == assigned:
-                        neighbors.add(edge.file_path)
+        neighbors_by_path = {path: set() for path in sorted({unit.path for unit in plan.units})}
+        for edge in parsed.imports:
+            target = edge.target_path
+            if target and edge.provenance == "relative_path":
+                origin = edge.file_path
+                if origin in neighbors_by_path:
+                    neighbors_by_path[origin].add(target)
+                if target in neighbors_by_path:
+                    neighbors_by_path[target].add(origin)
+        for assigned, neighbors in neighbors_by_path.items():
             selected, used, truncated = [], 0, False
             for path in sorted(neighbors - {assigned}):
                 item = manifest[path]

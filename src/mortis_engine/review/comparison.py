@@ -8,11 +8,12 @@ from . import engine, planning, python_signatures, settings, source
 from .errors import ReviewStopped
 
 VERSION = "branch-review/v1"
+REUSE_POLICY = "python-caller-signatures/v5"
 
 
 def decide(snap, options, history, previous, *, connection, profile, graph, decisions, assessments, stopped):
     signature = planning.fingerprint({
-        "reuse_policy": "python-required-signatures/v3",
+        "reuse_policy": REUSE_POLICY,
         "versions": [__version__, planning.VERSION, engine.VERSION, engine.PROMPT_VERSION, engine.SOURCE_CODE_POLICY,
                      engine.SOURCE_TOOL_POLICY],
         "base": snap.base_sha, "merge_base": snap.merge_base, "settings_sha": snap.settings_sha,

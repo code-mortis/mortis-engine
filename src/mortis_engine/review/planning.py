@@ -645,8 +645,8 @@ def plan_review(repo, env, base_sha, head_sha, merge_base, options, stopped, *,
                 raise ValueError("Required source exceeds the PR source admission limit; splitting cannot bypass it.")
             if used + entry["size"] > max_source_bytes:
                 raise ValueError("Required source exceeds the aggregate PR source admission limit.")
-            text = source.read_source(repo, env, head_sha, selected.path, stopped,
-                                      reject_replacement=legacy_text)
+            text = source.read_pinned_blob(repo, env, entry["blob_sha"], entry["size"], stopped,
+                                           reject_replacement=legacy_text)
             patch = "" if source_only else source.git(repo, env, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--find-renames",
                                "--unified=3", merge_base, head_sha, "--", *dict.fromkeys(filter(None, (selected.old_path, selected.path))), stopped=stopped)
             size = len((text + patch).encode())

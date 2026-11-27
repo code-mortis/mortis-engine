@@ -83,9 +83,12 @@ Engine version, base or configuration, and unavailable ancestry can trigger a
 full comparison. A changed head tree with an eligible deletion or rename gets a
 full comparison to check callers again. Fully reverting a reviewed file change
 also triggers a full comparison if coverage would otherwise be reused.
-A change to a module-level Python function's required parameters, `*args` or
-`**kwargs` can bring previously reviewed importers back into scope. When bounded
-inspection of these files cannot finish, Mortis runs the full comparison.
+Removing a module-level Python function or changing its required or variadic
+parameters can bring previously reviewed importers back into scope. Removing or
+renaming an optional keyword or displacing a parameter from its positional slot
+can also trigger a recheck. Compatible optional additions and body-only changes
+allow coverage reuse. If bounded inspection cannot finish, Mortis runs the full
+comparison.
 `--graph` and `--second-pass` always
 use the full comparison. With unchanged skipping enabled, a compatible review
 of the same head tree can reuse complete caller coverage even when the commit

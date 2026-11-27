@@ -4,7 +4,7 @@ import pytest
 
 from mortis_engine import gateway
 from mortis_engine.history import History
-from mortis_engine.review import review_commits, review_local, service
+from mortis_engine.review import affected_callers, comparison, review_commits, review_local, service
 from mortis_engine.schemas import Response, Usage
 
 from .git_helpers import commit, git
@@ -147,6 +147,7 @@ def test_reverting_reviewed_dependency_rechecks_caller(repo, tmp_path_factory, m
 
 
 @pytest.mark.parametrize(("declaration", "recheck"), [
+    pytest.param("", True, id="function-removed"),
     ("def total(amount, currency, tax):\n    return amount\n", True),
     ("def total(amount, currency, *, tax):\n    return amount\n", True),
     ("def total(amount, currency, tax=0):\n    return amount\n", False),
@@ -201,6 +202,39 @@ def test_incremental_review_rechecks_importers_of_changed_signature(
     ])
 
 
+@pytest.mark.parametrize(("before", "after", "call", "recheck"), [
+    ("amount, currency='USD'", "amount, denomination='USD'", "total(10, currency='JPY')", True),
+    ("amount, *, currency='USD'", "amount", "total(10, currency='JPY')", True),
+    ("amount, currency='USD'", "amount, *, currency='USD'", "total(10, 'JPY')", True),
+    ("amount, currency='USD'", "amount, tax=0, currency='USD'", "total(10, 'JPY')", True),
+    ("amount, *, currency='USD'", "amount, *, currency='EUR', tax=0", "total(10, currency='JPY')", False),
+    ("*items, amount=0", "amount=0, *items", "total(1, amount=2)", True),
+    ("amount=0, /, **meta", "amount=0, **meta", "total(1, amount=2)", True),
+    ("value=0, /, *, amount=0", "amount=0", "total(1, amount=2)", True),
+    ("amount=0, /", "amount=0", "total(1)", False),
+    ("amount, *items", "amount, *items, tax=0", "total(1, 2)", False),
+])
+def test_incremental_review_tracks_optional_arguments(
+    repo, tmp_path_factory, monkeypatch, provider, connection, before, after, call, recheck,
+):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
+    commit(repo, {"billing.py": f"def total({before}): return amount\n"})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {"checkout.py": f"from billing import total\nprice = {call}\n"})
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict, "overrides": {"incremental": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == ["checkout.py"]
+    commit(repo, {"billing.py": f"def total({after}): return amount\n"})
+    analysis = provider[0]["analysis"]
+    analysis.clear()
+    second = review_commits(repo, **kwargs)
+    expected = ["billing.py", "checkout.py"] if recheck else ["billing.py"]
+    assert second["comparison"]["strategy"] == "incremental"
+    assert paths(second, "completed") == expected
+    assert paths(second, "reused") == ([] if recheck else ["checkout.py"])
+    assert sorted(unit["path"] for batch in analysis for unit in batch) == expected
+
+
 @pytest.mark.parametrize(("definition", "module"), [
     pytest.param("if __debug__:\n    def total({params}): return amount\n", "billing", id="module-conditional"),
     pytest.param("def total({params}): return amount\n", ".billing", id="root-relative-import"),
@@ -252,18 +286,23 @@ def test_incremental_review_rechecks_package_callers(
     assert paths(second, "reused") == ["unrelated.py"]
 
 
+@pytest.mark.parametrize("failure", ["syntax", "read_limit"])
 def test_incremental_review_fails_closed_when_python_caller_cannot_be_inspected(
-    repo, tmp_path_factory, monkeypatch, provider, connection,
+    repo, tmp_path_factory, monkeypatch, provider, connection, failure,
 ):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
     commit(repo, {"billing.py": "def total(amount):\n    return amount\n", "checkout.py": "price = 0\n"})
     git(repo, "switch", "-qc", "topic")
-    commit(repo, {"checkout.py": "from billing import total\nprice = total(10)\nif\n"})
+    caller = "from billing import total\nprice = total(10)\n"
+    commit(repo, {"checkout.py": caller + ("if\n" if failure == "syntax" else "")})
     kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
               "overrides": {"incremental": True}}
     first = review_commits(repo, **kwargs)
     assert paths(first, "completed") == ["checkout.py"]
 
+    if failure == "read_limit":
+        # The two dependency revisions exhaust the budget before reading the caller.
+        monkeypatch.setattr(affected_callers, "MAX_OBJECT_READS", 2)
     commit(repo, {"billing.py": "def total(amount, currency):\n    return amount\n"})
     second = review_commits(repo, **kwargs)
     assert second["comparison"]["strategy"] == "full"
@@ -325,6 +364,21 @@ def test_incompatible_or_incomplete_history_does_not_waive_full_review(
     else:
         assert result["comparison"]["strategy"] == "full"
         assert paths(result, "completed") == comparison_repo
+
+
+def test_new_reuse_policy_requires_one_fresh_baseline(repo, comparison_repo, provider, connection, monkeypatch):
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
+              "overrides": {"incremental": True, "skip_unchanged": True}}
+    with monkeypatch.context() as old:
+        old.setattr(comparison, "REUSE_POLICY", "python-caller-signatures/v4")
+        previous = review_commits(repo, **kwargs)
+    current = review_commits(repo, **kwargs)
+    assert current["head_sha"] == previous["head_sha"]
+    assert current["comparison"]["reason"] == "incompatible_baseline"
+    assert paths(current, "completed") == comparison_repo
+    next_review = review_commits(repo, **kwargs)
+    assert next_review["comparison"]["strategy"] == "skipped_unchanged"
+    assert next_review["comparison"]["baseline_run_id"] == current["run_id"]
 
 
 def test_resume_keeps_pinned_incremental_selection(repo, comparison_repo, provider, connection, monkeypatch):
