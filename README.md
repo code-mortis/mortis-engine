@@ -117,7 +117,8 @@ including custom extensions admitted by `review.rules.include`, and works withou
 For Python modules under `src/`, discovery also recognizes absolute imports such as
 `from package.module import helper` when `src/package/module.py` is removed or moved.
 It resolves relative Python imports against the calling file's package, including
-aliases and parenthesized imports that span several lines.
+aliases and parenthesized imports that span several lines. When a function imports a
+renamed module locally, other functions can still be flagged for using the old binding.
 Run `mortis review --preview` to see which caller ranges would be checked.
 
 The `affected_callers` section lists the triggering changes, caller ranges, outcomes and
@@ -186,8 +187,10 @@ Mortis rechecks previously reviewed Python files that import a module-level func
 or its module when the function is removed, its required parameters change, or it
 gains or loses `*args` or `**kwargs`. Removing or renaming an optional parameter
 that callers can pass by name also triggers a recheck, as does displacing it from
-its positional slot. Adding a compatible optional
-parameter or changing only the function body allows coverage reuse.
+its positional slot. Mortis also rechecks callers when a new slot takes an argument
+previously captured by `*args`, or a positional-only parameter starts accepting a
+keyword previously captured by `**kwargs`. Compatible optional additions and
+body-only changes allow coverage reuse.
 For functions defined in `__init__.py`, this
 includes callers that use `import package.submodule`. Mortis compares the two heads
 using pinned source. Unrelated files can still reuse coverage. An ambiguous

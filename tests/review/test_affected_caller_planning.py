@@ -198,6 +198,34 @@ def test_rename_distinguishes_relative_symbol_alias_from_stale_use(repo, stale_c
     assert all(site["triggers"] == [old] for site in scope["sites"])
 
 
+@pytest.mark.parametrize(("binding", "call"), [
+    ("from . import (\n        new as api,\n    )", "api.apply()"),
+    ("from . import new as api", "api.apply()"),
+    ("from .new import apply", "apply()"),
+])
+def test_rename_only_rebinds_callers_in_import_scope(repo, binding, call):
+    caller = "pkg/caller.py"
+    functions = f"def first():\n    return {call}\n\ndef second():\n    return {call}\n"
+    base = commit(repo, {"pkg/__init__.py": "", "pkg/old.py": "def apply(): return 1\n",
+                         caller: binding.replace("new", "old") + "\n" + functions})
+    git(repo, "mv", "pkg/old.py", "pkg/new.py")
+    # The nested function inherits first's binding. The sibling has lost the module-level import.
+    updated = (f"def first():\n    {binding}\n    def nested():\n        return {call}\n    return nested()\n"
+               + "\n" * 8 + f"def second():\n    return {call}\n")
+    commit(repo, {caller: updated})
+    with snapshots.snapshot(repo, mode="commits", base=base) as snap:
+        options = settings.load(snap.repo, snap.env, snap.settings_sha)
+        args = (snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base)
+        plan = planning.plan_review(*args, options, lambda: False)
+        site, = plan.affected_callers["sites"]
+        assert site["path"] == caller and site["triggers"] == ["pkg/old.py"]
+        assert site["start_line"] > updated.splitlines().index("    return nested()") + 1
+        assert site["end_line"] == len(updated.splitlines())
+        saved = planning.plan_review(*args, {**options, "_affected_caller_policy": "affected-callers/v5"},
+                                     lambda: False)
+        assert saved.affected_callers["sites"] == []
+
+
 def test_rename_updates_relative_import_of_same_basename(repo):
     base = commit(repo, {"legacy/tool.py": "def apply():\n    return 1\n",
                          "backend/run.py": "from ..legacy.tool import apply\napply()\n"})

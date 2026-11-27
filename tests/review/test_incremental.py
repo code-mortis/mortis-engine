@@ -208,6 +208,11 @@ def test_incremental_review_rechecks_importers_of_changed_signature(
     ("amount, currency='USD'", "amount, *, currency='USD'", "total(10, 'JPY')", True),
     ("amount, currency='USD'", "amount, tax=0, currency='USD'", "total(10, 'JPY')", True),
     ("amount, *, currency='USD'", "amount, *, currency='EUR', tax=0", "total(10, currency='JPY')", False),
+    ("*items, amount=0", "amount=0, *items", "total(1, amount=2)", True),
+    ("amount=0, /, **meta", "amount=0, **meta", "total(1, amount=2)", True),
+    ("value=0, /, *, amount=0", "amount=0", "total(1, amount=2)", True),
+    ("amount=0, /", "amount=0", "total(1)", False),
+    ("amount, *items", "amount, *items, tax=0", "total(1, 2)", False),
 ])
 def test_incremental_review_tracks_optional_arguments(
     repo, tmp_path_factory, monkeypatch, provider, connection, before, after, call, recheck,
@@ -365,7 +370,7 @@ def test_new_reuse_policy_requires_one_fresh_baseline(repo, comparison_repo, pro
     kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
               "overrides": {"incremental": True, "skip_unchanged": True}}
     with monkeypatch.context() as old:
-        old.setattr(comparison, "REUSE_POLICY", "python-required-signatures/v3")
+        old.setattr(comparison, "REUSE_POLICY", "python-caller-signatures/v4")
         previous = review_commits(repo, **kwargs)
     current = review_commits(repo, **kwargs)
     assert current["head_sha"] == previous["head_sha"]

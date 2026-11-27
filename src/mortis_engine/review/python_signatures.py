@@ -17,15 +17,19 @@ def is_python(path):
 @dataclass
 class _Signature:
     required_shape: tuple
+    varargs: bool
+    varkw: bool
     optional_keywords: set[str]
     optional_positional: tuple[str | None, ...]
 
     def requires_recheck(self, new):
         # Preserve the slots an existing caller could fill positionally.
-        return (self.required_shape != new.required_shape
+        return (self.required_shape != new.required_shape or self.varargs != new.varargs or self.varkw != new.varkw
                 or not self.optional_keywords <= new.optional_keywords
                 or len(self.optional_positional) > len(new.optional_positional)
-                or any(old is not None and old != current
+                or (self.varargs and len(self.optional_positional) != len(new.optional_positional))
+                # A keyword accepted separately before can now collide with the same positional argument.
+                or any(old != current and (old is not None or self.varkw or current in self.optional_keywords)
                        for old, current in zip(self.optional_positional, new.optional_positional, strict=False)))
 
 
@@ -41,13 +45,14 @@ def _signatures(tree):
             keywords = tuple(sorted(arg.arg for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
                                     if default is None))
             names = tuple(arg.arg for arg in args.args[:required - positional])
-            required_shape = (positional, names, keywords, args.vararg is not None, args.kwarg is not None)
+            required_shape = (positional, names, keywords)
             optional_pos_or_kw = tuple(arg.arg for arg in args.args[required - positional:])
             optional_slots = (None,) * (len(args.posonlyargs) - positional) + optional_pos_or_kw
             optional_names = set(optional_pos_or_kw)
             optional_names.update(arg.arg for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
                                   if default is not None)
-            signatures[node.name].append(_Signature(required_shape, optional_names, optional_slots))
+            signatures[node.name].append(_Signature(required_shape, args.vararg is not None, args.kwarg is not None,
+                                                    optional_names, optional_slots))
         elif not isinstance(node, (ast.ClassDef, ast.expr)):
             pending.extend(reversed(list(ast.iter_child_nodes(node))))
     return signatures
