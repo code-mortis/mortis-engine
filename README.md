@@ -116,6 +116,8 @@ line that invokes it into review. Discovery uses the same file policy as the rev
 including custom extensions admitted by `review.rules.include`, and works without Docker.
 For Python modules under `src/`, discovery also recognizes absolute imports such as
 `from package.module import helper` when `src/package/module.py` is removed or moved.
+It resolves relative Python imports against the calling file's package, including
+aliases and parenthesized imports that span several lines.
 Run `mortis review --preview` to see which caller ranges would be checked.
 
 The `affected_callers` section lists the triggering changes, caller ranges, outcomes and
@@ -180,9 +182,13 @@ in history. Reused coverage describes prior analysis of unchanged files. A first
 an incomplete review, a changed Engine version, base or review configuration, or
 unavailable ancestry triggers a full comparison. A changed head tree with an
 eligible deletion or rename also gets a full comparison so callers are checked again.
-When a Python module-level function's required parameters change or it gains or
-loses `*args` or `**kwargs`, Mortis rechecks previously reviewed Python files that
-import that function or its module. For functions defined in `__init__.py`, this
+Mortis rechecks previously reviewed Python files that import a module-level function
+or its module when the function is removed, its required parameters change, or it
+gains or loses `*args` or `**kwargs`. Removing or renaming an optional parameter
+that callers can pass by name also triggers a recheck, as does displacing it from
+its positional slot. Adding a compatible optional
+parameter or changing only the function body allows coverage reuse.
+For functions defined in `__init__.py`, this
 includes callers that use `import package.submodule`. Mortis compares the two heads
 using pinned source. Unrelated files can still reuse coverage. An ambiguous
 import name can cause extra rechecks, and dynamic imports or re-exports can

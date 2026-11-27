@@ -117,6 +117,39 @@ def test_resume_restores_saved_affected_caller_scope(deletion_repo, provider, co
         assert [unit["key"] for unit in result["units"]] == captured
 
 
+def test_resume_preserves_v4_absolute_import_scope(repo, tmp_path_factory, provider, connection, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("resume-v4-state")))
+    absolute, relative, retired = "app.py", "src/acme/run.py", "src/acme/old.py"
+    commit(repo, {retired: "def apply(): return 1\n", absolute: "from acme.old import apply\napply()\n",
+                  relative: "from . import (\n    old as api,\n)\napi.apply()\n"})
+    git(repo, "switch", "-qc", "topic")
+    git(repo, "rm", retired)
+    head = commit(repo, {})
+    captured = []
+
+    def interrupt(_repo, _env, plan, *_args, **_kwargs):
+        captured.extend((unit.path, unit.key) for unit in plan.units)
+        raise KeyboardInterrupt
+
+    policy = affected_callers.ABSOLUTE_IMPORT_POLICY
+    with monkeypatch.context() as patch, pytest.raises(KeyboardInterrupt):
+        patch.setattr(planning, "AFFECTED_CALLER_POLICY", policy)
+        patch.setattr(service.engine, "run", interrupt)
+        review_commits(repo, base="main", connection=connection, get_credentials=dict)
+
+    with History(repo) as history:
+        run_id = history.list()[0]["id"]
+        assert json.loads(history.row(run_id)["plan"])["affected_caller_policy"] == policy
+
+    commit(repo, {absolute: "fixed = True\n"})
+    report = review_local(repo, connection=connection, get_credentials=dict, resume=run_id)
+    assert report["status"] == "completed" and report["head_sha"] == head
+    assert report["affected_callers"]["policy"] == policy
+    site, = report["affected_callers"]["sites"]
+    assert site["path"] == absolute
+    assert [(site["path"], site["unit_key"])] == captured
+
+
 def test_partial_caller_discovery_cannot_baseline_an_identical_tree(deletion_repo, provider, connection, monkeypatch):
     repo = deletion_repo
     kwargs = {"base": "main", "connection": connection, "overrides": {"skip_unchanged": True}}

@@ -81,9 +81,14 @@ def read_source(repo, env, sha, path, stopped=lambda: False, *, reject_replaceme
     match = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40})\s+(\d+)\t([^\0]+)\0\n?", entry)
     if not match or match[4] != path:
         raise ValueError("Source is missing or is not a regular file at the pinned revision.")
-    if int(match[3]) > 20_000_000:
+    return read_pinned_blob(repo, env, match[2], int(match[3]), stopped, reject_replacement=reject_replacement)
+
+
+def read_pinned_blob(repo, env, blob_sha, size, stopped, *, reject_replacement=False):
+    """Read the blob from a previously validated regular-file tree entry."""
+    if size > 20_000_000:
         raise ValueError("Source exceeds the 20 MB read limit.")
-    content = git(repo, env, "cat-file", "blob", match[2], stopped=stopped, strict_utf8=True)
+    content = git(repo, env, "cat-file", "blob", blob_sha, stopped=stopped, strict_utf8=True)
     if "\x00" in content or (reject_replacement and "\ufffd" in content):
         raise ValueError("Required source is binary or is not UTF-8 text.")
     return content

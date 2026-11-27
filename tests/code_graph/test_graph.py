@@ -110,10 +110,17 @@ def test_enrichment_uses_same_revision_bounded_one_hop_imports(tmp_path, monkeyp
     commit(tmp_path, {"app.js": 'import { value } from "./dep.js";\nconsole.log(value);\n',
                       "dep.js": "export const value = 1;\n", "README.md": "text\n"})
     seen = []
+    scans = []
+
+    class CountedImports(list):
+        def __iter__(self):
+            scans.append(1)
+            return super().__iter__()
 
     def extract(request, **kwargs):
         seen.append(request)
-        return validate_result(request, parsed(request))
+        result = validate_result(request, parsed(request))
+        return result.model_copy(update={"imports": CountedImports(result.imports)})
 
     monkeypatch.setattr(transport, "extract", extract)
     with snapshots.snapshot(tmp_path, mode="all") as value:
@@ -125,6 +132,7 @@ def test_enrichment_uses_same_revision_bounded_one_hop_imports(tmp_path, monkeyp
         assert graph["app.js"]["sources"][0]["path"] == "dep.js"
         assert graph["app.js"]["commit_sha"] == value.head_sha
         assert graph["dep.js"]["sources"][0]["path"] == "app.js"
+        assert len(scans) == 1
         assert diagnostics["status"] == "ready"
         assert diagnostics["extractor_version"] == seen[0].extractor_version == version
         assert seen[0].commit_sha == value.head_sha

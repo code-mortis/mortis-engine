@@ -10,9 +10,10 @@ from pathlib import PurePosixPath
 from . import source, source_lines
 from .errors import ReviewStopped
 
-POLICY = "affected-callers/v4"
+POLICY = "affected-callers/v5"
+ABSOLUTE_IMPORT_POLICY = "affected-callers/v4"
 LEGACY_TEXT_POLICIES = (None, "affected-callers/v1", "affected-callers/v2")
-LEGACY_POLICIES = (*LEGACY_TEXT_POLICIES, "affected-callers/v3")
+LEGACY_POLICIES = (*LEGACY_TEXT_POLICIES, "affected-callers/v3", ABSOLUTE_IMPORT_POLICY)
 MAX_TRIGGERS = 64
 MAX_FILES = 512
 MAX_INVENTORY_ENTRIES = 4096
@@ -54,20 +55,25 @@ def _spellings(path):
             for spelling in (name, name.replace("/", "."), name.replace("/", "::"), PurePosixPath(name).name)}
 
 
-def _src_module(path):
+def _python_modules(path, policy):
     file = PurePosixPath(path)
-    if len(file.parts) < 3 or file.parts[0] != "src" or file.suffix not in _PYTHON_SUFFIXES:
-        return None
-    parts = file.with_suffix("").parts[1:]
+    if policy not in (POLICY, ABSOLUTE_IMPORT_POLICY) or file.suffix not in _PYTHON_SUFFIXES:
+        return set()
+    parts = file.with_suffix("").parts
     if file.stem == "__init__":
         parts = parts[:-1]
-    if parts and all(part.isidentifier() for part in parts):
-        return ".".join(parts)
-    return None
+    # Tuple keys retain the repository path for relative imports, including the src/ prefix.
+    modules = {parts} if policy == POLICY else set()
+    if len(file.parts) >= 3 and parts[0] == "src" and all(part.isidentifier() for part in parts[1:]):
+        modules.add(".".join(parts[1:]))
+    return modules
 
 
-def _src_imports(path, text, modules, stopped):
-    if not modules or PurePosixPath(path).suffix not in _PYTHON_SUFFIXES or "import" not in text:
+def _python_imports(path, text, modules, stopped, *, relative):
+    if not modules or "import" not in text:
+        return {}
+    caller = PurePosixPath(path)
+    if caller.suffix not in _PYTHON_SUFFIXES:
         return {}
     # Callers pass only source blobs already admitted by MAX_FILE_BYTES and MAX_BYTES.
     try:
@@ -76,28 +82,50 @@ def _src_imports(path, text, modules, stopped):
             tree = ast.parse(text)
     except (SyntaxError, ValueError, RecursionError):
         return None
-    git_lines = [0]
+    git_lines = [(0, 0)]
     has_cr = "\r" in text
     if has_cr:
+        start = 0
         for ending in re.finditer(r"\r\n|[\r\n]", text):
-            git_lines.append(git_lines[-1] + ending[0].endswith("\n"))
+            index, offset = git_lines[-1]
+            if ending[0].endswith("\n"):
+                git_lines.append((index + 1, 0))
+            else:
+                git_lines.append((index, offset + len(text[start:ending.end()].encode())))
+            start = ending.end()
     imports = defaultdict(list)
 
-    def record(spelling, line, imported=(), qualifier=None):
-        if spelling in modules:
-            index = git_lines[line - 1] if has_cr else line - 1
-            imports[index].append((spelling, imported, qualifier))
+    def position(line, column=0):
+        index, offset = git_lines[line - 1] if has_cr else (line - 1, 0)
+        return index, offset + column
 
+    def record(spelling, line, imported=(), qualifier=None, aliases=()):
+        if spelling in modules:
+            index, _ = position(line)
+            alias_positions = tuple(position(name.lineno, name.col_offset) for name in aliases)
+            imports[index].append((spelling, imported, qualifier, alias_positions))
+
+    parent = caller.parent.parts
     for node in ast.walk(tree):
         if stopped():
             raise ReviewStopped("Caller discovery was cancelled.")
         if isinstance(node, ast.Import):
             for name in node.names:
                 record(name.name, name.lineno, qualifier=name.asname or name.name.rsplit(".", 1)[-1])
-        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
-            record(node.module, node.lineno, tuple(name.name for name in node.names if not name.asname))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level and relative and node.level <= len(parent) + 1:
+                package = parent[:len(parent) + 1 - node.level]
+                module = package + tuple(node.module.split(".") if node.module else ())
+            elif not node.level and node.module:
+                module = node.module
+            else:
+                continue
+            record(module, node.lineno,
+                   tuple(name.asname or name.name for name in node.names if node.level or not name.asname),
+                   aliases=(name for name in node.names if node.level and name.asname))
             for name in node.names:
-                record(f"{node.module}.{name.name}", name.lineno, qualifier=name.asname or name.name)
+                imported = (*module, name.name) if node.level else f"{module}.{name.name}"
+                record(imported, name.lineno, qualifier=name.asname or name.name)
     return imports
 
 
@@ -265,18 +293,17 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
             labels[label].add(path)
         for spelling in _module_paths(path):
             old_paths[spelling].add(path)
-        old_module = _src_module(path) if policy == POLICY else None
-        if old_module:
-            old_modules[old_module].add(path)
+        modules = _python_modules(path, policy)
+        for module in modules:
+            old_modules[module].add(path)
         if new_path:
             replacement_names.add(PurePosixPath(new_path).name)
             for label in _spellings(new_path) - old_spellings:
                 replacements[label].add(path)
             for spelling in _module_paths(new_path) - _module_paths(path):
                 replacement_paths[spelling].add(path)
-            new_module = _src_module(new_path) if policy == POLICY else None
-            if new_module and new_module != old_module:
-                replacement_modules[new_module].add(path)
+            for module in _python_modules(new_path, policy) - modules:
+                replacement_modules[module].add(path)
         if text:
             declarations = sorted(set(_DECLARATION.findall(text)))
             if len(declarations) > MAX_SYMBOLS:
@@ -285,7 +312,8 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                 symbols[symbol].add(path)
 
     count = 0
-    src_modules = old_modules.keys() | replacement_modules.keys()
+    python_modules = old_modules.keys() | replacement_modules.keys()
+    relative_imports = policy == POLICY
     for path in sorted(head):
         if not labels:
             break
@@ -303,17 +331,18 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
             continue
         scope["scanned_bytes"] += head[path][1]
         lines = source_lines.split(text, keepends=True)
-        imports = _src_imports(path, text, src_modules, stopped)
+        imports = _python_imports(path, text, python_modules, stopped, relative=relative_imports)
         old_fallback = old_modules if imports is None else None
         replacement_fallback = replacement_modules if imports is None else None
         imports = imports or {}
         direct, rebound_symbols, rebound_modules = [], defaultdict(set), defaultdict(set)
+        migrated_aliases = defaultdict(dict)
         for index, line in enumerate(lines):
             if stopped():
                 raise ReviewStopped("Caller discovery was cancelled.")
             linked = set(_references(line, path, labels, old_paths, file_names, src_modules=old_fallback))
             explicit, migrated = set(), set()
-            for spelling, names, qualifier in imports.get(index, ()):
+            for spelling, names, qualifier, aliases in imports.get(index, ()):
                 explicit.update(old_modules.get(spelling, ()))
                 resolved = replacement_modules.get(spelling, ())
                 if resolved:
@@ -322,6 +351,8 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                         rebound_symbols[name].update(resolved)
                     if qualifier:
                         rebound_modules[qualifier].update(resolved)
+                    for alias_line, column in aliases:
+                        migrated_aliases[alias_line].setdefault(column, set()).update(resolved)
             replacement = set()
             if replacements and _MODULE_BINDING.match(line):
                 replacement = set(_references(line, path, replacements, replacement_paths, replacement_names,
@@ -346,13 +377,21 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                 raise ReviewStopped("Caller discovery was cancelled.")
             linked = direct[index].copy()
             used = set()
+            alias_columns = migrated_aliases.get(index)
+            offset = previous = 0
             for word in _IDENTIFIER.finditer(line):
                 name = word.group()
                 if name not in symbols:
                     continue
                 qualifier = _QUALIFIER.search(line[max(0, word.start() - 128):word.start()])
                 rebound = rebound_modules.get(qualifier[1], set()) if qualifier else rebound_symbols.get(name, set())
-                used.update(symbols[name] - (rebound - existing))
+                references = symbols[name] - (rebound - existing)
+                if alias_columns:
+                    # AST columns count UTF-8 bytes. Skip the declaration, not later uses of its old name.
+                    offset += len(line[previous:word.start()].encode())
+                    previous = word.start()
+                    references.difference_update(alias_columns.get(offset, ()))
+                used.update(references)
             if used - linked:
                 near = set().union(*direct[max(0, index - CONTEXT_LINES):index + CONTEXT_LINES + 1])
                 if used - linked - near and original_refs is None:
@@ -363,13 +402,14 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                         original_refs = existing
                     else:
                         old_text = (read(original) if original else None) or ""
-                        old_imports = _src_imports(original_path, old_text, old_modules, stopped)
+                        old_imports = _python_imports(original_path, old_text, old_modules, stopped,
+                                                      relative=relative_imports)
                         original_refs = {reference for old_line in source_lines.split(old_text)
                                          for reference in _references(old_line, original_path, labels,
                                                                       old_paths, file_names,
                                                                       src_modules=old_modules if old_imports is None else None)}
-                        original_refs.update(reference for row in (old_imports or {}).values() for spelling, _, _ in row
-                                             for reference in old_modules.get(spelling, ()))
+                        original_refs.update(reference for row in (old_imports or {}).values()
+                                             for spelling, _, _, _ in row for reference in old_modules.get(spelling, ()))
                 linked.update(used & (near | (original_refs or set())))
             if not linked:
                 continue

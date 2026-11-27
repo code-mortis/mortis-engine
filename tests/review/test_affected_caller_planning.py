@@ -54,7 +54,7 @@ def test_caller_discovery_omits_undecodable_and_binary_blobs(repo, suffix, unava
     assert scope["limits_reached"] == (["source_unavailable"] if unavailable else [])
 
 
-@pytest.mark.parametrize("policy", [affected_callers.POLICY, "affected-callers/v3"])
+@pytest.mark.parametrize("policy", [affected_callers.POLICY, affected_callers.ABSOLUTE_IMPORT_POLICY, "affected-callers/v3"])
 def test_literal_replacement_character_preserves_saved_plan_scope(repo, policy):
     base = commit(repo, {"tool.sh": "exit 0\n", "caller.py": 'run("tool.sh")\n'})
     git(repo, "rm", "tool.sh")
@@ -136,15 +136,66 @@ def test_caller_ranges_count_only_git_line_separators(repo):
     assert (site["start_line"], site["end_line"]) == (2, 5)
 
 
-def test_multiline_src_import_preserves_git_line_coordinates(repo):
-    module, caller = "src/acme/old.py", "jobs/run.py"
+@pytest.mark.parametrize(("package", "caller"), [("acme", "jobs/run.py"), (".", "src/acme/run.py")])
+def test_multiline_src_import_preserves_git_line_coordinates(repo, package, caller):
+    module = "src/acme/old.py"
     base = commit(repo, {module: "pass\n",
-                         caller: 'label = "left\u2028right"\rvalue = 1\na = 2\nb = 3\nfrom acme import (\n    old,\n)'})
+                         caller: f'label = "left\u2028right"\rvalue = 1\na = 2\nb = 3\nfrom {package} import (\n    old,\n)'})
     git(repo, "rm", module)
     git(repo, "commit", "-qm", "remove module")
     preview = preview_local(repo, mode="commits", base=base)
     site, = preview["affected_callers"]["sites"]
     assert (site["path"], site["start_line"], site["end_line"]) == (caller, 2, 6)
+
+
+@pytest.mark.parametrize(("prefix", "package", "nesting"), [("", ".", ""), ("src/", "..", "nested/")])
+def test_deleted_module_matches_multiline_relative_alias_only_in_its_package(repo, prefix, package, nesting):
+    module, caller = f"{prefix}acme/old.py", f"{prefix}acme/{nesting}run.py"
+    statement = f"from {package} import (\n    old as api,\n)\n\napi.apply()\n"
+    base = commit(repo, {module: "def apply(): return 1\n", caller: statement,
+                         f"{prefix}other/old.py": "def apply(): return 2\n",
+                         f"{prefix}other/{nesting}run.py": statement})
+    git(repo, "rm", module)
+    git(repo, "commit", "-qm", "remove module")
+    preview = preview_local(repo, mode="commits", base=base)
+    scope = preview["affected_callers"]
+    site, = scope["sites"]
+    assert site["path"] == caller and site["triggers"] == [module]
+    assert not scope["limits_reached"]
+
+
+@pytest.mark.parametrize("prefix", ["", "src/"])
+def test_renamed_module_rebinds_multiline_relative_alias(repo, prefix):
+    old, new = f"{prefix}legacy/tool.py", f"{prefix}acme/tool.py"
+    fixed, stale = f"{prefix}acme/fixed.py", f"{prefix}acme/stale.py"
+    original = "from ..legacy import (\n    tool as api,\n)\n\napi.apply()\n"
+    base = commit(repo, {old: "def apply(): return 1\n", fixed: original, stale: original})
+    git(repo, "mv", old, new)
+    commit(repo, {fixed: original.replace("..legacy", ".")})
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert scope["triggers"][0]["new_path"] == new
+    site, = scope["sites"]
+    assert site["path"] == stale and site["triggers"] == [old]
+
+
+@pytest.mark.parametrize("stale_call", ["", "total(1)\n", "; total(1)"])
+def test_rename_distinguishes_relative_symbol_alias_from_stale_use(repo, stale_call):
+    old, new = "legacy/billing.py", "shop/billing.py"
+    stale, updated = "shop/stale.py", "shop/updated.py"
+    original = 'from ..legacy.billing import (\n    total as quote)\nquote(1)\n'
+    module = "def total(amount): return amount\n\ndef quote(amount): return amount\n"
+    base = commit(repo, {old: module, stale: original, updated: original})
+    git(repo, "mv", old, new)
+    migrated = original.replace("..legacy.billing", ".billing")
+    if stale_call.startswith(";"):
+        migrated = migrated.replace("quote)\n", f"quote){stale_call}\n")
+    else:
+        migrated += stale_call
+    commit(repo, {updated: migrated})
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert scope["triggers"][0]["new_path"] == new
+    assert {site["path"] for site in scope["sites"]} == ({stale, updated} if stale_call else {stale})
+    assert all(site["triggers"] == [old] for site in scope["sites"])
 
 
 def test_rename_updates_relative_import_of_same_basename(repo):

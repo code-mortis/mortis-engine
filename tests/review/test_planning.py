@@ -31,6 +31,24 @@ def test_pinned_review_ignores_worktree_and_head_config(repo):
         assert settings.load(isolated, env, base)["language"] == "Spanish"
 
 
+def test_planner_reads_a_selected_blob_with_one_tree_lookup(repo, monkeypatch):
+    commit(repo, {"app.py": "value = 1\n"})
+    git(repo, "checkout", "-qb", "feature")
+    head = commit(repo, {"app.py": "value = 2\n"})
+    lookups = []
+    original_git = source.git
+
+    def record(directory, env, *args, **kwargs):
+        if "ls-tree" in args and args[-3:] == (head, "--", "app.py"):
+            lookups.append(args)
+        return original_git(directory, env, *args, **kwargs)
+
+    monkeypatch.setattr(source, "git", record)
+    unit, = plan(repo).units
+    assert unit.source == "value = 2\n"
+    assert len(lookups) == 1
+
+
 def test_rule_references_are_trusted_base_and_excluded_paths_stay_blocked(repo):
     config = '[review.rules]\ninclude = ["**/*"]\n[[review.rules.rules]]\npath="**/*.py"\nrule="review-policy.txt"\n'
     commit(repo, {"app.py": "x=1\n", "review-policy.txt": "Check arithmetic carefully.\n", "mortis.toml": config})

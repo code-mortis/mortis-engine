@@ -3,6 +3,7 @@
 import ast
 import warnings
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from . import affected_callers, planning, source
@@ -13,7 +14,22 @@ def is_python(path):
     return PurePosixPath(path).suffix in {".py", ".pyi"}
 
 
-def _required_signatures(tree):
+@dataclass
+class _Signature:
+    required_shape: tuple
+    optional_keywords: set[str]
+    optional_positional: tuple[str | None, ...]
+
+    def requires_recheck(self, new):
+        # Preserve the slots an existing caller could fill positionally.
+        return (self.required_shape != new.required_shape
+                or not self.optional_keywords <= new.optional_keywords
+                or len(self.optional_positional) > len(new.optional_positional)
+                or any(old is not None and old != current
+                       for old, current in zip(self.optional_positional, new.optional_positional, strict=False)))
+
+
+def _signatures(tree):
     signatures = defaultdict(list)
     pending = [tree]
     while pending:
@@ -25,10 +41,23 @@ def _required_signatures(tree):
             keywords = tuple(sorted(arg.arg for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
                                     if default is None))
             names = tuple(arg.arg for arg in args.args[:required - positional])
-            signatures[node.name].append((positional, names, keywords, args.vararg is not None, args.kwarg is not None))
+            required_shape = (positional, names, keywords, args.vararg is not None, args.kwarg is not None)
+            optional_pos_or_kw = tuple(arg.arg for arg in args.args[required - positional:])
+            optional_slots = (None,) * (len(args.posonlyargs) - positional) + optional_pos_or_kw
+            optional_names = set(optional_pos_or_kw)
+            optional_names.update(arg.arg for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True)
+                                  if default is not None)
+            signatures[node.name].append(_Signature(required_shape, optional_names, optional_slots))
         elif not isinstance(node, (ast.ClassDef, ast.expr)):
             pending.extend(reversed(list(ast.iter_child_nodes(node))))
     return signatures
+
+
+def _needs_recheck(before, after):
+    # A function may have several declarations, for example in conditional branches.
+    if len(before) != len(after):
+        return True
+    return any(old.requires_recheck(new) for old, new in zip(before, after, strict=True))
 
 
 def _imports_changed_function(tree, path, changed, package_prefixes, stopped):
@@ -52,7 +81,7 @@ def _imports_changed_function(tree, path, changed, package_prefixes, stopped):
 
 
 def affected(repo, env, previous_head, head, modified, candidates, stopped):
-    """Identify importers affected by changes to required or variadic parameters.
+    """Identify importers affected by a removed function or changed calling convention.
 
     If bounded inspection fails, the caller falls back to a full review.
     """
@@ -83,9 +112,9 @@ def affected(repo, env, previous_head, head, modified, candidates, stopped):
         file = PurePosixPath(path)
         is_package = file.stem == "__init__"
         module = file.parent.parts if is_package else file.with_suffix("").parts
-        before = _required_signatures(parse(previous_head, path))
-        after = _required_signatures(parse(head, path))
-        functions = {name for name in before.keys() & after.keys() if before[name] != after[name]}
+        before = _signatures(parse(previous_head, path))
+        after = _signatures(parse(head, path))
+        functions = {name for name, prior in before.items() if _needs_recheck(prior, after.get(name, ()))}
         if not functions:
             continue
         if not module or not module[-1].isidentifier():
