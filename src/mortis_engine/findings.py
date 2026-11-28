@@ -97,6 +97,7 @@ def _scan_observation(finding):
 
 def _reconcile_scan_observations(history, previous_runs, run_id, report, scope):
     by_id, observed_by_run, retry_reports = {}, {}, {}
+    selected_run = {}
     for parent in previous_runs:
         row = history.row(parent, "scan")
         if row["scope"] != scope:
@@ -111,7 +112,9 @@ def _reconcile_scan_observations(history, previous_runs, run_id, report, scope):
                 continue
             signature = signatures[identity] = _scan_observation(finding)
             current = by_id.get(identity)
-            if current and signature != _scan_observation(current) and identity not in definitive:
+            if current and identity not in definitive and (
+                    signature != _scan_observation(current)
+                    or finding.get("outcome") == "not_observed" and current.get("outcome") in {"present", "fixed"}):
                 if predecessors is None:
                     plan = json.loads(row["plan"])
                     parents = set(plan.get("previous", [])) & observed_by_run.keys()
@@ -125,9 +128,10 @@ def _reconcile_scan_observations(history, previous_runs, run_id, report, scope):
                             retry_observations.setdefault(confirmed["id"], _scan_observation(confirmed))
                     predecessors.append(retry_observations)
                 # A carry-forward from a shared predecessor cannot undo a sibling's observation.
-                if any(prior.get(identity) == signature for prior in predecessors):
+                if selected_run[identity] not in parents and any(prior.get(identity) == signature for prior in predecessors):
                     continue
             by_id[identity] = finding
+            selected_run[identity] = parent
         observed_by_run[parent] = signatures
     return by_id
 

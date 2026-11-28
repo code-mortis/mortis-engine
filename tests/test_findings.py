@@ -9,6 +9,7 @@ import pytest
 from mortis_engine import findings, operations
 from mortis_engine.cli import main
 from mortis_engine.history import History, encode
+from mortis_engine.security_scans.service import observe
 
 
 @pytest.fixture
@@ -228,6 +229,29 @@ def test_scan_history_keeps_fresh_evidence_across_forked_predecessors(repo, late
 
     current = {row["id"]: row for row in findings.list_findings(repo, run_id=second)["findings"]}
     assert current["recurring"]["state"] == "open" and current["fixed"]["state"] == expected["state"]
+
+
+@pytest.mark.parametrize("reobserved", [False, True], ids=["verified", "reobserved"])
+def test_failed_sibling_preserves_same_revision_observation(repo, reobserved):
+    evidence = {"kind": "code", "source_sha": "a" * 40, "fingerprint": "f" * 64}
+    original = observe(evidence)
+    check = {"verdict": "still_present", "explanation": "Confirmed in the current source."}
+    fresh = observe(evidence, original) if reobserved else {**original, "fix_verification": check}
+    verified = [] if reobserved else [{"finding_id": original["id"], **check}]
+
+    with History(repo) as history:
+        parent = history.begin("scan", "main", {})
+        history.finish(parent, {"status": "completed", "findings": [original]})
+        first = history.begin("scan", "main", {"previous": [parent]})
+        sibling = history.begin("scan", "main", {"previous": [parent]})
+        history.finish(first, {"status": "completed", "findings": [fresh], "verifications": verified})
+        history.finish(sibling, {"status": "failed", "findings": [{**original, "outcome": "not_observed"}]})
+        assert findings.scan_history(history, sibling)["findings"] == [fresh]
+
+        next_run = history.begin("scan", "main", {"previous": [parent, first, sibling]})
+        carried = {**fresh, "outcome": "not_observed"}
+        history.finish(next_run, {"status": "failed", "findings": [carried]})
+        assert findings.scan_history(history, next_run)["findings"] == [carried]
 
 
 @pytest.mark.parametrize("legacy", [False, True])
