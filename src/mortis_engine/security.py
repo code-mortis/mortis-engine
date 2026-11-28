@@ -1,8 +1,11 @@
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import socket
+from collections.abc import Iterable
+from heapq import merge
 from urllib.parse import urlsplit
 
 
@@ -54,13 +57,46 @@ def endpoint_addresses(url: str) -> list[str]:
     return resolved
 
 
-def clean_text(value: str, secrets: tuple[str, ...] = ()) -> str:
-    for secret in secrets:
-        if secret:
-            value = value.replace(secret, "[redacted]")
-    value = re.sub(r"(?i)(bearer\s+)[\w.~+/=\-]+", r"\1[redacted]", value)
-    value = re.sub(r"cm_pat_[A-Za-z0-9_-]{43}", "[redacted]", value)
-    value = re.sub(
-        r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b", "[redacted]", value
-    )
-    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", value)
+_BEARER_TOKEN = re.compile(r"(?i)bearer\s+([\w.~+/=\-]+)")
+_PREFIXED_TOKEN = re.compile(
+    r"cm_pat_[A-Za-z0-9_-]{43}|\b(?:gh[pour]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b"
+)
+# Findings can be serialized before sanitization, with an escaped newline or tab before the token.
+_INSTALLATION_TOKEN = re.compile(r"(?:\b|(?<=\\[nrt]))ghs_[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){0,2}")
+
+
+def _literal_spans(text, lines, separator):
+    literal = separator.join(lines)
+    start = text.find(literal)
+    while start >= 0:
+        end = start + len(literal)
+        for line in lines:
+            yield start, start + len(line)
+            start += len(line) + len(separator)
+        start = text.find(literal, end)
+
+
+def clean_text(value: str, secrets: Iterable[str] = (), *, preserve_lines: bool = False) -> str:
+    # Match the original text so a shorter credential cannot split an installation token
+    # and masking a token cannot split a longer stored credential.
+    spans = [
+        (match.span(1) for match in _BEARER_TOKEN.finditer(value)),
+        (match.span() for match in _PREFIXED_TOKEN.finditer(value)),
+        (match.span() for match in _INSTALLATION_TOKEN.finditer(value)),
+    ]
+    for secret in set(filter(None, secrets)):
+        lines = secret.split("\n") if preserve_lines else [secret]
+        spans.append(_literal_spans(value, lines, "\n"))
+        if preserve_lines:
+            escaped = [json.dumps(line)[1:-1] for line in lines]
+            if escaped != lines or len(lines) > 1:
+                spans.append(_literal_spans(value, escaped, r"\n"))
+
+    parts = []
+    end = 0
+    for start, stop in merge(*spans):
+        if start >= end:
+            parts.extend((value[end:start], "[redacted]"))
+        end = max(end, stop)
+    parts.append(value[end:])
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", "".join(parts))

@@ -1,6 +1,5 @@
 """Redacted model context and stable, exact-revision citation identities."""
 
-import json
 from collections.abc import Mapping, Sequence, Set
 
 from mortis_engine.security import clean_text, digest
@@ -31,11 +30,8 @@ def sanitize(value, credentials, stopped=lambda: False):
                 from mortis_engine.security_scans.engine import redact_secrets
 
                 text = redact_secrets(text, values, rules, stopped, key=redaction_key)
-            for secret in values:
-                replacement = "\n".join("[redacted]" for _ in secret.split("\n"))
-                text = text.replace(secret, replacement)
-                text = text.replace(json.dumps(secret)[1:-1], json.dumps(replacement)[1:-1])
-            text = clean_text(text)
+            else:
+                text = clean_text(text, values, preserve_lines=True)
             if structural and text != item:
                 raise ValueError("Credential material in a structural identifier; request withheld")
             return text
