@@ -363,7 +363,9 @@ def empty_npm_inventory(item, path, unavailable):
             raise ValueError("npm inventory requires bounded pinned source")
         return json.loads(data.decode("utf-8"), parse_constant=reject_constant, object_pairs_hook=unique_properties)
 
-    item.stopped()
+    stopped = getattr(item, "stopped", None)
+    if stopped is not None and stopped():
+        raise ReviewStopped("Security inventory check cancelled.")
     try:
         lock, manifest = read(path), read(manifest_path)
     except (OSError, ValueError, RecursionError):
@@ -433,12 +435,14 @@ def normalize_trivy(item, report):
             continue
         path = target_path(item, row["Target"])
         target_class, target_type = row.get("Class"), row.get("Type")
-        if path.rsplit("/", 1)[-1] == "package-lock.json" and (
-                (target_class, target_type) != ("lang-pkgs", "npm") or "Packages" in row or row.get("Vulnerabilities")):
-            npm_fallback_blocked.add(path)
+        raw_packages = row.get("Packages")
+        if path.rsplit("/", 1)[-1] == "package-lock.json":
+            omitted_npm_inventory = (target_class, target_type) == ("lang-pkgs", "npm") and "Packages" not in row
+            unrelated_check = target_class in {"secret", "config"} and not raw_packages
+            if row.get("Vulnerabilities") or not (omitted_npm_inventory or unrelated_check):
+                npm_fallback_blocked.add(path)
         if target_class not in {"lang-pkgs", "config", "secret", None}:
             problems.append(f"Unsupported scanner result class for {path}")
-        raw_packages = row.get("Packages")
         if raw_packages is not None and not isinstance(raw_packages, list):
             raise ValueError("Invalid Trivy package inventory")
         packages = [{"name": package["Name"], "version": package["Version"],

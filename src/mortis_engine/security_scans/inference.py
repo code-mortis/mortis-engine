@@ -188,11 +188,10 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
         unavailable = []
         added_source = False
         for path in dict.fromkeys(requested):
+            if path not in context["available_paths"]:
+                unavailable.append(path)
+                continue
             if modern:
-                if path not in context["available_paths"]:
-                    unavailable.append(path)
-                    unavailable_sources.add(("current", path))
-                    continue
                 if path not in context["sources"]["current"]:
                     if len(context["sources"]["current"]) >= 100:
                         raise ValueError("Security source requests reached the 100-file evidence limit.")
@@ -217,10 +216,8 @@ async def ask(item, session, task, context, key, options, *, prepared=False, pin
                 continue
 
             # Keep legacy saved-run feedback and request construction byte-for-byte stable.
-            if path not in context["available_paths"] or path in context["sources"]["current"]:
+            if path in context["sources"]["current"]:
                 unavailable.append(path)
-                if path not in context["available_paths"]:
-                    unavailable_sources.add(("current", path))
                 continue
             if len(context["sources"]["current"]) >= 100:
                 raise ValueError("Security source requests reached the 100-file evidence limit.")

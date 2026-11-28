@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mortis_engine.security_scans import engine, service
+from mortis_engine.security_scans import engine, scanner, service
 
 
 def normalize(paths, *results):
@@ -139,15 +139,46 @@ def test_empty_npm_inventory_requires_both_valid_bounded_unambiguous_files(tmp_p
 
 
 @pytest.mark.parametrize("row", [
-    {"Target": "nested/package-lock.json", "Class": "secret"},
+    {"Target": "nested/package-lock.json", "Class": "secret", "Packages": [{"Name": "pkg", "Version": "1"}]},
     target("nested/package-lock.json", "npm", Packages=None),
     target("nested/package-lock.json", "pip"),
 ])
-def test_empty_npm_fallback_requires_absent_or_matching_scanner_row(tmp_path, row):
+def test_conflicting_scanner_inventory_blocks_empty_npm_fallback(tmp_path, row):
     result = engine.normalize_trivy(npm_snapshot(tmp_path), {"Results": [row]})
 
     assert result["dependency_targets"] == {}
     assert len(result["dependency_problems"]) == 2
+
+
+@pytest.mark.parametrize("row", [{"Class": "secret"}, {"Class": "config", "Packages": []}])
+def test_empty_npm_fallback_ignores_unrelated_scanner_rows(tmp_path, row):
+    path = "nested/package-lock.json"
+    result = engine.normalize_trivy(npm_snapshot(tmp_path), {"Results": [{"Target": path, **row}]})
+
+    assert result["dependency_targets"] == {path: {"npm": []}}
+    assert result["problems"] == []
+
+
+def test_empty_npm_fallback_accepts_no_cancellation_callback(tmp_path):
+    item = npm_snapshot(tmp_path)
+    item.stopped = None
+    assert engine.normalize_trivy(item, {})["problems"] == []
+
+
+def test_trivy_propagates_empty_npm_inventory_cancellation(tmp_path, monkeypatch):
+    item = npm_snapshot(tmp_path)
+    item.root = tmp_path
+    item.stopped = lambda: True
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(scanner.shutil, "which", lambda *args, **kwargs: "/test/trivy")
+    monkeypatch.setattr(scanner, "offline_prefix", lambda: [])
+
+    def command(args, *unused):
+        return 0, scanner.VERSION if "--version" in args else '{"SchemaVersion": 2}', ""
+
+    monkeypatch.setattr(scanner, "command", command)
+    with pytest.raises(engine.ReviewStopped, match="cancelled"):
+        scanner.trivy(item)
 
 
 def test_empty_npm_fallback_verifies_snapshot_hash_before_using_it(tmp_path):

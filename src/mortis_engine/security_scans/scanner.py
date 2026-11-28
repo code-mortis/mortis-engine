@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from mortis_engine.review.errors import ReviewStopped
 from mortis_engine.security import digest
 
 from .engine import normalize_trivy
@@ -156,6 +157,8 @@ def trivy(item, timeout=300, stopped=lambda: False):
         if not isinstance(data, dict) or data.get("SchemaVersion") != 2 or not isinstance(data.get("Results", []), list):
             raise ValueError("Unsupported Trivy report schema.")
         result = normalize_trivy(item, data)
+    except ReviewStopped:
+        raise
     except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
         raise ValueError("Trivy returned an unsupported security report. AI analysis was withheld.") from exc
     result["metadata"] = {"version": VERSION, "database": metadata, "database_fresh": fresh,

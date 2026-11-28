@@ -35,6 +35,8 @@ class Item:
 
     def source(self, path, sha=None):
         self.reads.append((path, sha))
+        if path not in self.sources:
+            raise ValueError("Fixture source is unavailable.")
         return self.sources[path]
 
     @staticmethod
@@ -128,20 +130,20 @@ def test_legacy_analysis_keeps_small_corpus_prefill(tmp_path):
 
 
 @pytest.mark.parametrize("marker", [policy.SCAN_POLICY, None])
-def test_unavailable_required_source_marks_analysis_incomplete_for_both_policies(tmp_path, marker):
+@pytest.mark.parametrize("corrected", [False, True])
+def test_unlisted_source_request_allows_analysis_to_recover(tmp_path, marker, corrected):
     item = Item(tmp_path, names=("assigned.py",))
-    session = Session([
-        {"findings": [], "required_paths": ["src/absent.py"]},
-        empty_analysis,
-    ])
+    request = {"findings": [], "required_paths": ["src/absent.py"]}
+    session = Session([request, empty_analysis] if corrected else [request] * 4)
 
     result, _paths, complete = asyncio.run(
         ask(item, session, "analysis", analysis_context(item), "analysis:assigned", options(marker)))
 
     assert result["findings"] == []
-    assert complete is False
-    assert len(session.calls) == 2
+    assert complete is corrected
+    assert len(session.calls) == (2 if corrected else 4)
     assert session.calls[1]["context"]["validation_feedback"]["required_paths"] == ["src/absent.py"]
+    assert item.reads == []
 
 
 def test_v2_duplicate_source_request_does_not_count_as_missing(tmp_path):
@@ -267,9 +269,10 @@ def test_legacy_policy_does_not_add_output_limit_recovery_request(tmp_path):
 
 def test_incomplete_evidence_forces_cached_definitive_assessment_to_uncertain(tmp_path):
     item = Item(tmp_path, names=("assigned.py",))
+    item.inventory["src/support.py"] = {"code": False}
     session = Session([
         {"verdict": "uncertain", "finding_id": None, "explanation": "Need a caller.",
-         "evidence": [], "required_paths": ["src/absent.py"]},
+         "evidence": [], "required_paths": ["src/support.py"]},
         CachedResponse({"verdict": "confirmed", "finding_id": None, "explanation": "Confirmed.",
                         "evidence": [{"revision": "current", "path": "src/assigned.py",
                                       "start_line": 1, "end_line": 2,
@@ -287,9 +290,10 @@ def test_incomplete_evidence_forces_cached_definitive_assessment_to_uncertain(tm
 
 def test_incomplete_evidence_forces_cached_fixed_verification_to_uncertain(tmp_path):
     item = Item(tmp_path, names=("assigned.py",))
+    item.inventory["src/support.py"] = {"code": False}
     session = Session([
         {"verdict": "uncertain", "explanation": "Need another path.", "change_explanation": "",
-         "original_issue_present": False, "evidence": [], "required_paths": ["src/absent.py"]},
+         "original_issue_present": False, "evidence": [], "required_paths": ["src/support.py"]},
         CachedResponse({"verdict": "fixed", "explanation": "Fixed.", "change_explanation": "Guard added.",
                         "original_issue_present": True,
                         "evidence": [{"revision": "original", "path": "src/assigned.py",
@@ -310,11 +314,14 @@ def test_incomplete_evidence_forces_cached_fixed_verification_to_uncertain(tmp_p
     assert complete is False
 
 
-def test_v2_verification_can_request_original_source_when_current_is_already_supplied(tmp_path):
+@pytest.mark.parametrize("initial_request", [[], ["src/absent.py"]])
+def test_v2_verification_can_request_original_source_when_current_is_already_supplied(tmp_path, initial_request):
     item = Item(tmp_path, names=("assigned.py",))
-    session = Session([
-        {"verdict": "uncertain", "explanation": "Need original source.", "change_explanation": "",
-         "original_issue_present": False, "evidence": [], "required_paths": ["src/assigned.py"]},
+    request = {"verdict": "uncertain", "explanation": "Need original source.", "change_explanation": "",
+               "original_issue_present": False, "evidence": []}
+    responses = [{**request, "required_paths": initial_request}] if initial_request else []
+    session = Session([*responses,
+        {**request, "required_paths": ["src/assigned.py"]},
         {"verdict": "fixed", "explanation": "The original trigger is gone.",
          "change_explanation": "The guard blocks it.", "original_issue_present": True,
          "evidence": [{"source_id": "source_1", "start_line": 1, "end_line": 2},
