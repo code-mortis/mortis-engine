@@ -22,6 +22,7 @@ from mortis_engine.security import digest
 from . import advisories, engine
 from .contracts import SecurityAnalysis, SecurityAssessment, SecurityProposal
 from .inference import ask
+from .policy import MAX_SCANNER_RULE_ID_CHARS, MAX_SCANNER_RULES, SCAN_POLICY
 from .scanner import identity_key, trivy
 
 
@@ -79,17 +80,39 @@ def deterministic_fix(item, old, result, *, advisory_lookup=None):
         if any(raw in item.read(candidate) for candidate in item.inventory):
             return {"verdict": "still_present", "explanation": "The original credential remains in repository source."}
     elif evidence["kind"] == "dependency":
-        if current_path in item.inventory and current_path not in result["targets"]:
-            return {"verdict": "uncertain", "explanation": "The affected dependency target was not successfully analyzed."}
-        packages = [p for row in result["targets"].values() for p in row["packages"] if p["name"] == evidence["package"]]
+        package = evidence["package"]
+        package_type = evidence.get("package_type") or engine.DEPENDENCY_TARGET_TYPES.get(Path(path).name)
+        ecosystem = engine.dependency_ecosystem(package_type)
+        dependency_targets = result.get("dependency_targets")
+        if dependency_targets is None:
+            # Older flat scanner adapters can establish a version only at the same target.
+            row = result["targets"].get(current_path, {})
+            current_type = row.get("type") or engine.DEPENDENCY_TARGET_TYPES.get(Path(current_path).name)
+            compatible = (row.get("class") in {None, "lang-pkgs"}
+                          and (not current_type or not ecosystem
+                               or engine.dependency_ecosystem(current_type) == ecosystem))
+            packages = [p for p in row.get("packages", []) if p["name"] == package and p["version"]] if compatible else []
+            covered = bool(packages)
+        else:
+            project = Path(current_path).parent
+            packages = [p for target, rows in dependency_targets.items() if Path(target).parent == project
+                        for target_type, entries in rows.items()
+                        if engine.dependency_ecosystem(target_type) == ecosystem
+                        for p in entries if p["name"] == package]
+            covered = ecosystem is not None and (current_path not in item.inventory or any(
+                engine.dependency_ecosystem(target_type) == ecosystem
+                for target_type in dependency_targets.get(current_path, {})))
         if any(p["version"] == evidence["installed_version"] for p in packages):
             return {"verdict": "still_present", "explanation": "The original affected dependency version remains present."}
+        if not covered or result.get("dependency_problems"):
+            return {"verdict": "uncertain", "explanation": "The affected dependency inventory could not be established."}
         if packages and any(not safe_dependency_version(p["version"], evidence.get("fixed_version", "")) for p in packages):
             if not evidence.get("fixed_version") and advisory_lookup:
                 advisory = advisory_lookup(evidence, packages)
             if not advisory:
                 return {"verdict": "uncertain", "explanation": "Current package versions are not established safe versions for the retained advisory."}
-        if not result.get("metadata", {}).get("database_fresh"):
+        metadata = result.get("metadata", {})
+        if not metadata.get("database_fresh") or "vuln" not in metadata.get("scanners", ("vuln",)):
             return {"verdict": "uncertain", "explanation": "A fresh advisory database is required to establish dependency removal."}
     elif evidence["kind"] == "infrastructure":
         checks = result["targets"].get(current_path, {}).get("checks", [])
@@ -225,9 +248,43 @@ def secret_rules(report):
     return rules
 
 
+def scanner_hints(item, findings):
+    rules, checks = {}, {}
+    for finding in findings:
+        path, rule = finding["path"], finding.get("rule_id")
+        if (not item.inventory.get(path, {}).get("code") or not isinstance(rule, str)
+                or len(rule) > MAX_SCANNER_RULE_ID_CHARS or not re.fullmatch(r"[A-Za-z0-9_.:-]+", rule)
+                or item.redact(rule) != rule):
+            continue
+        key = digest(path)
+        rules.setdefault(key, set()).add(rule)
+        # Only normalized configuration check titles describe an existing condition.
+        # Never include matched source, secret metadata, or package advisory text.
+        title = finding.get("title")
+        if (finding.get("kind") != "infrastructure" or not isinstance(title, str)
+                or not title.isprintable() or not 0 < len(title.encode()) <= 160):
+            continue
+        start, end = finding.get("start_line"), finding.get("end_line")
+        if start is not None or end is not None:
+            if type(start) is not int or type(end) is not int or not 1 <= start <= end <= item.inventory[path]["lines"]:
+                continue
+        checks.setdefault(key, set()).add((rule, item.redact(title), start or 0, end or 0))
+    hints = {}
+    for key, ids in rules.items():
+        selected = sorted(ids)[:MAX_SCANNER_RULES]
+        hints[key] = {"scanner_rules": selected}
+        rows = [r for r in sorted(checks.get(key, ())) if r[0] in selected][:MAX_SCANNER_RULES]
+        if rows:
+            hints[key]["reported_checks"] = [
+                {"rule": rule, "title": title, **({"start_line": start, "end_line": end} if start else {})}
+                for rule, title, start, end in rows]
+    return hints
+
+
 async def scan(repository, *, ref="HEAD", session, options=None, previous=None, scanner=None,
-               progress=lambda value: None, continuous=True):
+               progress=lambda value: None, continuous=True, scan_policy=SCAN_POLICY):
     options = ScanOptions.model_validate(options or {}).model_dump()
+    inference_options = {**options, "_scan_policy": scan_policy}
     deadline = time.monotonic() + options["timeout_seconds"] if options["timeout_seconds"] else None
     legacy_completed = {}
     if not continuous:
@@ -334,6 +391,10 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             observation = observe(finding, old)
             observed.add(observation["id"])
             findings.append(observation)
+        hints = scanner_hints(item, result["findings"]) if scan_policy == SCAN_POLICY else {}
+        saved_history = getattr(session, "history", None)
+        if scan_policy == SCAN_POLICY and saved_history:
+            hints = saved_history.pin_scan_rules(session.run_id, hints)
         scanner_findings = len({finding["id"] for finding in findings})
         code_paths = [path for path, row in item.inventory.items() if row["code"]]
         proposals_by_path = {}
@@ -363,7 +424,10 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             try:
                 context = {"assigned_path": path, "head_sha": sha, "diff": "",
                            "sources": {"current": {path: item.source(path)}}}
-                value, context_paths, complete = await ask(item, session, "analysis", context, "analysis:" + path, options)
+                if assigned_hints := hints.get(digest(path)):
+                    context.update(assigned_hints)
+                value, context_paths, complete = await ask(item, session, "analysis", context, "analysis:" + path,
+                                                          inference_options)
                 if not continuous:
                     # Recover the original field order after replaying cached JSON.
                     value = SecurityAnalysis.model_validate(value, strict=True).model_dump()
@@ -391,7 +455,6 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
             for index, proposal, _ in remaining}
         dependencies, order = replay_order(session, candidate_ids) if continuous else ({}, {})
         finding_positions, finding_origins, admitted_keys = {}, {}, {}
-        saved_history = getattr(session, "history", None)
         initial_findings = findings.copy()
 
         def current_history():
@@ -431,7 +494,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     if continuous:
                         predecessors = saved["predecessors"] if saved else sorted({
                             finding_origins[old["id"]] for old in context["history"] if old["id"] in finding_origins})
-                    return pin_input(session, candidate_id, "scan", proposal, context, options,
+                    return pin_input(session, candidate_id, "scan", proposal, context, inference_options if scan_policy else options,
                                      f"assessment:{index}", repo, env, head_sha=sha, redaction=redaction,
                                      predecessors=predecessors)
 
@@ -439,9 +502,11 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     return _legacy_assessment_contexts(supplied, (
                         finding_positions.get(old["id"]) for old in context["history"]), legacy_completed)
 
-                assessed, _, _ = await ask(item, session, "assessment", context, f"assessment:{index}", options,
+                assessed, _, complete = await ask(item, session, "assessment", context, f"assessment:{index}", inference_options,
                     prepared=saved is not None, pin=pin if saved_history else None,
                     legacy_contexts=legacy_contexts if legacy_completed else None)
+                if not complete:
+                    raise ValueError("Required source remains unavailable for security assessment.")
                 if not continuous:
                     assessed = SecurityAssessment.model_validate(assessed, strict=True).model_dump()
                 row.update(status="completed", result=assessed)
@@ -519,7 +584,10 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                     current_source = item.current_source(current_path, model_context=True)
                     if current_source is not None:
                         context["sources"]["current"][current_path] = current_source
-                    verdict, _, _ = await ask(item, session, "verification", context, "verification:" + old["id"], options)
+                    verdict, _, complete = await ask(item, session, "verification", context,
+                                                     "verification:" + old["id"], inference_options)
+                    if not complete:
+                        verdict = {"verdict": "uncertain", "explanation": "Required source remains unavailable for fix verification."}
                 else:
                     checking = asyncio.create_task(asyncio.to_thread(deterministic_fix, item, old, result,
                         advisory_lookup=lambda evidence, packages: advisories.dependency_advisory(evidence, packages, item.stopped, advisory_cache)))
@@ -564,7 +632,7 @@ async def scan(repository, *, ref="HEAD", session, options=None, previous=None, 
                 problems.append(f"Fix verification remains uncertain for {old['title']}.")
             findings.append({**old, "fix_verification": verdict, "outcome": {
                 "fixed": "fixed", "still_present": "present", "uncertain": "not_observed"}[verdict["verdict"]]})
-        if not code_paths and not result["targets"]:
+        if not code_paths and not result["targets"] and not result.get("dependency_targets"):
             problems.append("No supported security analysis targets were available.")
         rating = grade_for(row["severity"] for row in findings
             if row.get("state", "open") in {"open", "accepted_risk"}

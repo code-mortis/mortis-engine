@@ -80,6 +80,22 @@ class SecurityAnalysisSelection(SecurityAnalysis):
     findings: list[SecurityProposalSelection] = Field(max_length=100)
 
 
+class SecurityRecoveryProposal(StrictModel):
+    title: str = Field(min_length=1, max_length=120)
+    category: str = Field(min_length=1, max_length=50)
+    severity: Literal["critical", "high", "medium", "low"]
+    trigger: str = Field(min_length=1, max_length=400, description="Root cause and the input or condition that reaches it.")
+    impact: str = Field(min_length=1, max_length=300)
+    remediation: str = Field(min_length=1, max_length=300)
+    verification: str = Field(min_length=1, max_length=300)
+    evidence: list[SecurityEvidenceSelection] = Field(min_length=1, max_length=20)
+
+
+class SecurityAnalysisRecovery(StrictModel):
+    findings: list[SecurityRecoveryProposal] = Field(max_length=100)
+    required_paths: list[SecurityPath] = Field(max_length=10)
+
+
 class SecurityAssessmentSelection(SecurityAssessment):
     evidence: list[SecurityEvidenceSelection] = Field(max_length=20)
 

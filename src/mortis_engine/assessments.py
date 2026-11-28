@@ -264,8 +264,10 @@ async def _execute(repository, repo, env, value, session):
         item.secret_rules = value["redaction"]["secret_rules"]
         item.secret_lines = value["redaction"]["secret_lines"]
         item.deadline = session.deadline
-        result, _, _ = await inference.ask(item, session, "assessment", value["context"], value["task_key"],
-                                        options, prepared=True)
+        result, _, complete = await inference.ask(item, session, "assessment", value["context"], value["task_key"],
+                                                  options, prepared=True)
+        if not complete:
+            raise ValueError("Required source remains unavailable for security assessment.")
         return result
 
 
