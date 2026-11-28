@@ -1,8 +1,10 @@
 """Bounded discovery of surviving references to removed or renamed Git paths."""
 
 import ast
+import builtins
 import posixpath
 import re
+import shlex
 import warnings
 from bisect import bisect_right
 from collections import defaultdict
@@ -11,11 +13,13 @@ from pathlib import PurePosixPath
 from . import source, source_lines
 from .errors import ReviewStopped
 
-POLICY = "affected-callers/v6"
+POLICY = "affected-callers/v7"
+SCOPED_IMPORT_POLICY = "affected-callers/v6"
 UNSCOPED_IMPORT_POLICY = "affected-callers/v5"
 ABSOLUTE_IMPORT_POLICY = "affected-callers/v4"
 LEGACY_TEXT_POLICIES = (None, "affected-callers/v1", "affected-callers/v2")
-LEGACY_POLICIES = (*LEGACY_TEXT_POLICIES, "affected-callers/v3", ABSOLUTE_IMPORT_POLICY, UNSCOPED_IMPORT_POLICY)
+LEGACY_POLICIES = (*LEGACY_TEXT_POLICIES, "affected-callers/v3", ABSOLUTE_IMPORT_POLICY,
+                   UNSCOPED_IMPORT_POLICY, SCOPED_IMPORT_POLICY)
 MAX_TRIGGERS = 64
 MAX_FILES = 512
 MAX_INVENTORY_ENTRIES = 4096
@@ -35,6 +39,8 @@ _FROM_IMPORT = re.compile(r"\bfrom[ \t]+([.\w/]+)[ \t]+import[ \t]+([\w$]+)")
 _IMPORT_ALIAS = re.compile(r"\bas[ \t]+([\w$]+)")
 _QUALIFIER = re.compile(r"([\w$]+)(?:\.|::)$")
 _PYTHON_SUFFIXES = {".py", ".pyi"}
+_SHELL_SUFFIXES = {".sh", ".bash", ".zsh"}
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _PYTHON_IMPORT = re.compile(r"^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+)?import[ \t]+([^#;]+)")
 # shortcut: common declaration forms cover literal discovery. Add resolvers when measured misses justify them.
 _DECLARATION = re.compile(
@@ -59,7 +65,8 @@ def _spellings(path):
 
 def _python_modules(path, policy):
     file = PurePosixPath(path)
-    if policy not in (POLICY, UNSCOPED_IMPORT_POLICY, ABSOLUTE_IMPORT_POLICY) or file.suffix not in _PYTHON_SUFFIXES:
+    if (policy not in (POLICY, SCOPED_IMPORT_POLICY, UNSCOPED_IMPORT_POLICY, ABSOLUTE_IMPORT_POLICY)
+            or file.suffix not in _PYTHON_SUFFIXES):
         return set()
     parts = file.with_suffix("").parts
     if file.stem == "__init__":
@@ -88,8 +95,120 @@ def _scope_lookup(events):
     return lambda line, column: scopes[bisect_right(positions, (line, column)) - 1]
 
 
-def _python_imports(path, text, modules, stopped, *, relative, scoped=False):
-    if not modules or "import" not in text:
+def _scope_at(lookup, point):
+    return lookup(*point) if lookup else (None,)
+
+
+def _bare_module_paths(parent, module):
+    roots = {module, f"src/{module}", posixpath.join(parent, module)}
+    return {root + ending for root in roots for ending in (".py", ".pyi", "/__init__.py", "/__init__.pyi")}
+
+
+class _PythonNames:
+    def __init__(self):
+        self.bare_imports = defaultdict(set)
+        self.imported_aliases = []
+        self.loads = []
+        self.bindings = []
+        self.first_iterables = {}
+
+    def collect(self, node, position):
+        if isinstance(node, ast.Name):
+            entries = self.loads if isinstance(node.ctx, ast.Load) else self.bindings
+            entries.append((node.id, position(node.lineno, node.col_offset)))
+        elif isinstance(node, ast.alias):
+            self.bindings.append((node.asname or node.name.split(".")[0], position(node.lineno, node.col_offset)))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            self.bindings.extend((name, position(node.lineno, node.col_offset)) for name in node.names)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
+            if name := node.rest if isinstance(node, ast.MatchMapping) else node.name:
+                self.bindings.append((name, position(node.lineno, node.col_offset)))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            if not isinstance(node, ast.Lambda):
+                self.bindings.append((node.name, position(node.lineno, node.col_offset)))
+            if isinstance(node, ast.ClassDef):
+                return
+            body = node.body if isinstance(node, ast.Lambda) else _first_statement(node)
+            point = position(body.lineno, body.col_offset)
+            arguments = node.args
+            self.bindings.extend((arg.arg, point) for arg in
+                                 (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                                  arguments.vararg, arguments.kwarg) if arg is not None)
+
+    def bound_aliases(self, scopes_at, modules, symbols, parent, inventory):
+        bindings = defaultdict(set)
+        for local, point in self.bindings:
+            bindings[_scope_at(scopes_at, point)[0], local].add(point)
+        aliases = {}
+        for module, imported, local, point in self.imported_aliases:
+            if not (declarations := symbols.get(imported)):
+                continue
+            dependencies = modules.get(module, set()) & declarations
+            if isinstance(module, str) and module.isidentifier():
+                present = {path for path in _bare_module_paths(parent, module) if path in inventory}
+                if len(present) == 1:
+                    dependencies.update(present & declarations)
+            if dependencies:
+                aliases[_scope_at(scopes_at, point)[0], local, point] = dependencies
+        return {name: sorted(points) for name, points in bindings.items()}, aliases
+
+    def load_scopes(self, scopes_at, point):
+        scopes = _scope_at(scopes_at, point)
+        if not self.first_iterables:
+            return scopes
+
+        def in_first_iterable(scope):
+            span = self.first_iterables.get(scope)
+            return span is not None and span[0] <= point < span[1]
+
+        # The first iterable runs at the opening delimiter, even in a class body.
+        while in_first_iterable(scopes[0]):
+            line, column = scopes[0]
+            scopes = _scope_at(scopes_at, (line, column - 1))
+        return tuple(scope for scope in scopes if not in_first_iterable(scope))
+
+    def alias_uses(self, scopes_at, bindings, aliases, *, track_unbound):
+        uses = defaultdict(set)
+        unbound = defaultdict(set)
+        alias_names = {name for _, name, _ in aliases}
+        for local, point in self.loads:
+            worth_checking_prior = track_unbound and not hasattr(builtins, local)
+            if local not in alias_names and not worth_checking_prior:
+                continue
+            scopes = self.load_scopes(scopes_at, point)
+            binding = next(((scope, local) for scope in scopes if (scope, local) in bindings), None)
+            if binding is None:
+                if worth_checking_prior:
+                    unbound[local].add(point[0])
+                continue
+            scope, _ = binding
+            definitions = bindings[binding]
+            if scope == scopes[0]:
+                preceding = bisect_right(definitions, point)
+                if not preceding:
+                    if worth_checking_prior and scope is None:
+                        unbound[local].add(point[0])
+                    continue
+                definition = definitions[preceding - 1]
+            elif len(definitions) == 1:
+                definition = definitions[0]
+            else:
+                # A closure can run before or after an outer binding is reassigned.
+                continue
+            dependencies = aliases.get((scope, local, definition))
+            if dependencies:
+                uses[point[0]].update(dependencies)
+        return uses, unbound
+
+
+def _first_statement(node):
+    first = node.body[0]
+    decorators = getattr(first, "decorator_list", ())
+    return decorators[0] if decorators else first
+
+
+def _python_imports(path, text, modules, stopped, *, relative, scoped=False, names=None):
+    if not modules or (names is None and "import" not in text):
         return {}, None
     caller = PurePosixPath(path)
     if caller.suffix not in _PYTHON_SUFFIXES:
@@ -129,21 +248,36 @@ def _python_imports(path, text, modules, stopped, *, relative, scoped=False):
     for node in ast.walk(tree):
         if stopped():
             raise ReviewStopped("Caller discovery was cancelled.")
+        if names is not None:
+            names.collect(node, position)
         if scoped and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            first = node.body[0]
-            if decorators := getattr(first, "decorator_list", ()):
-                first = decorators[0]
+            first = _first_statement(node)
             events.append((position(first.lineno, first.col_offset), True, isinstance(node, ast.ClassDef)))
+            events.append((position(node.end_lineno, node.end_col_offset), False, False))
+        elif scoped and names is not None and isinstance(node, (ast.Lambda, *_COMPREHENSIONS)):
+            # A comprehension's own bindings begin after its opening delimiter.
+            first = node.body if isinstance(node, ast.Lambda) else node
+            column = first.col_offset + int(isinstance(node, _COMPREHENSIONS))
+            entry = position(first.lineno, column)
+            if isinstance(node, _COMPREHENSIONS):
+                iterable = node.generators[0].iter
+                names.first_iterables[entry] = (position(iterable.lineno, iterable.col_offset),
+                                                position(iterable.end_lineno, iterable.end_col_offset))
+            events.append((entry, True, False))
             events.append((position(node.end_lineno, node.end_col_offset), False, False))
         elif isinstance(node, ast.Import):
             for name in node.names:
                 record(name.name, name, qualifier=name.asname or name.name.rsplit(".", 1)[-1])
+                if names is not None and name.name.isidentifier():
+                    names.bare_imports[position(name.lineno)[0]].add(name.name)
         elif isinstance(node, ast.ImportFrom):
             if node.level and relative and node.level <= len(parent) + 1:
                 package = parent[:len(parent) + 1 - node.level]
                 module = package + tuple(node.module.split(".") if node.module else ())
             elif not node.level and node.module:
                 module = node.module
+                if names is not None and module.isidentifier():
+                    names.bare_imports[position(node.lineno)[0]].add(module)
             else:
                 continue
             record(module, node,
@@ -152,6 +286,9 @@ def _python_imports(path, text, modules, stopped, *, relative, scoped=False):
             for name in node.names:
                 imported = (*module, name.name) if node.level else f"{module}.{name.name}"
                 record(imported, name, qualifier=name.asname or name.name)
+                if (names is not None and name.asname
+                        and (module in modules or (isinstance(module, str) and module.isidentifier()))):
+                    names.imported_aliases.append((module, name.name, name.asname, position(name.lineno, name.col_offset)))
     return imports, _scope_lookup(events) if events else None
 
 
@@ -171,10 +308,27 @@ def _relative_spellings(token, parent):
     return [path for path in normalized if path not in {".", ".."} and not path.startswith(("../", "/"))]
 
 
-def _references(line, path, labels, relative_paths, file_names, *, binding_policy=None, src_modules=None):
+def _escaped_shell_references(line, parent, relative_paths):
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return
+    for token in tokens:
+        if len(token) > 2000 or (" " not in token and "\t" not in token):
+            continue
+        for path in _relative_spellings(token, parent) or (token,):
+            yield from relative_paths.get(path, ())
+
+
+def _references(line, path, labels, relative_paths, file_names, *, binding_policy=None, src_modules=None,
+                bare_imports=(), inventory=(), escaped_shell=False):
     parent = str(PurePosixPath(path).parent)
     sibling_bindings = binding_policy not in (None, "affected-callers/v1")
     in_module_context = bool(_MODULE_CONTEXT.search(line))
+    if escaped_shell and ("\\ " in line or "\\\t" in line):
+        yield from _escaped_shell_references(line, parent, relative_paths)
     if src_modules and PurePosixPath(path).suffix in _PYTHON_SUFFIXES and (match := _PYTHON_IMPORT.match(line)):
         module, names = match.groups()
         if module:
@@ -206,6 +360,11 @@ def _references(line, path, labels, relative_paths, file_names, *, binding_polic
             spellings.update((qualified, qualified.rpartition("::")[0]))
         for spelling in spellings:
             candidates = relative_paths.get(spelling) or labels.get(spelling, ())
+            if candidates and not quoted and spelling in bare_imports:
+                locations = _bare_module_paths(parent, spelling)
+                # A pinned, exact module path wins over a basename from an unrelated package.
+                if any(location in inventory for location in locations):
+                    candidates = locations.intersection(candidates)
             if not candidates and not sibling_bindings:
                 continue
             local = labels.get(posixpath.join(parent, spelling), ()) if parent != "." else ()
@@ -339,7 +498,14 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
 
     count = 0
     python_modules = old_modules.keys() | replacement_modules.keys()
-    relative_imports = policy in (POLICY, UNSCOPED_IMPORT_POLICY)
+    scoped_imports = policy in (POLICY, SCOPED_IMPORT_POLICY)
+    relative_imports = scoped_imports or policy == UNSCOPED_IMPORT_POLICY
+
+    def previous_entry(path):
+        old_path, status = changes.get(path, (None, ""))
+        original = old_path if status.startswith("R") else path
+        return original, base.get(original) if allowed(original) else None
+
     for path in sorted(head):
         if not labels:
             break
@@ -357,8 +523,14 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
             continue
         scope["scanned_bytes"] += head[path][1]
         lines = source_lines.split(text, keepends=True)
+        suffix = PurePosixPath(path).suffix
+        track_previous_aliases = path in changes and bool(old_modules and symbols)
+        python_names = (_PythonNames() if policy == POLICY and python_modules and suffix in _PYTHON_SUFFIXES
+                        and ("import" in text or track_previous_aliases) else None)
+        escaped_shell = policy == POLICY and suffix in _SHELL_SUFFIXES
         imports, scopes_at = _python_imports(path, text, python_modules, stopped, relative=relative_imports,
-                                             scoped=policy == POLICY and bool(replacement_modules))
+                                             scoped=bool(python_names or (scoped_imports and replacement_modules)),
+                                             names=python_names)
         old_fallback = old_modules if imports is None else None
         replacement_fallback = replacement_modules if imports is None else None
         imports = imports or {}
@@ -367,7 +539,9 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
         for index, line in enumerate(lines):
             if stopped():
                 raise ReviewStopped("Caller discovery was cancelled.")
-            linked = set(_references(line, path, labels, old_paths, file_names, src_modules=old_fallback))
+            bare_imports = python_names.bare_imports.get(index, ()) if python_names else ()
+            linked = set(_references(line, path, labels, old_paths, file_names, src_modules=old_fallback,
+                                     bare_imports=bare_imports, inventory=head, escaped_shell=escaped_shell))
             explicit, migrated, relative_bindings = set(), set(), set()
             for spelling, names, qualifier, aliases, column in imports.get(index, ()):
                 explicit.update(old_modules.get(spelling, ()))
@@ -388,7 +562,7 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                 replacement = set(_references(line, path, replacements, replacement_paths, replacement_names,
                                               binding_policy=policy, src_modules=replacement_fallback))
                 # Prefer exact AST bindings to words in a recognized Python import.
-                text_bindings = replacement - relative_bindings if policy == POLICY else replacement
+                text_bindings = replacement - relative_bindings if scoped_imports else replacement
                 if text_bindings:
                     binding_scope = scopes_at(index, binding.end())[0] if scopes_at else None
                     for name in _IDENTIFIER.findall(line):
@@ -400,15 +574,40 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
                             rebound_modules[binding_scope, name].add(dependency)
             if replacement or migrated:
                 linked -= (replacement | migrated) - set(_references(line, path, labels, old_paths, file_names,
-                                                                      binding_policy=policy, src_modules=old_fallback))
+                                                                      binding_policy=policy, src_modules=old_fallback,
+                                                                      bare_imports=bare_imports, inventory=head,
+                                                                      escaped_shell=escaped_shell))
             direct.append(linked | explicit)
         existing = set().union(*direct)
+        original_context = None
+        alias_uses = {}
+        if python_names and python_names.loads and (python_names.imported_aliases or track_previous_aliases):
+            bindings, aliases = python_names.bound_aliases(scopes_at, old_modules, symbols,
+                                                           str(PurePosixPath(path).parent), base)
+            alias_uses, unbound = python_names.alias_uses(scopes_at, bindings, aliases, track_unbound=track_previous_aliases)
+            if unbound:
+                original_path, original = previous_entry(path)
+                if original and (original != head[path] or original_path != path):
+                    old_text = read(original) or ""
+                    original_names = _PythonNames() if "import" in old_text else None
+                    old_imports, original_scopes = _python_imports(original_path, old_text, old_modules, stopped,
+                                                                  relative=True, scoped=True, names=original_names)
+                    original_context = old_text, old_imports, original_names
+                    if original_names and original_names.imported_aliases:
+                        definitions, aliases = original_names.bound_aliases(original_scopes, old_modules, symbols,
+                                                                            str(PurePosixPath(original_path).parent), base)
+                        # Only module bindings can be carried across revisions without matching lexical scopes.
+                        for (binding_scope, name, point), dependencies in aliases.items():
+                            if binding_scope is None and definitions[binding_scope, name] == [point]:
+                                for index in unbound.get(name, ()):
+                                    alias_uses[index].update(dependencies)
         original_refs = None
         sites = []
         for index, line in enumerate(lines):
             if stopped():
                 raise ReviewStopped("Caller discovery was cancelled.")
             linked = direct[index].copy()
+            linked.update(alias_uses.get(index, ()))
             used = set()
             alias_columns = migrated_aliases.get(index)
             offset = previous = 0
@@ -431,19 +630,24 @@ def discover(repo, env, plan, changes, triggers, allowed, stopped, *, policy=POL
             if used - linked:
                 near = set().union(*direct[max(0, index - CONTEXT_LINES):index + CONTEXT_LINES + 1])
                 if used - linked - near and original_refs is None:
-                    old_path, status = changes.get(path, (None, ""))
-                    original_path = old_path if status.startswith("R") else path
-                    original = base.get(original_path) if allowed(original_path) else None
+                    original_path, original = previous_entry(path)
                     if original and original == head[path] and original_path == path:
                         original_refs = existing
                     else:
-                        old_text = (read(original) if original else None) or ""
-                        old_imports, _ = _python_imports(original_path, old_text, old_modules, stopped,
-                                                         relative=relative_imports)
-                        original_refs = {reference for old_line in source_lines.split(old_text)
+                        if original_context is None:
+                            old_text = (read(original) if original else None) or ""
+                            original_names = _PythonNames() if python_names and "import" in old_text else None
+                            old_imports, _ = _python_imports(original_path, old_text, old_modules, stopped,
+                                                             relative=relative_imports, names=original_names)
+                        else:
+                            old_text, old_imports, original_names = original_context
+                        original_refs = {reference for old_index, old_line in enumerate(source_lines.split(old_text))
                                          for reference in _references(old_line, original_path, labels,
                                                                       old_paths, file_names,
-                                                                      src_modules=old_modules if old_imports is None else None)}
+                                                                      src_modules=old_modules if old_imports is None else None,
+                                                                      bare_imports=original_names.bare_imports.get(old_index, ())
+                                                                      if original_names else (), inventory=base,
+                                                                      escaped_shell=escaped_shell)}
                         original_refs.update(reference for row in (old_imports or {}).values()
                                              for spelling, *_ in row for reference in old_modules.get(spelling, ()))
                 linked.update(used & (near | (original_refs or set())))

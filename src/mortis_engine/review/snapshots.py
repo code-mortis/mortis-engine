@@ -14,10 +14,15 @@ from . import planning, settings, source
 
 MAX_SOURCE_BYTES = 20_000_000
 MAX_SNAPSHOT_BYTES = 100_000_000
+_GIT_PRINTABLE_AND_NEWLINES = b"\b\t\n\f\r\x1b" + bytes(range(32, 127)) + bytes(range(128, 256))
 
 
 class OversizedWorktreeSource(ValueError):
     pass
+
+
+class _WorktreePathReplaced(Exception):
+    """A file and directory exchanged places at this path or an ancestor."""
 
 
 @dataclass
@@ -77,16 +82,29 @@ def _entries(repo, env):
     return result
 
 
-def _worktree_stat(root, path):
+def _open_worktree_directory(directory, part, flags):
+    try:
+        return os.open(part, flags, dir_fd=directory)
+    except NotADirectoryError:
+        # O_NOFOLLOW can also report ENOTDIR for a symlink. Only a real file displaces the directory.
+        if stat.S_ISREG(os.stat(part, dir_fd=directory, follow_symlinks=False).st_mode):
+            raise _WorktreePathReplaced from None
+        raise
+
+
+def _worktree_stat(root, path, *, gitlink):
     parts = source.repository_path(path).split("/")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory = os.open(root, flags)
     try:
         for part in parts[:-1]:
-            next_directory = os.open(part, flags, dir_fd=directory)
+            next_directory = _open_worktree_directory(directory, part, flags)
             os.close(directory)
             directory = next_directory
-        return os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
+        info = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
+        if not gitlink and stat.S_ISDIR(info.st_mode):
+            raise _WorktreePathReplaced
+        return info
     except FileNotFoundError:
         return None
     except OSError:
@@ -102,13 +120,15 @@ def _worktree_bytes(root, path):
     directory = os.open(root, directory_flags)
     try:
         for part in parts[:-1]:
-            next_directory = os.open(part, directory_flags, dir_fd=directory)
+            next_directory = _open_worktree_directory(directory, part, directory_flags)
             os.close(directory)
             directory = next_directory
         info = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
         if stat.S_ISLNK(info.st_mode):
             # Store the link text as a link blob; source readers reject its mode.
             return "120000", os.readlink(parts[-1], dir_fd=directory).encode("utf-8")
+        if stat.S_ISDIR(info.st_mode):
+            raise _WorktreePathReplaced
         if not stat.S_ISREG(info.st_mode):
             raise ValueError("Working-tree source must be a regular file or symbolic link.")
         if info.st_size > MAX_SOURCE_BYTES:
@@ -156,8 +176,29 @@ def _text_paths(repo, env, paths, stopped):
     records = source.git(repo, env, "check-attr", "--cached", "-z", "--stdin", "text", "eol",
                          input_bytes=b"".join(path.encode() + b"\0" for path in paths), stopped=stopped,
                          strict_utf8=True).split("\0")[:-1]
-    return {path for path, _, text, _, _, eol in batched(records, 6, strict=True)
-            if text not in {"unset", "auto"} and (text == "set" or eol in {"lf", "crlf"})}
+    return {path: text for path, _, text, _, _, eol in batched(records, 6, strict=True)
+            if text != "unset" and (text in {"set", "auto"} or eol in {"lf", "crlf"})}
+
+
+def _git_auto_text(content):
+    # Match Git's CRLF conversion classifier, including its treatment of bytes outside ASCII.
+    carriage_returns = content.count(b"\r")
+    if b"\0" in content or carriage_returns != content.count(b"\r\n"):
+        return False
+    nonprintable = len(content.translate(None, _GIT_PRINTABLE_AND_NEWLINES))
+    printable = len(content) - carriage_returns - content.count(b"\n") - nonprintable
+    return printable // 128 >= nonprintable - content.endswith(b"\x1a")
+
+
+def _inspect_indexed_crlf(repo, env, sha, remaining, stopped):
+    """Return whether the indexed blob is CRLF text, bytes read, and any coverage error."""
+    size = int(source.git(repo, env, "cat-file", "-s", sha, stopped=stopped).strip())
+    if size > MAX_SOURCE_BYTES:
+        return False, 0, "Indexed source exceeds the 20 MB read limit for automatic line-ending normalization."
+    if size > remaining:
+        return False, 0, "Indexed source inspection exceeds the 100 MB limit for automatic line-ending normalization."
+    content = source.git(repo, env, "cat-file", "blob", sha, stopped=stopped, raw_output=True)
+    return b"\r\n" in content and _git_auto_text(content), size, None
 
 
 def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target):
@@ -165,7 +206,9 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target)
     staged = _entries(repo, env)
     excluded, unavailable = [], {}
     if mode == "staged":
-        return _tree(repo, env, staged), excluded, unavailable, {}
+        # Git omits intent-to-add entries when writing its original index flags to a tree.
+        tree = source.git(repo, env, "write-tree", stopped=stopped).strip()
+        return tree, excluded, unavailable, {}
     if not all(getattr(os, flag, 0) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")) or not {
         os.open, os.stat, os.readlink
     }.issubset(os.supports_dir_fd) or os.stat not in os.supports_follow_symlinks:
@@ -177,6 +220,7 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target)
     sparse_paths = {value[2:] for value in flags if value[:2].lower() == "s "}
     paths = sorted(set(filter(None, paths)))
     text_paths = None
+    index_crlf, index_bytes = {}, 0
     entries, total = {}, 0
     for path in paths:
         source.repository_path(path)
@@ -184,8 +228,13 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target)
             excluded.append({"path": path, "reason": "excluded"})
             if not planning.allowed_path(path, options, rules, supporting_evidence=True):
                 # Reuse an existing excluded blob without reading or ingesting its contents.
-                if path in staged and (_worktree_stat(root, path) is not None or path in sparse_paths):
-                    entries[path] = staged[path]
+                if path in staged:
+                    try:
+                        info = _worktree_stat(root, path, gitlink=staged[path][0] == "160000")
+                    except _WorktreePathReplaced:
+                        continue
+                    if info is not None or path in sparse_paths:
+                        entries[path] = staged[path]
                 continue
         if stopped():
             raise source.ReviewStopped("The review was cancelled.")
@@ -194,6 +243,8 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target)
             continue
         try:
             value = _worktree_bytes(root, path)
+        except _WorktreePathReplaced:
+            continue
         except OversizedWorktreeSource as exc:
             # Keep unreadable files out of the pinned source tree and report target gaps to the planner.
             unavailable[path] = str(exc)
@@ -210,11 +261,27 @@ def _local_tree(repo, env, root, git_dir, mode, stopped, options, rules, target)
         if file_mode in {"100644", "100755"} and b"\r\n" in content:
             if text_paths is None:
                 text_paths = _text_paths(repo, env, paths, stopped)
-            if path in text_paths:
-                content = content.replace(b"\r\n", b"\n")
-                if path in staged and staged[path] == (file_mode, blob_sha(content)):
+            text = text_paths.get(path)
+            if text is not None and (text != "auto" or _git_auto_text(content)):
+                normalized = content.replace(b"\r\n", b"\n")
+                if path in staged and staged[path] == (file_mode, blob_sha(normalized)):
                     entries[path] = staged[path]
                     continue
+                preserve_crlf = False
+                if text == "auto" and path in staged:
+                    # Git auto conversion keeps CRLF when the indexed blob is already CRLF text.
+                    indexed_sha = staged[path][1]
+                    if indexed_sha not in index_crlf:
+                        has_crlf, inspected, error = _inspect_indexed_crlf(
+                            repo, env, indexed_sha, MAX_SNAPSHOT_BYTES - index_bytes, stopped)
+                        index_crlf[indexed_sha] = (has_crlf, error)
+                        index_bytes += inspected
+                    preserve_crlf, error = index_crlf[indexed_sha]
+                    if error:
+                        unavailable[path] = error
+                        continue
+                if not preserve_crlf:
+                    content = normalized
         total += len(content)
         if total > MAX_SNAPSHOT_BYTES:
             raise ValueError("Working-tree source exceeds the 100 MB snapshot admission limit.")

@@ -129,7 +129,7 @@ def review_local(repository, *, connection, get_credentials, mode="worktree", ba
                 raise ValueError("The saved discovery result policy is unsupported.")
             options["_affected_caller_policy"] = saved.get("affected_caller_policy") if saved else planning.AFFECTED_CALLER_POLICY
             planning.affected_caller_policy(options)
-            if attribution not in {None, assessment.ATTRIBUTION_VERSION}:
+            if attribution not in {None, assessment.LEGACY_ATTRIBUTION_VERSION, assessment.ATTRIBUTION_VERSION}:
                 raise ValueError("The saved assessment attribution version is unsupported.")
             options["_assessment_attribution"] = attribution
             if saved:

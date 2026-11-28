@@ -152,6 +152,8 @@ def test_missing_caller_sites_preserves_changed_file_summary(repo):
         result = asyncio.run(workflows.generate_summary(isolated, env, report, RepoSettings().model_dump(), session))
     assert result["status"] == "completed" and result["limited_context"]
     assert "+value = 2" in session.calls[0][1]["context"]["diff"]
+    # Standalone summaries can resume with no review-plan attribution marker.
+    assert "Use only the top-level paths list" not in session.calls[0][1]["instructions"]
 
 
 def test_summary_clips_caller_details_before_changing_primary_diff(repo):

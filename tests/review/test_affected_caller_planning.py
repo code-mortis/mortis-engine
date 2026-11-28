@@ -43,6 +43,24 @@ def test_explicit_paths_can_resolve_from_repository_root_without_leaving_it(repo
     assert site["path"] == "backend/run.py" and site["triggers"] == [executable]
 
 
+def test_deleted_shell_path_matches_literal_escaped_spaces(repo):
+    retired = "scripts/legacy task.sh"
+    base = commit(repo, {
+        retired: "exit 0\n",
+        "escaped.sh": r"./scripts/legacy\ task.sh" + "\n",
+        "quoted.sh": "'./scripts/legacy task.sh'\n",
+        "verbatim.sh": r"'./scripts/legacy\ task.sh'" + "\n",
+        "comment.sh": r"# ./scripts/legacy\ task.sh" + "\n",
+    })
+    git(repo, "rm", retired)
+    git(repo, "commit", "-qm", "retire script")
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert scope["limits_reached"] == []
+    assert {site["path"]: site["triggers"] for site in scope["sites"]} == {
+        "escaped.sh": [retired], "quoted.sh": [retired],
+    }
+
+
 @pytest.mark.parametrize(("suffix", "unavailable"), [(b"\xff", True), (b"\0", False)])
 def test_caller_discovery_omits_undecodable_and_binary_blobs(repo, suffix, unavailable):
     (repo / "caller.py").write_bytes(b'run("tool.sh")  # ' + suffix + b"\n")
@@ -111,6 +129,61 @@ def test_deleted_src_layout_module_has_absolute_python_callers(repo, statement, 
         legacy = planning.plan_review(snap.repo, snap.env, snap.base_sha, snap.head_sha, snap.merge_base,
                                       {**options, "_affected_caller_policy": "affected-callers/v3"}, lambda: False)
     assert bool(legacy.affected_callers["sites"]) == legacy_match
+
+
+def test_bare_python_import_of_surviving_module_is_not_an_unrelated_package(repo):
+    retired = "src/shop/legacy.py"
+    base = commit(repo, {
+        retired: "def apply(): return 1\n",
+        "src/legacy.py": "def apply(): return 2\n",
+        "jobs/stale.py": "from shop.legacy import apply\napply()\n",
+        "jobs/live.py": "from legacy import apply\napply()\n",
+    })
+    git(repo, "rm", retired)
+    git(repo, "commit", "-qm", "retire package module")
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert {site["path"]: site["triggers"] for site in scope["sites"]} == {"jobs/stale.py": [retired]}
+
+
+@pytest.mark.parametrize(("retired", "module"), [
+    ("src/shop/legacy.py", "shop.legacy"), ("src/legacy.py", "legacy"), ("legacy.py", "legacy"),
+])
+def test_deleted_python_alias_reaches_distant_use_before_rebinding(repo, retired, module):
+    caller = "jobs/order.py"
+    sections = [
+        f"from {module} import apply as quote",
+        "stale = quote(10)",
+        "def scoped(quote):\n    return quote(20)",
+        "items = [quote(20) for quote in (str,)]",
+        "outer_items = [quote for quote in quote((10,))]",
+        "callback = lambda quote: quote(20)",
+        "quote = str\nlive = quote(30)",
+    ]
+    contents = ("\n" * 9).join(sections) + "\n"
+    base = commit(repo, {retired: "def apply(amount): return amount\n", caller: contents})
+    git(repo, "rm", retired)
+    git(repo, "commit", "-qm", "retire aliased dependency")
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    assert [(site["path"], site["start_line"], site["end_line"]) for site in scope["sites"]] == [
+        (caller, 1, 4), (caller, 7, 13), (caller, 35, 41),
+    ]
+
+
+@pytest.mark.parametrize("replacement_import", ["", "from .new import apply as migrated\n"])
+def test_renamed_dependency_finds_use_of_removed_module_alias(repo, replacement_import):
+    retired, replacement, caller = "src/shop/old.py", "src/shop/new.py", "src/shop/order.py"
+    retained = "\n" * 8 + "def stale():\n    return quote(20)\n"
+    base = commit(repo, {
+        retired: "def apply(amount): return amount\n",
+        caller: "from .old import apply as quote\n" + retained,
+    })
+    git(repo, "mv", retired, replacement)
+    updated = replacement_import + retained
+    commit(repo, {caller: updated})
+    scope = preview_local(repo, mode="commits", base=base)["affected_callers"]
+    site, = scope["sites"]
+    assert site["path"] == caller and site["triggers"] == [retired]
+    assert site["end_line"] == len(updated.splitlines())
 
 
 @pytest.mark.parametrize("imported", ["apply", "(\n    apply,\n)"])

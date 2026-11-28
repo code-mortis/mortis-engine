@@ -8,7 +8,7 @@ from . import engine, planning, python_signatures, settings, source
 from .errors import ReviewStopped
 
 VERSION = "branch-review/v1"
-REUSE_POLICY = "python-caller-signatures/v5"
+REUSE_POLICY = "python-caller-signatures/v6"
 
 
 def decide(snap, options, history, previous, *, connection, profile, graph, decisions, assessments, stopped):

@@ -122,6 +122,52 @@ def test_staged_snapshot_uses_index_only_and_retains_renames(repo):
                 contents(value, missing)
 
 
+def test_staged_omits_intent_to_add_but_keeps_staged_empty_files(repo):
+    commit(repo, {"app.py": "value = 1\n"})
+    (repo / "draft.py").write_text("draft = 2\n")
+    (repo / "empty.py").touch()
+    git(repo, "add", "-N", "draft.py")
+    git(repo, "add", "empty.py")
+    index = (repo / ".git/index").read_bytes()
+
+    staged = preview.preview_local(repo, mode="staged")
+    assert [(row["path"], row["status"], row["source_bytes"]) for row in staged["selected_files"]] == [
+        ("empty.py", "A", 0),
+    ]
+    worktree = preview.preview_local(repo)
+    assert [row["path"] for row in worktree["selected_files"]] == ["draft.py", "empty.py"]
+    assert (repo / ".git/index").read_bytes() == index
+
+
+@pytest.mark.parametrize("old_name,new_name", [
+    ("component.py", "component.py/value.py"),
+    ("component.py/value.py", "component.py"),
+])
+@pytest.mark.parametrize("excluded", [False, True])
+def test_worktree_file_and_directory_replacements(repo, old_name, new_name, excluded):
+    commit(repo, {"app.py": "value = 1\n", old_name: "old = 1\n"})
+    if excluded:
+        git(repo, "update-index", "--skip-worktree", old_name)
+    old, new = repo / old_name, repo / new_name
+    old.unlink()
+    if old.parent != repo:
+        old.parent.rmdir()
+    new.parent.mkdir(exist_ok=True)
+    new.write_text("new = 2\n")
+    (repo / "app.py").write_text("value = 2\n")
+    index = (repo / ".git/index").read_bytes()
+
+    overrides = {"rules": {"exclude": [old_name]}} if excluded else None
+    result = preview.preview_local(repo, overrides=overrides)
+    assert not result["errors"]
+    assert [(row["path"], row["status"]) for row in result["selected_files"]] == [
+        ("app.py", "M"), (new_name, "A"),
+    ]
+    reasons = {row["path"]: row["reason"] for row in result["excluded_files"]}
+    assert reasons[old_name] == ("rule_exclusion" if excluded else "deleted")
+    assert (repo / ".git/index").read_bytes() == index
+
+
 def test_full_tree_uses_target_ref_and_empty_ancestor(repo):
     base = commit(repo, {"main.py": "main\n"})
     git(repo, "checkout", "-qb", "feature")
@@ -440,6 +486,96 @@ def test_worktree_snapshot_respects_text_line_endings_and_preserves_raw_bytes(re
     with snapshots.snapshot(repo, mode="worktree") as value:
         assert contents(value, "app.py") == "port = 2\nkeep = 3\n"
         assert contents(value, "raw.py") == "raw = 1\r\n"
+
+
+def test_worktree_auto_text_ignores_crlf_checkout_of_normalized_content(repo):
+    git(repo, "config", "core.autocrlf", "false")
+    commit(repo, {".gitattributes": "*.py text=auto eol=crlf\n", "app.py": "value = 1\n"})
+    app = repo / "app.py"
+    app.unlink()
+    git(repo, "restore", "--worktree", "--", "app.py")
+    assert app.read_bytes() == b"value = 1\r\n"
+    assert not git(repo, "status", "--porcelain")
+    assert not preview.preview_local(repo)["selected_files"]
+
+    app.write_bytes(b"value = 2\r\n")
+    (repo / "draft.py").write_bytes(b"draft = 3\r\n")
+    index = (repo / ".git/index").read_bytes()
+    result = preview.preview_local(repo)
+    assert [(row["path"], row["source_bytes"]) for row in result["selected_files"]] == [
+        ("app.py", 10), ("draft.py", 10),
+    ]
+    assert (repo / ".git/index").read_bytes() == index
+    git(repo, "add", "--", "app.py", "draft.py")
+    assert {row["path"]: row["blob_sha"] for row in result["selected_files"]} == {
+        path: git(repo, "rev-parse", f":{path}") for path in ("app.py", "draft.py")
+    }
+
+
+@pytest.mark.parametrize("indexed,working,canonical", [
+    (b"data = 'a\x00b'\n", b"data = 'a\x00b'\r\n", b"data = 'a\x00b'\r\n"),
+    (b"data = 'a\x01b'\n", b"data = 'a\x01b'\r\n", b"data = 'a\x01b'\r\n"),
+    (b"data = 'a\rb'\n", b"data = 'a\rb'\r\n", b"data = 'a\rb'\r\n"),
+    (b"value = 1\r\n", b"value = 2\r\n", b"value = 2\r\n"),
+    (b"first = 1\r\nsecond = 2\n", b"first = 3\r\n", b"first = 3\r\n"),
+    (b"data = '\xff\x00'\r\n", b"value = 2\r\n", b"value = 2\n"),
+])
+def test_worktree_auto_text_matches_git_binary_and_indexed_crlf(repo, indexed, working, canonical):
+    git(repo, "config", "core.autocrlf", "false")
+    app = repo / "app.py"
+    app.write_bytes(indexed)
+    commit(repo, {"keep.py": "keep = 1\n"})
+    commit(repo, {".gitattributes": "*.py text=auto eol=crlf\n"})
+    assert git(repo, "rev-parse", ":app.py") == snapshots.blob_sha(indexed)
+    app.write_bytes(working)
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        pinned = source.git(value.repo, value.env, "rev-parse", f"{value.head_sha}:app.py").strip()
+    git(repo, "add", "--", "app.py")
+    assert pinned == git(repo, "rev-parse", ":app.py") == snapshots.blob_sha(canonical)
+
+
+def test_worktree_auto_text_checks_indexed_symlink_blob_without_following_link(repo):
+    commit(repo, {".gitattributes": "*.py text=auto eol=crlf\n"})
+    app = repo / "app.py"
+    app.symlink_to("old target\r\n")
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-qm", "symlink")
+    app.unlink()
+    app.write_bytes(b"value = 2\r\n")
+    with snapshots.snapshot(repo, mode="worktree") as value:
+        pinned = source.git(value.repo, value.env, "rev-parse", f"{value.head_sha}:app.py").strip()
+    git(repo, "add", "app.py")
+    assert pinned == git(repo, "rev-parse", ":app.py") == snapshots.blob_sha(b"value = 2\r\n")
+
+
+def test_worktree_auto_text_reports_oversized_indexed_blob_without_dropping_other_units(repo, monkeypatch):
+    commit(repo, {".gitattributes": "*.py text=auto eol=crlf\n",
+                  "large.py": "# " + "x" * 60 + "\n", "small.py": "port = 1\n"})
+    (repo / "large.py").write_bytes(b"value = 2\r\n")
+    (repo / "small.py").write_text("port = 2\n")
+    monkeypatch.setattr(snapshots, "MAX_SOURCE_BYTES", 32)
+
+    result = preview.preview_local(repo)
+    assert [unit["path"] for unit in result["units"]] == ["small.py"]
+    assert result["errors"] == [{
+        "path": "large.py", "message": "Indexed source exceeds the 20 MB read limit for automatic line-ending normalization.",
+    }]
+
+
+def test_worktree_auto_text_bounds_index_inspection_and_reuses_shared_blob_classification(repo, monkeypatch):
+    shared = "# " + "x" * 32 + "\n"
+    commit(repo, {".gitattributes": "*.py text=auto eol=crlf\n",
+                  "a.py": shared, "b.py": shared, "c.py": "# " + "y" * 32 + "\n", "small.py": "port = 1\n"})
+    for path in ("a.py", "b.py", "c.py"):
+        (repo / path).write_bytes(b"value = 2\r\n")
+    (repo / "small.py").write_text("port = 2\n")
+    monkeypatch.setattr(snapshots, "MAX_SNAPSHOT_BYTES", 64)
+
+    result = preview.preview_local(repo)
+    assert [unit["path"] for unit in result["units"]] == ["a.py", "b.py", "small.py"]
+    assert result["errors"] == [{
+        "path": "c.py", "message": "Indexed source inspection exceeds the 100 MB limit for automatic line-ending normalization.",
+    }]
 
 
 @pytest.mark.parametrize(("mode", "flag"), [("worktree", "--others"), ("worktree", "--stage"), ("staged", "--stage")])
