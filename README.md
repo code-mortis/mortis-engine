@@ -73,6 +73,8 @@ Working-tree reviews read files without following symlinks or running Git filter
 Replacing a tracked file with a directory, or a directory with a file, is supported before staging.
 A file marked with `git add -N` is included in a working-tree review. It enters a staged review
 when you stage its contents with `git add`.
+For paths marked `text=auto`, the snapshot follows Git's line-ending conversion
+rules so a CRLF checkout of normalized text produces a clean preview.
 
 Preview the same local planner without an AI connection or saved analysis run:
 

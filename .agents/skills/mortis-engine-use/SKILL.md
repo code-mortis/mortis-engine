@@ -38,7 +38,9 @@ Refs must already exist locally. Do not check out, stage or commit files to crea
 a review scope. Working-tree reviews require an initial commit; report that
 prerequisite if missing. `--head` requires `--base` or `--all`.
 Working-tree snapshots need platform support for safe no-follow file access.
-If unavailable, use `--staged` for changes the user has already staged.
+If unavailable, use `--staged` for changes the user has already staged. A file
+marked only with `git add -N` is visible in working-tree scope. Staged scope
+includes it once its contents have been staged.
 
 Preview a scope without profiles, credentials, inference or a saved run:
 
@@ -58,7 +60,9 @@ Branch, staged and working-tree previews can include `affected_callers` when
 eligible files were deleted or renamed. Inspect the planned caller ranges and
 `limits_reached` there. Review checks those ranges under the same file policy
 without requiring Docker. For modules under `src/`, this includes Python callers
-that still use the deleted or renamed module's absolute import path.
+that still use the deleted or renamed module's absolute import path. Discovery
+also follows package-relative Python imports and uses of imported aliases, and
+recognizes literal shell paths with escaped spaces.
 
 ## Run an authorized analysis
 

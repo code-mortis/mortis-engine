@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.8 - 2026-11-27
+
+- Working-tree reviews handle unstaged file-to-directory and directory-to-file replacements and honor Git's `text=auto` line-ending rules. Staged reviews omit files marked only with `git add -N` and include genuinely staged empty files.
+- Reviews find more callers of deleted or renamed files, including shell paths with escaped spaces and Python relative imports, multiline imports and calls through aliases. Assessment receives the deletion or rename verified against the merge base and head when checking an unchanged caller.
+- Incremental reviews recheck previously reviewed Python importers when a module-level function is removed, switches between synchronous and asynchronous, or changes how existing arguments bind to positional, keyword or variadic parameters. Compatible optional additions still permit reuse. The first comparison after upgrading establishes a fresh baseline. Interrupted reviews retain their saved plan.
+- Review planning reads selected source directly from its validated Git blob, and graph-enabled reviews collect neighboring imports in one pass across the import edges.
+
 ## 0.1.7 - 2026-11-26
 
 - Incremental branch reviews recheck previously reviewed Python importers when a module-level function's required parameters change or it gains or loses `*args` or `**kwargs`. Fully reverting a reviewed file change triggers a fresh review of the remaining branch diff when coverage would otherwise be reused. The first comparison after upgrading establishes a new baseline.

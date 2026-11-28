@@ -86,11 +86,12 @@ also triggers a full comparison if coverage would otherwise be reused.
 Removing a module-level Python function or changing its required or variadic
 parameters can bring previously reviewed importers back into scope. Removing or
 renaming an optional keyword or displacing a parameter from its positional slot
-can also trigger a recheck. Compatible optional additions and body-only changes
-allow coverage reuse. If bounded inspection cannot finish, Mortis runs the full
-comparison.
-`--graph` and `--second-pass` always
-use the full comparison. With unchanged skipping enabled, a compatible review
+can also trigger a recheck. Mortis rechecks importers when a function switches
+between `def` and `async def`, retained positional-only parameters move, or a
+new explicit parameter captures an argument previously passed through `*args` or
+`**kwargs`. Compatible optional additions and body-only changes allow coverage
+reuse. If bounded inspection cannot finish, Mortis runs the full comparison.
+`--graph` and `--second-pass` always use the full comparison. With unchanged skipping enabled, a compatible review
 of the same head tree can reuse complete caller coverage even when the commit
 SHA changed.
 
