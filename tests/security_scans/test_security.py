@@ -55,6 +55,22 @@ class EmptySession:
         return kwargs["validate"]({"findings": [], "required_paths": []})
 
 
+def test_scanner_hints_describe_only_normalized_checks_in_the_assigned_file():
+    item = SimpleNamespace(inventory={"one": {"code": True, "lines": 2}, "two": {"code": True, "lines": 1}},
+                           redact=lambda value: value.replace("sensitive", "[redacted]"))
+    check = {"kind": "infrastructure", "path": "one", "rule_id": "C-1", "title": "Check sensitive setting",
+             "start_line": 2, "end_line": 2, "explanation": "scanner details", "resource": "resource details"}
+    hints = service.scanner_hints(item, [
+        check, check, {**check, "kind": "secret", "rule_id": "S-1", "title": "secret data"},
+        {**check, "path": "two", "start_line": 3}, {**check, "rule_id": "sensitive"},
+    ])
+    assert hints == {
+        service.digest("one"): {"scanner_rules": ["C-1", "S-1"], "reported_checks": [
+            {"rule": "C-1", "title": "Check [redacted] setting", "start_line": 2, "end_line": 2}]},
+        service.digest("two"): {"scanner_rules": ["C-1"]},
+    }
+
+
 @pytest.mark.parametrize("path", ["C:/folder/source.py", "D:source.py", "C:\\source.py"])
 def test_security_paths_reject_windows_drive_prefixes(path):
     with pytest.raises(ValueError, match="invalid repository path"):
@@ -594,6 +610,8 @@ def test_source_selection_enforces_assigned_file(repository):
     class WrongFile:
         async def ask(self, *args, **kwargs):
             context = kwargs["context"]
+            if "guard.py" not in context["sources"]["current"]:
+                return kwargs["validate"]({"findings": [], "required_paths": ["guard.py"]})
             reference = next(key for key, row in context["citation_sources"].items() if row["path"] == "guard.py")
             proposal = {"title": "Wrong file", "category": "authorization", "severity": "high", "path": "a.py",
                 "explanation": "cause", "trigger": "input", "impact": "bypass", "remediation": "guard",
@@ -621,6 +639,40 @@ def test_missing_original_source_keeps_history_open(repository):
     assert retained["outcome"] == "not_observed"
     assert report["verifications"][0]["verdict"] == "uncertain"
     assert report["status"] == "partial"
+
+
+def test_missing_supporting_source_cannot_resolve_a_retained_finding(repository, monkeypatch):
+    original = commit(repository, {"support.md": "Original contract\n"})
+    commit(repository, {"a.py": "def auth(user):\n    return user.admin\n"})
+    previous = {"schema_version": "mortis.security/v1", "findings": [{"id": "prior", "kind": "code",
+        "path": "a.py", "title": "Check authorization", "severity": "high", "state": "open", "version": 1,
+        "source_sha": original, "fingerprint": "prior", "evidence": []}]}
+    read = engine.Snapshot.source
+
+    def unavailable(item, path, sha=None):
+        if path == "support.md":
+            raise ValueError("Fixture source unavailable.")
+        return read(item, path, sha)
+
+    class VerificationSession(EmptySession):
+        async def ask(self, stage, key, *, context, validate, **kwargs):
+            if stage == "security_analysis":
+                return validate({"findings": [], "required_paths": []})
+            assert stage == "security_verification"
+            requested = ["support.md"] if key.endswith(":0") else []
+            if not requested:
+                assert context["validation_feedback"]["required_paths"] == ["support.md"]
+            citations = [{"source_id": ref, "start_line": 2, "end_line": 2}
+                         for ref, source in context["citation_sources"].items() if source["path"] == "a.py"]
+            return validate({"verdict": "uncertain" if requested else "fixed", "explanation": "Fixture check",
+                             "change_explanation": "Authorization changed", "original_issue_present": True,
+                             "evidence": citations, "required_paths": requested})
+
+    monkeypatch.setattr(engine.Snapshot, "source", unavailable)
+    report = asyncio.run(service.scan(repository, session=VerificationSession(), previous=previous, scanner=scan_result))
+    assert report["status"] == "partial" and report["grade"] is None
+    assert report["findings"][0]["state"] == "open"
+    assert report["verifications"][0]["verdict"] == "uncertain"
 
 
 def test_secret_absence_needs_rotation_acknowledgment():
@@ -686,6 +738,8 @@ def test_independent_assessment_preserves_identity_and_supporting_source(reposit
         async def ask(self, stage, key, **kwargs):
             self.calls.append((stage, key, kwargs))
             context = kwargs["context"]
+            if stage == "security_analysis" and context["assigned_path"] != "a.py":
+                return kwargs["validate"]({"findings": [], "required_paths": []})
             reference = next(reference for reference, row in context["citation_sources"].items()
                              if row["path"] == "a.py")
             citation = {"source_id": reference, "start_line": 1, "end_line": 2}
@@ -698,7 +752,9 @@ def test_independent_assessment_preserves_identity_and_supporting_source(reposit
                         "verification": "Reject unauthorized users.", "evidence": [citation]}]
                 return kwargs["validate"]({"findings": findings, "required_paths": []})
             assert stage == "security_assessment"
-            assert "guard.py" in context["sources"]["current"]
+            if "guard.py" not in context["sources"]["current"]:
+                return kwargs["validate"]({"verdict": "uncertain", "finding_id": None, "explanation": "Check guard.",
+                                           "evidence": [], "required_paths": ["guard.py"]})
             return kwargs["validate"]({"verdict": "confirmed", "finding_id": "history_1" if context["history"] else None,
                 "explanation": "The actual guard does not enforce the user's authority.", "evidence": [citation], "required_paths": []})
 

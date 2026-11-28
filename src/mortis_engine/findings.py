@@ -1,6 +1,7 @@
 """Current local finding decisions, separate from immutable analysis reports."""
 
 import copy
+import json
 import time
 
 from .history import History
@@ -62,16 +63,21 @@ def _current(history, run_id):
     origin = history.row(run_id)
     if origin["kind"] not in {"review", "scan"}:
         raise ValueError("Choose a review or security scan run.")
-    observed = {}
-    for identity in history.previous_ids(origin["kind"], origin["scope"]):
-        report = effective_report(history, identity)
-        for retained in report.get("history", []):
-            if retained.get("id") and isinstance(retained.get("snapshot"), dict):
-                observed[retained["id"]] = {**retained["snapshot"], "status": retained.get("status", "open")}
-        for finding in report.get("findings", []):
-            if finding.get("id"):
-                observed[finding["id"]] = finding
-    current = apply_decisions(history, {"findings": list(observed.values())}, origin["kind"], origin["scope"])
+    finished = history.previous_ids(origin["kind"], origin["scope"])
+    if origin["kind"] == "scan" and finished:
+        report = scan_history(history, finished[-1], previous_runs=finished)
+        current = {"findings": [finding for finding in report["findings"] if finding.get("id")]}
+    else:
+        observed = {}
+        for identity in finished:
+            report = effective_report(history, identity)
+            for retained in report.get("history", []):
+                if retained.get("id") and isinstance(retained.get("snapshot"), dict):
+                    observed[retained["id"]] = {**retained["snapshot"], "status": retained.get("status", "open")}
+            for finding in report.get("findings", []):
+                if finding.get("id"):
+                    observed[finding["id"]] = finding
+        current = apply_decisions(history, {"findings": list(observed.values())}, origin["kind"], origin["scope"])
     versions = snapshot(history, origin["kind"], origin["scope"])
     field = "status" if origin["kind"] == "review" else "state"
     for finding in current["findings"]:
@@ -81,19 +87,76 @@ def _current(history, run_id):
     return origin, current["findings"]
 
 
-def scan_history(history, run_id, *, triage_snapshot=None, assessment_runs=None):
-    """Carry late confirmations from older scans into the next scan's evidence history."""
+def _scan_observation(finding):
+    evidence = finding.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = finding
+    return (finding.get("version"), evidence.get("source_sha"), finding.get("fingerprint"),
+            finding.get("evidence_status", finding.get("state", "open")))
+
+
+def _reconcile_scan_observations(history, previous_runs, run_id, report, scope):
+    by_id, observed_by_run, retry_reports = {}, {}, {}
+    for parent in previous_runs:
+        row = history.row(parent, "scan")
+        if row["scope"] != scope:
+            raise ValueError("The saved security history belongs to a different scan scope.")
+        observations = report if parent == run_id else history.report(parent)
+        definitive = {check["finding_id"] for check in observations.get("verifications", [])
+                      if check["verdict"] == "still_present"
+                      or check["verdict"] == "fixed" and observations.get("status") == "completed"}
+        signatures, predecessors = {}, None
+        for finding in observations.get("findings", []):
+            if not (identity := finding.get("id")):
+                continue
+            signature = signatures[identity] = _scan_observation(finding)
+            current = by_id.get(identity)
+            if current and signature != _scan_observation(current) and identity not in definitive:
+                if predecessors is None:
+                    plan = json.loads(row["plan"])
+                    parents = set(plan.get("previous", [])) & observed_by_run.keys()
+                    predecessors = [observed_by_run[prior] for prior in parents]
+                    retry_observations = {}
+                    for retry_id in plan.get("assessment_runs", []):
+                        if retry_id not in retry_reports:
+                            retry_reports[retry_id] = history.report(retry_id)
+                        retry = retry_reports[retry_id]
+                        if retry.get("parent_run_id") in parents and (confirmed := retry.get("finding")):
+                            retry_observations.setdefault(confirmed["id"], _scan_observation(confirmed))
+                    predecessors.append(retry_observations)
+                # A carry-forward from a shared predecessor cannot undo a sibling's observation.
+                if any(prior.get(identity) == signature for prior in predecessors):
+                    continue
+            by_id[identity] = finding
+        observed_by_run[parent] = signatures
+    return by_id
+
+
+def scan_history(history, run_id, *, triage_snapshot=None, assessment_runs=None, previous_runs=None, legacy=False):
+    """Reconcile finished same-scope scans through the saved history anchor."""
     origin = history.row(run_id, "scan")
-    report = effective_report(history, run_id, triage_snapshot=triage_snapshot, assessment_runs=assessment_runs)
-    by_id = {finding["id"]: finding for finding in report.get("findings", []) if finding.get("id")}
-    parents = set(history.previous_ids("scan", origin["scope"]))
+    scope = origin["scope"]
+    if legacy:
+        # Unfinished old scans must reproduce their original assessment and verification inputs.
+        report = effective_report(history, run_id, triage_snapshot=triage_snapshot, assessment_runs=assessment_runs)
+        parents = set(history.previous_ids("scan", scope))
+        by_id = {finding["id"]: finding for finding in report.get("findings", []) if finding.get("id")}
+    else:
+        report = history.report(run_id)
+        if previous_runs is None:
+            finished = history.previous_ids("scan", scope)
+            previous_runs = finished[:finished.index(run_id) + 1]
+        elif not previous_runs or previous_runs[-1] != run_id:
+            raise ValueError("The saved security history has a different latest run.")
+        parents = set(previous_runs)
+        by_id = _reconcile_scan_observations(history, previous_runs, run_id, report, scope)
     for retry_id in history.previous_ids("assessment") if assessment_runs is None else assessment_runs:
         retry = history.report(retry_id)
         if retry.get("parent_run_id") in parents and retry.get("finding"):
             finding = copy.deepcopy(retry["finding"])
             by_id.setdefault(finding["id"], finding)
     report["findings"] = [finding for finding in report.get("findings", []) if not finding.get("id")] + list(by_id.values())
-    return apply_decisions(history, report, "scan", origin["scope"], triage_snapshot)
+    return apply_decisions(history, report, "scan", scope, triage_snapshot)
 
 
 def list_findings(repository, *, run_id, include_history=False):

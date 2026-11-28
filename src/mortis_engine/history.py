@@ -90,6 +90,9 @@ class History:
             CREATE TABLE IF NOT EXISTS review_graphs (
                 run TEXT PRIMARY KEY, input TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS scan_rules (
+                run TEXT PRIMARY KEY, input TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS triage_events (
                 kind TEXT NOT NULL, scope TEXT NOT NULL, finding TEXT NOT NULL,
                 version INTEGER NOT NULL, run TEXT NOT NULL, previous TEXT NOT NULL,
@@ -176,6 +179,14 @@ class History:
         with self.db:
             self.db.execute("INSERT INTO review_graphs VALUES (?, ?)",
                             (run_id, json.dumps([graphs, status], ensure_ascii=False, allow_nan=False)))
+
+    def pin_scan_rules(self, run_id, rules):
+        """Return the scanner hints first saved for each path hash in this run."""
+        self.row(run_id, "scan")
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO scan_rules VALUES (?, ?)", (run_id, encode(rules)))
+            row = self.db.execute("SELECT input FROM scan_rules WHERE run=?", (run_id,)).fetchone()
+        return json.loads(row["input"])
 
     def attempts(self, run_id):
         return {(row["stage"], row["task"]): (row["input"], json.loads(row["record"]), row["result"])

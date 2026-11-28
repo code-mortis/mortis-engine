@@ -163,6 +163,114 @@ def test_scan_history_includes_late_retry_of_older_scan(repo):
         assert history.row(newer)["report"] == original
 
 
+def test_scan_history_preserves_missing_observations_through_anchor(repo):
+    older, older_report = save(repo, kind="scan", finding="carried", state="open")
+    save(repo, kind="scan", finding="shared", state="open")
+    anchor, anchor_report = save(repo, kind="scan", finding="shared", state="resolved")
+    newer, _ = save(repo, kind="scan", finding="newer", state="open")
+    save(repo, kind="scan", scope="other", finding="other-scope", state="open")
+
+    with History(repo) as history:
+        for parent, identity in ((older, "late-confirmation"), (newer, "newer-confirmation")):
+            retry = history.begin("assessment", "main", {})
+            history.finish(retry, {"parent_run_id": parent, "finding": {"id": identity, "state": "open"}})
+
+        merged = findings.scan_history(history, anchor)
+        assert {row["id"]: row["state"] for row in merged["findings"]} == {
+            "carried": "open", "shared": "resolved", "late-confirmation": "open"}
+        legacy = findings.scan_history(history, anchor, legacy=True)
+        assert {row["id"]: row["state"] for row in legacy["findings"]} == {
+            "shared": "resolved", "late-confirmation": "open", "newer-confirmation": "open"}
+        assert history.row(older)["report"] == older_report
+        assert history.row(anchor)["report"] == anchor_report
+
+
+@pytest.mark.parametrize("later_verdict", [None, "still_present", "scanner_failed"])
+def test_scan_history_keeps_fresh_evidence_across_forked_predecessors(repo, later_verdict):
+    scope = "main"
+    fixed = {"id": "fixed", "state": "open", "outcome": "present", "version": 2, "source_sha": "1" * 40}
+    recurring = {"id": "recurring", "state": "resolved", "outcome": "fixed", "version": 3, "source_sha": "1" * 40}
+    retry_finding = {**fixed, "id": "from-retry"}
+    with History(repo) as history:
+        prior = history.begin("scan", scope, {"previous": []})
+        history.finish(prior, {"schema_version": "mortis.security/v1", "status": "completed",
+                               "findings": [fixed, recurring]})
+        retry = history.begin("assessment", scope, {"parent_run_id": prior})
+        history.finish(retry, {"parent_run_id": prior, "finding": retry_finding})
+
+        plan = {"scan_policy": "security-scan/v2", "previous": [prior], "assessment_runs": [retry]}
+        first = history.begin("scan", scope, plan)
+        second = history.begin("scan", scope, plan)
+        direct = {"schema_version": "mortis.security/v1", "status": "completed", "findings": [
+            {**fixed, "state": "resolved", "outcome": "fixed", "fix_verification": {"verdict": "fixed"}},
+            {**recurring, "state": "open", "outcome": "present", "version": 4, "source_sha": "2" * 40},
+            {**retry_finding, "state": "resolved", "outcome": "fixed", "fix_verification": {"verdict": "fixed"}},
+        ], "verifications": [{"finding_id": identity, "verdict": "fixed"} for identity in ("fixed", "from-retry")]}
+        history.finish(first, direct)
+
+        failed = later_verdict == "scanner_failed"
+        verdict = "still_present" if later_verdict == "still_present" else "uncertain"
+        second_report = {"schema_version": "mortis.security/v1", "status": "failed" if failed else "partial",
+                         "findings": [
+                             {**fixed, "outcome": "present" if verdict == "still_present" else "not_observed"},
+                             {**recurring, "outcome": "not_observed" if failed else "fixed"},
+                             {**retry_finding, "outcome": "not_observed"},
+                         ], "verifications": [] if failed else [{"finding_id": "fixed", "verdict": verdict},
+                                                                {"finding_id": "from-retry", "verdict": "uncertain"}]}
+        history.finish(second, second_report)
+
+        merged = {row["id"]: row for row in findings.scan_history(history, second)["findings"]}
+        assert merged["recurring"] == direct["findings"][1]
+        assert merged["from-retry"] == direct["findings"][2]
+        expected = second_report["findings"][0] if verdict == "still_present" else direct["findings"][0]
+        assert merged["fixed"] == expected
+        assert history.report(first) == direct and history.report(second) == second_report
+
+    current = {row["id"]: row for row in findings.list_findings(repo, run_id=second)["findings"]}
+    assert current["recurring"]["state"] == "open" and current["fixed"]["state"] == expected["state"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_scan_resume_uses_its_saved_history_and_policy(repo, monkeypatch, legacy):
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test", "-c",
+                    "user.email=test@localhost", "-c", "commit.gpgsign=false", "commit", "--allow-empty",
+                    "-qm", "fixture"], cwd=repo, check=True)
+    scope = subprocess.run(["git", "symbolic-ref", "HEAD"], cwd=repo, check=True,
+                           capture_output=True, text=True).stdout.strip()
+    older, _ = save(repo, kind="scan", scope=scope, finding="carried", state="open")
+    anchor, _ = save(repo, kind="scan", scope=scope, finding="current", state="open")
+    calls = []
+
+    async def scan(*args, previous, scan_policy, **kwargs):
+        calls.append((scan_policy, [row["id"] for row in previous["findings"]]))
+        if len(calls) == 1:
+            raise InterruptedError("Fixture interruption")
+        return {"schema_version": "mortis.security/v1", "status": "completed", "findings": previous["findings"]}
+
+    monkeypatch.setattr(operations.security, "scan", scan)
+    connection = {"kind": "api", "provider": "test", "protocol": "openai", "model": "fixture",
+                  "base_url": "https://example.com/v1", "options": {}}
+    options = {"kind": "scan", "connection": connection, "get_credentials": lambda: {}}
+    with pytest.raises(InterruptedError, match="Fixture interruption"):
+        operations.run(repo, **options)
+    with History(repo) as history, history.db:
+        run_id = next(row["id"] for row in history.list() if not row["finished"])
+        plan = json.loads(history.row(run_id)["plan"])
+        assert plan["previous"] == [older, anchor]
+        assert plan["scan_policy"] == "security-scan/v2"
+        if legacy:
+            plan.pop("scan_policy")
+            plan["previous"] = [anchor]
+            history.db.execute("UPDATE runs SET plan=? WHERE id=?", (encode(plan), run_id))
+
+    save(repo, kind="scan", scope=scope, finding="finished-later", state="open")
+    result = operations.run(repo, resume=run_id, **options)
+    assert calls == [("security-scan/v2", ["carried", "current"]),
+                     (None, ["current"]) if legacy else ("security-scan/v2", ["carried", "current"])]
+    assert result["run_id"] == run_id
+    assert result["grade"] == "D"
+
+
 @pytest.mark.parametrize("identity", [{}, {"id": None}, {"id": ""}])
 def test_scan_history_preserves_findings_without_ids(repo, identity):
     older, _ = save(repo, kind="scan")
@@ -193,3 +301,17 @@ def test_legacy_database_upgrade_and_cli_need_no_connection(repo, capsys):
     assert json.loads(capsys.readouterr().out)["findings"][0]["decision"] == "dismissed"
     with History(repo) as history:
         assert encode(history.report(run)) == original
+
+
+@pytest.mark.parametrize("original_rules", [{}, {"a" * 64: ["CFG001", "CFG002"]}])
+def test_scan_rule_checkpoint_preserves_first_input_after_upgrade_and_reopen(repo, original_rules):
+    run, original_report = save(repo, kind="scan")
+    with History(repo) as history, history.db:
+        history.db.execute("DROP TABLE scan_rules")
+
+    with History(repo) as history:
+        assert history.pin_scan_rules(run, original_rules) == original_rules
+        assert history.pin_scan_rules(run, {"b" * 64: ["CFG003"]}) == original_rules
+    with History(repo) as history:
+        assert history.pin_scan_rules(run, {"c" * 64: ["CFG004"]}) == original_rules
+        assert history.row(run)["report"] == original_report

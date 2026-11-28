@@ -14,7 +14,9 @@ from mortis_engine.review.context import source_id
 from mortis_engine.review.service import effective_connection
 from mortis_engine.review.settings import RepoSettings
 from mortis_engine.schemas import Response, Usage
+from mortis_engine.security_scans import engine as security_engine
 from mortis_engine.security_scans import service as security
+from mortis_engine.security_scans.policy import SCAN_POLICY
 from mortis_engine.workflow import Session
 
 CONNECTION = {"kind": "api", "provider": "test", "protocol": "openai", "model": "fixture",
@@ -46,6 +48,9 @@ def assessment_stage(request, local, monkeypatch):
         if "assigned_path" in context:
             path = context["assigned_path"]
             name = next((name for name, value in paths.items() if value == path), None)
+            if name == "D" and not any(row["path"] == paths["L"] for row in context["citation_sources"].values()):
+                assert paths["L"] in context["available_paths"]
+                return None, {"findings": [], "required_paths": [paths["L"]]}
             proposals = [] if name is None else [{"title": name, "path": path, "category": "authorization",
                 "severity": "high", "explanation": "Fixture", "trigger": "Fixture", "impact": "Fixture",
                 "remediation": "Fixture", "verification": "Fixture",
@@ -56,6 +61,8 @@ def assessment_stage(request, local, monkeypatch):
             output = {**decision(), "evidence": [cite(context["finding"]["path"])]}
         else:
             name = context["proposal"]["title"]
+            if name == "D":
+                assert any(row["path"] == paths["L"] for row in context["citation_sources"].values())
             output = {"verdict": "confirmed", "explanation": "Fixture", "finding_id": None,
                       "evidence": [cite(paths[name])], "required_paths": []}
         if name == "D" and context["history"]:
@@ -70,7 +77,7 @@ def assessment_stage(request, local, monkeypatch):
             if kind == "scan":
                 return await security.scan(repo, ref=head, session=session, options=options, scanner=lambda *args: {
                     "findings": [], "targets": {}, "problems": [], "metadata": {"database_fresh": True}},
-                    progress=progress, continuous=continuous)
+                    progress=progress, continuous=continuous, scan_policy=SCAN_POLICY if continuous else None)
             snapshots = [{"path": paths["L" if name == "D" else name], "content": name, "start_line": 1,
                           "end_line": 1, "existing_code": f"value = {'L' if name == 'D' else name!r}",
                           "suggestion_code": ""} for name in paths]
@@ -82,7 +89,7 @@ def assessment_stage(request, local, monkeypatch):
                     progress=progress, continuous=continuous)
 
     monkeypatch.setattr(gateway, "reservation",
-                        lambda _, request: 0 if "Audit the assigned file" in request.instructions else 400)
+                        lambda _, request: 0 if "assigned_path" in request_context(request) else 400)
     return repo, kind, run, response
 
 
@@ -235,7 +242,8 @@ def test_assessment_dispatch_keeps_budget_reservations(assessment_stage, monkeyp
         assert session.usage(stage)["total_tokens"] == 900
 
     with History(repo) as history:
-        limits = [(1000, None), (None, 1007)] if kind == "scan" else [(1000, None)]
+        # The scan analyzes seven files and requests one extra pass for supporting source.
+        limits = [(1000, None), (None, 1008)] if kind == "scan" else [(1000, None)]
         for budget, scan_budget in limits:
             run_id = history.begin(kind, "main", {"triage_versions": {}})
             with history.claim(run_id):
@@ -292,7 +300,7 @@ def test_assessment_retry_releases_slot_for_independent_work(assessment_stage, m
 
 
 @pytest.mark.parametrize("assessment_stage", ["scan"], indirect=True)
-@pytest.mark.parametrize(("budget", "scan_budget", "cancel"), [(1000, None, False), (None, 1007, False),
+@pytest.mark.parametrize(("budget", "scan_budget", "cancel"), [(1000, None, False), (None, 1008, False),
                                                                (1000, None, True)])
 def test_scan_assessment_waits_for_temporary_reservation(assessment_stage, monkeypatch, budget, scan_budget, cancel):
     repo, _, run, response = assessment_stage
@@ -701,12 +709,18 @@ def test_legacy_failed_candidate_has_explicit_blocker(local):
     assert "predates" in operations.list_assessments(repo, run_id=parent)["candidates"][0]["blocked_reason"]
 
 
-def test_scan_failed_candidate_retries_without_scanner_or_analysis(local, monkeypatch):
+@pytest.mark.parametrize("missing_evidence", [False, True])
+def test_scan_failed_candidate_retries_without_scanner_or_analysis(local, monkeypatch, missing_evidence):
     repo, _, head = local
     calls = []
+    if missing_evidence:
+        (repo / "support.md").write_text("Supporting evidence\n")
+        git(repo, "add", "support.md")
+        git(repo, "commit", "-qm", "supporting evidence")
+        head = git(repo, "rev-parse", "HEAD")
 
     async def initial(connection, credentials, request, **kwargs):
-        if "Audit the assigned file" in request.instructions:
+        if "assigned_path" in request_context(request):
             proposal = {"title": "Authorization bypass", "category": "authorization", "severity": "high", "path": "app.py",
                         "explanation": "Missing guard", "trigger": "Zero", "impact": "Crash", "remediation": "Guard input",
                         "verification": "Inspect callers", "evidence": [{"source_id": "source_1", "start_line": 1, "end_line": 2}]}
@@ -726,9 +740,27 @@ def test_scan_failed_candidate_retries_without_scanner_or_analysis(local, monkey
     candidate = operations.list_assessments(repo, run_id=parent)["candidates"][0]
     assert candidate["status"] == "failed" and candidate["retry_eligible"]
 
+    if missing_evidence:
+        read = security_engine.Snapshot.source
+
+        def read_source(item, path, sha=None):
+            if path == "support.md":
+                raise ValueError("Fixture cannot read supporting evidence.")
+            return read(item, path, sha)
+
+        monkeypatch.setattr(security_engine.Snapshot, "source", read_source)
+
     async def retry(connection, credentials, request, **kwargs):
         calls.append(request.instructions)
-        assert "Audit the assigned file" not in request.instructions
+        context = request_context(request)
+        assert "assigned_path" not in context
+        if missing_evidence:
+            assert "support.md" in context["available_paths"]
+            assert all(row["path"] != "support.md" for row in context["citation_sources"].values())
+            if len(calls) == 1:
+                return Response(output={"verdict": "uncertain", "finding_id": None, "explanation": "Need supporting evidence",
+                    "evidence": [], "required_paths": ["support.md"]}, usage=Usage(total_tokens=13))
+            assert context["validation_feedback"]["required_paths"] == ["support.md"]
         return Response(output={"verdict": "confirmed", "finding_id": None, "explanation": "The supplied code confirms the issue",
             "evidence": [{"source_id": "source_1", "start_line": 1, "end_line": 2}], "required_paths": []}, usage=Usage(total_tokens=13))
 
@@ -736,7 +768,13 @@ def test_scan_failed_candidate_retries_without_scanner_or_analysis(local, monkey
     monkeypatch.setattr(security, "scan", lambda *args, **kwargs: pytest.fail("Repeated scan"))
     retried = operations.retry_assessment(repo, run_id=parent, candidate_id=candidate["candidate_id"],
                                          connection=CONNECTION, get_credentials=lambda: {})
-    assert retried["status"] == "completed" and retried["finding"]["kind"] == "code" and len(calls) == 1
+    if missing_evidence:
+        assert retried["status"] == "failed" and retried["finding"] is None and len(calls) == 2
+        assert "Required source remains unavailable" in retried["error"]
+        assert retried["usage"]["total_tokens"] == 26 and retried["lineage_usage"]["total_tokens"] == 33
+        assert operations.list_findings(repo, run_id=parent)["findings"] == []
+    else:
+        assert retried["status"] == "completed" and retried["finding"]["kind"] == "code" and len(calls) == 1
     with History(repo) as history:
         assert history.row(parent)["report"] == original
 

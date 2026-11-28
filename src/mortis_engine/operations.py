@@ -15,6 +15,7 @@ from .history import History
 from .review import planning, settings, source, source_lines, workflows
 from .review.service import credentials_for_history, effective_connection, scope_ref
 from .security_scans import service as security
+from .security_scans.policy import SCAN_POLICY
 from .workflow import Session
 
 
@@ -40,6 +41,9 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
             overrides = saved.get("overrides")
             rotations = saved.get("rotations", [])
         continuous = continuous_assessment(saved) if kind == "scan" else False
+        scan_policy = (saved.get("scan_policy") if saved is not None else SCAN_POLICY) if kind == "scan" else None
+        if scan_policy not in (None, SCAN_POLICY):
+            raise ValueError("The saved security scan policy is unsupported.")
         # Normalize subdirectory invocations to the same local repository as its saved history.
         path = Path(repository).resolve()
         root = next((p for p in (path, *path.parents) if (p / ".git").exists()), path)
@@ -73,13 +77,13 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                 assessment_runs = saved.get("assessment_runs", [])
             else:
                 scope = scope_ref(repo, env, ref) if kind != "summary" else finding_run
-                previous = history.previous_ids("scan", scope)[-1:] if kind == "scan" else []
+                previous = history.previous_ids("scan", scope) if kind == "scan" else []
                 decisions = snapshot(history, "scan", scope) if kind == "scan" else {}
                 assessment_runs = history.previous_ids("assessment")
                 run_id = history.begin(kind, scope, {"ref": ref, "sha": sha, "connection": identity, "previous": previous,
                     "profile": profile, "finding_run": finding_run, "effort": effort, "rotations": list(rotations),
                     "concurrency": concurrency, "overrides": overrides, "triage_versions": decisions, "assessment_runs": assessment_runs,
-                    **({"assessment_dispatch": ASSESSMENT_DISPATCH_POLICY} if kind == "scan" else {}),
+                    **({"assessment_dispatch": ASSESSMENT_DISPATCH_POLICY, "scan_policy": scan_policy} if kind == "scan" else {}),
                     **({"evidence_policy": options["_evidence_policy"], "source_line_policy": source_lines.POLICY}
                        if kind == "verify" else {})})
             with history.claim(run_id):
@@ -95,12 +99,17 @@ def run(repository, *, kind, connection, get_credentials, ref="HEAD", profile=No
                     async with session:
                         if kind == "scan":
                             scan_options = {k: v for k, v in options.items() if k in security.ScanOptions.model_fields}
-                            prior = scan_history(history, previous[0], triage_snapshot=decisions,
-                                                 assessment_runs=assessment_runs) if previous else None
+                            prior = None
+                            if previous:
+                                legacy = scan_policy is None
+                                anchor = previous[0] if legacy else previous[-1]
+                                prior = scan_history(history, anchor, triage_snapshot=decisions,
+                                                     assessment_runs=assessment_runs, previous_runs=previous,
+                                                     legacy=legacy)
                             if rotations:
                                 acknowledge_rotations(prior, rotations)
                             return await security.scan(root, ref=sha, session=session, options=scan_options, previous=prior,
-                                                       progress=progress, continuous=continuous)
+                                                       progress=progress, continuous=continuous, scan_policy=scan_policy)
                         if kind == "verify":
                             with source_lines.use(saved.get("source_line_policy") if saved else source_lines.POLICY):
                                 return await workflows.verify(repo, env, original, sha, options, session)

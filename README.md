@@ -422,6 +422,10 @@ mortis scan --concurrency 8 --effort high --progress
 
 The scan requires Trivy 0.76.2 on PATH. Trivy refreshes its advisory database, then checks dependencies, configuration and secrets against an isolated local snapshot. Semantic analysis, candidate assessment and verification use the selected AI profile. Repository source is excluded from the Trivy update request. For a supported npm CVE without an established fixed version, verification can look up the CVE ID in GitHub's public advisory database. A partial scan keeps its coverage and findings and reports an unavailable grade.
 
+Each manifest needs dependency inventory for its own ecosystem. The report lists manifests with missing coverage. If a requested source file remains unavailable, the scan withholds its grade and keeps affected findings open. New scans carry forward observations from completed scans of the same scope, including overlapping runs.
+
+Semantic analysis starts with the assigned file and can request supporting files. If the provider exhausts its output limit and reports its token usage, Mortis can make one shorter recovery request for that task within the same limits. Both requests count toward the budget.
+
 An optional `[scan]` table in `mortis.toml` accepts `model`, `effort`, `concurrency`, `language`, `exclusions`, `timeout_seconds`, `token_budget`, `max_output_tokens`, `assessment_token_budget` and `verification_token_budget`. The scan output limit inherits `[review].max_output_tokens` unless overridden in `[scan]`. Scan defaults use high effort and four concurrent file requests. `mortis config show` displays effective review and scan settings. After rotating or revoking a reported secret, pass `--acknowledge-rotation FINDING_ID` on the next scan of that scope so Mortis can verify removal. Use the ID printed with the original finding.
 
 ## Optional code graph
