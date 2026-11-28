@@ -31,6 +31,16 @@ def test_sanitize_preserves_json_scalar_values():
     assert sanitize(value, {}) == value
 
 
+@pytest.mark.parametrize("token", [
+    "ghs_" + "a" * 36,
+    "ghs_12345_" + "a" * 35 + "." + "b-_" * 100 + "." + "c_" * 86 + "-",
+], ids=["classic", "stateless"])
+@pytest.mark.parametrize("credentials", [{}, {"extra_headers": {"X-Version": "1"}}])
+def test_sanitize_redacts_unknown_installation_tokens_in_diffs(token, credentials):
+    context = {"diff": f'-key="{token}"\n+message=Expired token {token}.\n'}
+    assert sanitize(context, credentials) == {"diff": '-key="[redacted]"\n+message=Expired token [redacted].\n'}
+
+
 @pytest.mark.parametrize(("start", "end", "quote"), [
     (1, 1, ""), (1, 1, " \n"), (1, 1, None), (1, 1, 1),
     (0, 1, "first"), (-1, 2, "second"), (2, 1, "first"),

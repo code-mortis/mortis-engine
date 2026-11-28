@@ -570,6 +570,26 @@ def test_historical_secret_rules_find_changed_location_and_fail_closed():
         engine.redact_secrets("anything", [], [{**rule, "match_bytes": -1}], key=key)
 
 
+def test_redact_installation_tokens_in_serialized_finding_lines():
+    token = "ghs_12345_header.pay_load.sig-nature"
+    text = f"first\n{token}\r{token}\t{token}"
+    result = engine.redact_secrets(json.dumps({"description": text}), [], key=b"test")
+    assert json.loads(result) == {"description": "first\n[redacted]\r[redacted]\t[redacted]"}
+
+
+def test_redact_installation_tokens_overlapping_exact_and_historical_secrets():
+    key = b"a" * 32
+    token = "ghs_12345_header.pay_load.sig-nature"
+    secret = f'prefix={token}/suffix\n"sensitive"'
+    rule = {"rule_id": "token", "match_bytes": len(secret.encode()),
+            "identity": engine.secure_digest("token\0" + secret, key)}
+    escaped = json.dumps(secret)[1:-1]
+    text = f"{token}, {secret}, {escaped}."
+    assert engine.redact_secrets(text, ["1"], [rule], key=key) == (
+        "[redacted], [redacted]\n[redacted], [redacted]\\n[redacted]."
+    )
+
+
 def test_source_selection_enforces_assigned_file(repository):
     class WrongFile:
         async def ask(self, *args, **kwargs):

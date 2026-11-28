@@ -121,11 +121,7 @@ def redact_secrets(text, values, rules=(), stopped=None, *, key):
                 identities.discard(candidate.hexdigest())
                 if not identities:
                     break
-    for value in sorted({value for value in values if value}, key=len, reverse=True):
-        replacement = "\n".join("[redacted]" for _ in value.split("\n"))
-        text = text.replace(value, replacement)
-        text = text.replace(json.dumps(value)[1:-1], json.dumps(replacement)[1:-1])
-    return clean_text(text)
+    return clean_text(text, values, preserve_lines=True)
 
 
 def redacted_context(item, value, *, structural=False):
