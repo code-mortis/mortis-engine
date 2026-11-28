@@ -213,8 +213,24 @@ def test_incremental_review_rechecks_importers_of_changed_signature(
     ("value=0, /, *, amount=0", "amount=0", "total(1, amount=2)", True),
     ("amount=0, /", "amount=0", "total(1)", False),
     ("amount, *items", "amount, *items, tax=0", "total(1, 2)", False),
+    pytest.param("amount, currency, /", "currency, amount, /", "total(10, 'JPY')", True,
+                 id="reordered-positional-only"),
+    pytest.param("amount, currency, /", "amount, unit, /", "total(10, 'JPY')", False,
+                 id="renamed-positional-only"),
+    pytest.param("amount, currency='USD', /", "amount, unit='USD', /, currency='USD'",
+                 "total(10, 'JPY')", True, id="displaced-optional-positional-only"),
+    pytest.param("amount, currency='USD', /", "amount, unit='USD', /, *, currency='USD'",
+                 "total(10, 'JPY')", True, id="positional-only-moved-to-keyword-only"),
+    pytest.param("amount, **meta", "amount, *, quantity=1, **meta", "total(10, quantity=2)", True,
+                 id="keyword-only-captures-kwargs"),
+    pytest.param("amount, **meta", "amount, quantity=1, **meta", "total(10, quantity=2)", True,
+                 id="positional-or-keyword-captures-kwargs"),
+    pytest.param("amount, *, quantity=1, **meta", "amount, *, quantity=2, **meta", "total(10, quantity=3)", False,
+                 id="same-explicit-keyword-with-kwargs"),
+    pytest.param("amount, /, **meta", "amount, quantity=1, /, **meta", "total(10, quantity=2)", False,
+                 id="positional-only-addition-leaves-kwargs"),
 ])
-def test_incremental_review_tracks_optional_arguments(
+def test_incremental_review_tracks_argument_bindings(
     repo, tmp_path_factory, monkeypatch, provider, connection, before, after, call, recheck,
 ):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
@@ -233,6 +249,38 @@ def test_incremental_review_tracks_optional_arguments(
     assert paths(second, "completed") == expected
     assert paths(second, "reused") == ([] if recheck else ["checkout.py"])
     assert sorted(unit["path"] for batch in analysis for unit in batch) == expected
+
+
+@pytest.mark.parametrize(("before", "after", "caller", "recheck"), [
+    pytest.param("async def total(amount): return amount\n", "def total(amount): return amount\n",
+                 "async def quote(): return await total(10)\n", True, id="async-to-sync"),
+    pytest.param("def total(amount): return amount\n", "async def total(amount): return amount\n",
+                 "price = total(10) + 1\n", True, id="sync-to-async"),
+    pytest.param("async def total(amount): return amount\n", "async def total(amount): return round(amount)\n",
+                 "async def quote(): return await total(10)\n", False, id="async-body-only"),
+])
+def test_incremental_review_tracks_async_definition(
+    repo, tmp_path_factory, monkeypatch, provider, connection, before, after, caller, recheck,
+):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("incremental-state")))
+    commit(repo, {"billing.py": before})
+    git(repo, "switch", "-qc", "topic")
+    commit(repo, {"checkout.py": "from billing import total\n" + caller, "inventory.py": "items = 1\n"})
+    kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
+              "overrides": {"incremental": True}}
+    first = review_commits(repo, **kwargs)
+    assert paths(first, "completed") == ["checkout.py", "inventory.py"]
+
+    commit(repo, {"billing.py": after})
+    analysis = provider[0]["analysis"]
+    analysis.clear()
+    second = review_commits(repo, **kwargs)
+    assigned = ["billing.py", "checkout.py"] if recheck else ["billing.py"]
+    assert second["comparison"]["strategy"] == "incremental"
+    assert second["comparison"]["baseline_run_id"] == first["run_id"]
+    assert paths(second, "completed") == assigned
+    assert paths(second, "reused") == (["inventory.py"] if recheck else ["checkout.py", "inventory.py"])
+    assert sorted(unit["path"] for batch in analysis for unit in batch) == assigned
 
 
 @pytest.mark.parametrize(("definition", "module"), [
@@ -370,7 +418,7 @@ def test_new_reuse_policy_requires_one_fresh_baseline(repo, comparison_repo, pro
     kwargs = {"base": "main", "connection": connection, "get_credentials": dict,
               "overrides": {"incremental": True, "skip_unchanged": True}}
     with monkeypatch.context() as old:
-        old.setattr(comparison, "REUSE_POLICY", "python-caller-signatures/v4")
+        old.setattr(comparison, "REUSE_POLICY", "python-caller-signatures/v5")
         previous = review_commits(repo, **kwargs)
     current = review_commits(repo, **kwargs)
     assert current["head_sha"] == previous["head_sha"]

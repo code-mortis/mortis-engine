@@ -70,6 +70,10 @@ Use `--effort low`, `--effort medium` or `--effort high` to override the reposit
 
 Working-tree reviews read files without following symlinks or running Git filters. On a platform without safe no-follow file access, stage the changes you intend to review and use `--staged`. Files over 20 MB or otherwise unreadable are reported as coverage gaps when the snapshot can still be built.
 
+Replacing a tracked file with a directory, or a directory with a file, is supported before staging.
+A file marked with `git add -N` is included in a working-tree review. It enters a staged review
+when you stage its contents with `git add`.
+
 Preview the same local planner without an AI connection or saved analysis run:
 
 ```sh
@@ -114,17 +118,22 @@ Branch, staged and working-tree reviews automatically look for surviving referen
 deleted or renamed files. For example, deleting a shell script can bring an unchanged Python
 line that invokes it into review. Discovery uses the same file policy as the review,
 including custom extensions admitted by `review.rules.include`, and works without Docker.
+Shell callers can quote a literal script path or escape spaces in it with a backslash.
 For Python modules under `src/`, discovery also recognizes absolute imports such as
 `from package.module import helper` when `src/package/module.py` is removed or moved.
 It resolves relative Python imports against the calling file's package, including
 aliases and parenthesized imports that span several lines. When a function imports a
 renamed module locally, other functions can still be flagged for using the old binding.
+Calls through an imported symbol alias can receive their own review range, even when the
+call is several lines away from the import.
 Run `mortis review --preview` to see which caller ranges would be checked.
 
 The `affected_callers` section lists the triggering changes, caller ranges, outcomes and
 discovery limits. An unchanged caller contributes only its examined range to coverage.
 Path and module references, and symbol names corroborated by a dependency reference, nominate
-sites for assessment. Dynamically constructed names can escape this search. Discovery examines
+sites for assessment. The assessor receives the deletion or rename verified against the merge
+base and head, then checks whether the change breaks the cited caller. Dynamically constructed
+names can escape this search. Discovery examines
 at most 512 eligible caller files and 8 MiB of caller source per run. When a bound leaves discovery
 incomplete, the CLI returns exit code 2 and the report keeps validated findings.
 
@@ -187,9 +196,10 @@ Mortis rechecks previously reviewed Python files that import a module-level func
 or its module when the function is removed, its required parameters change, or it
 gains or loses `*args` or `**kwargs`. Removing or renaming an optional parameter
 that callers can pass by name also triggers a recheck, as does displacing it from
-its positional slot. Mortis also rechecks callers when a new slot takes an argument
-previously captured by `*args`, or a positional-only parameter starts accepting a
-keyword previously captured by `**kwargs`. Compatible optional additions and
+its positional slot. Mortis also rechecks callers when a function switches between
+`def` and `async def`, retained positional-only parameters change slots, a new slot
+takes an argument previously captured by `*args`, or an explicit parameter starts
+accepting a keyword previously captured by `**kwargs`. Compatible optional additions and
 body-only changes allow coverage reuse.
 For functions defined in `__init__.py`, this
 includes callers that use `import package.submodule`. Mortis compares the two heads

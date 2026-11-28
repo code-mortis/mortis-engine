@@ -18,7 +18,8 @@ MAX_REF_ENTRIES = 100_000
 METADATA_WALK_SECONDS = 30
 
 
-def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=None, strict_utf8=False):
+def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=None, strict_utf8=False,
+        raw_output=False):
     executable = shutil.which("git", path=os.pathsep.join(
         entry for entry in env.get("PATH", os.defpath).split(os.pathsep) if Path(entry).is_absolute()))
     if executable is None:
@@ -51,8 +52,11 @@ def git(directory, env, *args, stopped=lambda: False, timeout=180, input_bytes=N
             if os.fstat(output.fileno()).st_size + os.fstat(errors.fileno()).st_size > 20_000_000:
                 raise ValueError("Local Git output exceeds 20 MB.")
             output.seek(0)
+            value = output.read(20_000_000)
+            if raw_output:
+                return value
             try:
-                return output.read(20_000_000).decode("utf-8", "strict" if strict_utf8 else "replace")
+                return value.decode("utf-8", "strict" if strict_utf8 else "replace")
             except UnicodeDecodeError:
                 if args[:2] == ("cat-file", "blob"):
                     raise ValueError("Required source is binary or is not UTF-8 text.") from None

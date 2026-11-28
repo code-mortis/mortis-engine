@@ -11,7 +11,8 @@ from .errors import ReviewStopped
 from .planning import fingerprint, supports_test_evidence
 from .workflow_contracts import AssessmentResult
 
-ATTRIBUTION_VERSION = "merge-base/v1"
+LEGACY_ATTRIBUTION_VERSION = "merge-base/v1"
+ATTRIBUTION_VERSION = "merge-base/v2"
 
 INSTRUCTIONS = (
     "Adjudicate only the supplied proposed finding; do not search for additional findings. "
@@ -79,6 +80,13 @@ ATTRIBUTION_INSTRUCTIONS = (
     "An absent file or unavailable base source is not proof of an introduced defect. "
     "If attribution cannot be established within the supplied evidence and bounded requests, remain uncertain. "
     "Use empty required_base_paths when comparison is already sufficient. "
+)
+
+AFFECTED_CHANGE_INSTRUCTIONS = (
+    " attribution.affected_changes records deletions and Git-detected renames verified against the pinned "
+    "merge base and head. A deleted path is absent from changed_paths, which lists eligible current paths. "
+    "For a rename, new_path is the detected destination. Use the record to establish the path change and "
+    "independently establish its effect on the cited caller."
 )
 
 class AssessmentResponse(AssessmentResult):
@@ -200,8 +208,9 @@ def build_context(repo, env, fetch_env, run, snapshot, previous, stopped):
     selected = verification.filter_context(repo, env, dict.fromkeys(filter(None, paths), "# context\n"),
                                            run.config["settings"], stopped, **scope)
     merge_base = git_source.git(repo, env, "merge-base", run.base_sha, head, stopped=stopped).strip()
+    attribution = run.config["settings"].get("_assessment_attribution", ATTRIBUTION_VERSION)
     if (source_sha == head and run.config["settings"].get("review_mode") != "all"
-        and run.config["settings"].get("_assessment_attribution", ATTRIBUTION_VERSION) == ATTRIBUTION_VERSION):
+        and attribution in (LEGACY_ATTRIBUTION_VERSION, ATTRIBUTION_VERSION)):
         from mortis_engine.review import planning
 
         context["original_sha"] = merge_base
@@ -209,13 +218,18 @@ def build_context(repo, env, fetch_env, run, snapshot, previous, stopped):
         context["attribution"] = {"version": 1, "merge_base_sha": merge_base,
             "renames": {old: path for path, old, status in changes if old and status.startswith("R")}}
         if triggers := snapshot.get("affected_triggers"):
+            publish_changes = attribution != LEGACY_ATTRIBUTION_VERSION
+            if publish_changes and len(triggers) > planning.affected_callers.MAX_TRIGGERS:
+                raise ValueError("Assessment exceeds its affected dependency change limit.")
             removed = {old or path: (path if old else None) for path, old, status in changes
                        if status == "D" or status.startswith("R")}
             originals = {item["path"] for item in triggers}
-            permitted = verification.review_paths(repo, env, merge_base, head, originals, run.config["settings"], stopped)
+            permitted = verification.review_paths(repo, env, merge_base, head, originals,
+                                                  run.config["settings"], stopped, changes=changes)
             if originals != permitted:
                 raise ValueError("The affected caller refers to a dependency outside review scope.")
             # Larger originals can be requested through the usual bounded assessment follow-up.
+            verified_changes = []
             remaining = 64 * 1024
             for item in triggers:
                 path = item["path"]
@@ -224,9 +238,17 @@ def build_context(repo, env, fetch_env, run, snapshot, previous, stopped):
                 entry = planning._entry(repo, env, merge_base, path, stopped)
                 if not entry or item["blob_sha"] != entry["blob_sha"]:
                     raise ValueError("The affected dependency differs from its pinned blob.")
+                if publish_changes:
+                    destination = removed[path]
+                    status = "deleted" if destination is None else "renamed"
+                    if item["status"] != status:
+                        raise ValueError("The affected dependency status differs from the pinned change.")
+                    verified_changes.append({"path": path, "status": status, "new_path": destination})
                 if entry["size"] <= remaining:
                     expand_base_context(repo, env, run, context, [path], stopped)
                     remaining -= entry["size"]
+            if verified_changes:
+                context["attribution"]["affected_changes"] = verified_changes
     selected &= verification.review_paths(repo, env, merge_base, head, selected,
                                     run.config["settings"], stopped,
                                     supporting_evidence=supports_test_evidence(run.config["settings"]))

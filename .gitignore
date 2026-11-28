@@ -19,3 +19,6 @@ htmlcov/
 .codex/
 PLAN.md
 REVIEW_IMPROVEMENTS.md
+graphify-out/
+.claude/settings.local.json
+.claude/agents/

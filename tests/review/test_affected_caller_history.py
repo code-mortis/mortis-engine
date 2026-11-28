@@ -150,6 +150,42 @@ def test_resume_preserves_v4_absolute_import_scope(repo, tmp_path_factory, provi
     assert [(site["path"], site["unit_key"])] == captured
 
 
+def test_resume_preserves_v6_caller_scope_and_unit_keys(repo, tmp_path_factory, provider, connection, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("resume-v6-state")))
+    retired = "scripts/legacy task.sh"
+    commit(repo, {
+        retired: "exit 0\n",
+        "quoted.sh": "'./scripts/legacy task.sh'\n",
+        "escaped.sh": r"./scripts/legacy\ task.sh" + "\n",
+    })
+    git(repo, "switch", "-qc", "topic")
+    git(repo, "rm", retired)
+    head = commit(repo, {})
+    captured = []
+
+    def interrupt(_repo, _env, plan, *_args, **_kwargs):
+        captured.extend((unit.path, unit.key) for unit in plan.units)
+        raise KeyboardInterrupt
+
+    policy = affected_callers.SCOPED_IMPORT_POLICY
+    with monkeypatch.context() as patch, pytest.raises(KeyboardInterrupt):
+        patch.setattr(planning, "AFFECTED_CALLER_POLICY", policy)
+        patch.setattr(service.engine, "run", interrupt)
+        review_commits(repo, base="main", connection=connection, get_credentials=dict)
+
+    with History(repo) as history:
+        run_id = history.list()[0]["id"]
+        assert json.loads(history.row(run_id)["plan"])["affected_caller_policy"] == policy
+
+    commit(repo, {"quoted.sh": "exit 0\n"})
+    report = review_local(repo, connection=connection, get_credentials=dict, resume=run_id)
+    assert report["status"] == "completed" and report["head_sha"] == head
+    assert report["affected_callers"]["policy"] == policy
+    site, = report["affected_callers"]["sites"]
+    assert site["path"] == "quoted.sh"
+    assert [(site["path"], site["unit_key"])] == captured
+
+
 def test_partial_caller_discovery_cannot_baseline_an_identical_tree(deletion_repo, provider, connection, monkeypatch):
     repo = deletion_repo
     kwargs = {"base": "main", "connection": connection, "overrides": {"skip_unchanged": True}}

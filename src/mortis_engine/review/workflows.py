@@ -111,6 +111,8 @@ async def _assess(repo, env, run, snapshot, previous, session, *, candidate_id=N
         instructions += (" The finding concerns a possible dependency on a deleted or renamed file. "
                          "Check reachability, replacement modules, aliases and working fallbacks. A matching "
                          "name alone is insufficient. Request original or current evidence if needed.")
+    if context.get("attribution", {}).get("affected_changes"):
+        instructions += assessment.AFFECTED_CHANGE_INSTRUCTIONS
     if options.get("review_mode") == "all":
         instructions = instructions.replace("introduced by the change", "present in the supplied snapshot")
     for round in range(3):
@@ -283,6 +285,9 @@ async def generate_summary(repo, env, report, options, session):
         instructions += (" Identify the removed or renamed dependency and the examined caller sites. "
                          "Caller ranges describe limited review scope. A discovered reference alone "
                          "does not establish breakage.")
+        if options.get("_assessment_attribution") == assessment.ATTRIBUTION_VERSION:
+            instructions += (" Use only the top-level paths list in groups[].paths and diagram.nodes[].paths. "
+                             "Describe unchanged caller sites in the narrative or group descriptions.")
     if options.get("review_mode") == "all":
         instructions = instructions.replace("pull request changes", "repository snapshot").replace("changed paths", "paths")
     if context["diagram_enabled"]:
